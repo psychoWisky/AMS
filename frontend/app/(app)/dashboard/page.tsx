@@ -27,7 +27,7 @@ export default function DashboardPage() {
   return (
     <div className="p-6 max-w-6xl mx-auto">
       <div className="mb-8">
-        <h1 className="text-2xl font-bold text-gray-900">Welcome back, {user?.full_name?.split(" ")[0]}!</h1>
+        <h1 className="text-3xl font-bold text-gray-900">Welcome back, {user?.full_name?.split(" ")[0]}!</h1>
         <p className="text-gray-700 mt-1">{ROLES[role as keyof typeof ROLES] ?? role} · AVFU Academic Management System</p>
       </div>
 

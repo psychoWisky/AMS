@@ -44,8 +44,8 @@ export function AMSSidebar({ collapsed, onToggle }: { collapsed: boolean; onTogg
         </div>
         {!collapsed && (
           <div>
-            <p className="text-sm font-bold text-[#1A1A2E]">AVFU AMS</p>
-            <p className="text-xs text-gray-700">Academic System</p>
+            <p className="text-base font-bold text-[#1A1A2E]">AVFU AMS</p>
+            <p className="text-sm text-gray-700">Academic System</p>
           </div>
         )}
       </div>
@@ -60,7 +60,7 @@ export function AMSSidebar({ collapsed, onToggle }: { collapsed: boolean; onTogg
                 active ? "bg-[#E6F4F4] text-[#0D6E6E] font-semibold" : "text-gray-700 hover:bg-gray-50 hover:text-[#0D6E6E]")}>
               {active && <div className="absolute left-0 top-1.5 bottom-1.5 w-1 rounded-full bg-[#0D6E6E]" />}
               <item.icon size={18} className={cn("shrink-0", active ? "text-[#0D6E6E]" : "text-gray-600 group-hover:text-[#0D6E6E]")} />
-              {!collapsed && <span className="text-sm truncate">{item.label}</span>}
+              {!collapsed && <span className="text-base truncate">{item.label}</span>}
             </a>
           );
         })}
@@ -71,11 +71,11 @@ export function AMSSidebar({ collapsed, onToggle }: { collapsed: boolean; onTogg
         <button onClick={logout} title={collapsed ? "Logout" : undefined}
           className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-gray-700 hover:bg-red-50 hover:text-red-600 transition-colors">
           <LogOut size={18} className="shrink-0" />
-          {!collapsed && <span className="text-sm">Logout</span>}
+          {!collapsed && <span className="text-base">Logout</span>}
         </button>
         <button onClick={onToggle}
           className="w-full flex items-center justify-center gap-2 py-2 text-sm text-gray-600 hover:text-[#0D6E6E] transition-colors">
-          {collapsed ? <ChevronRight size={15} /> : <><ChevronLeft size={15} /><span>Collapse</span></>}
+          {collapsed ? <ChevronRight size={15} /> : <><ChevronLeft size={15} /><span className="text-base">Collapse</span></>}
         </button>
       </div>
     </aside>

@@ -30,7 +30,7 @@ export default function NotificationsPage() {
   return (
     <div className="p-6 max-w-3xl mx-auto">
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2"><Bell size={24} className="text-[#0D6E6E]" />Notifications</h1>
+        <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2"><Bell size={24} className="text-[#0D6E6E]" />Notifications</h1>
         {notifications.some((n) => !n.is_read) && (
           <button onClick={() => markAll.mutate()} className="flex items-center gap-2 text-sm text-[#0D6E6E] hover:underline">
             <CheckCheck size={15} /> Mark all read
@@ -52,8 +52,8 @@ export default function NotificationsPage() {
                 {n.is_read && <div className="w-2 h-2 shrink-0" />}
                 <div className="flex-1">
                   <div className="flex items-center gap-2 mb-1">
-                    <span className={`px-2 py-0.5 rounded text-xs font-semibold ${TYPE_COLOR[n.type] ?? "bg-gray-100 text-gray-600"}`}>{n.type}</span>
-                    <span className="text-xs text-gray-600">{formatDate(n.created_at, "relative")}</span>
+                    <span className={`px-2 py-0.5 rounded text-sm font-semibold ${TYPE_COLOR[n.type] ?? "bg-gray-100 text-gray-600"}`}>{n.type}</span>
+                    <span className="text-sm text-gray-600">{formatDate(n.created_at, "relative")}</span>
                   </div>
                   <p className="text-sm font-semibold text-gray-900">{n.title}</p>
                   {n.message && <p className="text-sm text-gray-600 mt-0.5">{n.message}</p>}

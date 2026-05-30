@@ -38,18 +38,18 @@ export default function LoginPage() {
             <GraduationCap size={32} className="text-white" />
           </div>
           <h1 className="text-2xl font-bold text-gray-900">AVFU AMS</h1>
-          <p className="text-gray-700 text-sm mt-1">Academic Management System</p>
+          <p className="text-gray-700 text-base mt-1">Academic Management System</p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-sm font-semibold text-gray-700 mb-1.5">Email</label>
+            <label className="block text-base font-semibold text-gray-700 mb-1.5">Email</label>
             <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required
               placeholder="your@avfu.ac.in"
               className="w-full border border-gray-300 rounded-xl px-4 py-3 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
           </div>
           <div>
-            <label className="block text-sm font-semibold text-gray-700 mb-1.5">Password</label>
+            <label className="block text-base font-semibold text-gray-700 mb-1.5">Password</label>
             <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required
               placeholder="••••••••"
               className="w-full border border-gray-300 rounded-xl px-4 py-3 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
@@ -62,7 +62,7 @@ export default function LoginPage() {
 
         <div className="mt-6 p-4 bg-gray-50 rounded-xl text-sm text-gray-600">
           <p className="font-semibold mb-2">Demo Credentials</p>
-          <div className="space-y-1 font-mono text-xs">
+          <div className="space-y-1 font-mono text-sm">
             <p>superadmin@avfu.ac.in / Admin@123</p>
             <p>faculty1@avfu.ac.in / Admin@123</p>
             <p>student1@avfu.ac.in / Test@123</p>

@@ -42,13 +42,21 @@ export default function CalendarPage() {
   const createCal = useMutation({
     mutationFn: (d: typeof form) => api.post("/academic/calendars", d),
     onSuccess: () => { toast.success("Calendar created."); qc.invalidateQueries({ queryKey: ["ams-calendars"] }); setShowCreate(false); setForm({ name: "", academic_year: "", start_date: "", end_date: "" }); },
-    onError: () => toast.error("Failed to create calendar."),
+    onError: (err: unknown) => {
+      const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+      const msg = Array.isArray(detail) ? detail.map((e: { msg: string }) => e.msg).join(", ") : (typeof detail === "string" ? detail : "Failed to create calendar.");
+      toast.error(msg);
+    },
   });
 
   const createSem = useMutation({
     mutationFn: (d: typeof semForm & { calendar_id: string }) => api.post("/academic/semesters", d),
     onSuccess: () => { toast.success("Semester created."); qc.invalidateQueries({ queryKey: ["ams-semesters", expanded] }); setShowSemCreate(null); },
-    onError: () => toast.error("Failed to create semester."),
+    onError: (err: unknown) => {
+      const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+      const msg = Array.isArray(detail) ? detail.map((e: { msg: string }) => e.msg).join(", ") : (typeof detail === "string" ? detail : "Failed to create semester.");
+      toast.error(msg);
+    },
   });
 
   const updateStatus = useMutation({
@@ -63,12 +71,12 @@ export default function CalendarPage() {
     <div className="p-6 max-w-5xl mx-auto">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2"><CalendarDays size={24} className="text-[#0D6E6E]" />Academic Calendar</h1>
-          <p className="text-gray-700 text-sm mt-1">Manage academic sessions, semesters, and key dates</p>
+          <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2"><CalendarDays size={24} className="text-[#0D6E6E]" />Academic Calendar</h1>
+          <p className="text-gray-700 text-base mt-1">Manage academic sessions, semesters, and key dates</p>
         </div>
         {isAdmin && (
           <button onClick={() => setShowCreate(true)}
-            className="flex items-center gap-2 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-xl font-semibold text-sm hover:bg-[#178F8F]">
+            className="flex items-center gap-2 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-xl font-semibold text-base hover:bg-[#178F8F]">
             <Plus size={16} /> New Calendar
           </button>
         )}
@@ -78,21 +86,28 @@ export default function CalendarPage() {
       {showCreate && (
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
-            <h3 className="text-lg font-bold mb-4">Create Academic Calendar</h3>
+            <h3 className="text-xl font-bold mb-4">Create Academic Calendar</h3>
             <div className="space-y-3">
               {[["Name", "name", "text", "e.g. 2024-25"], ["Academic Year", "academic_year", "text", "e.g. 2024-25"], ["Start Date", "start_date", "date", ""], ["End Date", "end_date", "date", ""]].map(([label, key, type, ph]) => (
                 <div key={key}>
-                  <label className="block text-sm font-semibold text-gray-700 mb-1">{label}</label>
+                  <label className="block text-base font-semibold text-gray-700 mb-1">{label}</label>
                   <input type={type} placeholder={ph} value={(form as Record<string, string>)[key]}
                     onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
-                    className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+                    className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
                 </div>
               ))}
             </div>
             <div className="flex gap-3 mt-5">
-              <button onClick={() => setShowCreate(false)} className="flex-1 py-2.5 border border-gray-200 rounded-xl text-sm font-medium hover:bg-gray-50">Cancel</button>
-              <button onClick={() => createCal.mutate(form)} disabled={createCal.isPending}
-                className="flex-1 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-sm font-bold hover:bg-[#178F8F] disabled:opacity-60">
+              <button onClick={() => setShowCreate(false)} className="flex-1 py-2.5 border border-gray-200 rounded-xl text-base font-medium hover:bg-gray-50">Cancel</button>
+              <button
+                onClick={() => {
+                  if (!form.name.trim() || !form.academic_year.trim() || !form.start_date || !form.end_date) {
+                    toast.error("Please fill in all fields before creating."); return;
+                  }
+                  createCal.mutate(form);
+                }}
+                disabled={createCal.isPending}
+                className="flex-1 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-base font-bold hover:bg-[#178F8F] disabled:opacity-60">
                 {createCal.isPending ? "Creating…" : "Create"}
               </button>
             </div>
@@ -111,11 +126,11 @@ export default function CalendarPage() {
                 <h3 className="font-bold text-gray-900">{cal.name}</h3>
                 <p className="text-sm text-gray-700">{formatDate(cal.start_date, "short")} – {formatDate(cal.end_date, "short")}</p>
               </div>
-              <span className={`px-3 py-1 rounded-full text-xs font-semibold ${STATUS_COLOR[cal.status] ?? "bg-gray-100"}`}>{cal.status}</span>
+              <span className={`px-3 py-1 rounded-full text-sm font-semibold ${STATUS_COLOR[cal.status] ?? "bg-gray-100"}`}>{cal.status}</span>
               {isAdmin && (
                 <select value={cal.status} onChange={(e) => updateStatus.mutate({ id: cal.id, type: "cal", status: e.target.value })}
                   onClick={(e) => e.stopPropagation()}
-                  className="text-xs border border-gray-200 rounded-lg px-2 py-1 focus:outline-none">
+                  className="text-sm border border-gray-200 rounded-lg px-2 py-1 focus:outline-none">
                   {["draft","active","closed"].map((s) => <option key={s} value={s}>{s}</option>)}
                 </select>
               )}
@@ -124,9 +139,9 @@ export default function CalendarPage() {
             {expanded === cal.id && (
               <div className="border-t border-gray-100 px-4 pb-4">
                 <div className="flex items-center justify-between mb-3 pt-3">
-                  <p className="text-sm font-semibold text-gray-700">Semesters</p>
+                  <p className="text-base font-semibold text-gray-700">Semesters</p>
                   {isAdmin && <button onClick={() => setShowSemCreate(cal.id)}
-                    className="text-xs flex items-center gap-1 text-[#0D6E6E] hover:underline"><Plus size={12} /> Add Semester</button>}
+                    className="text-sm flex items-center gap-1 text-[#0D6E6E] hover:underline"><Plus size={12} /> Add Semester</button>}
                 </div>
 
                 {showSemCreate === cal.id && (
@@ -137,17 +152,24 @@ export default function CalendarPage() {
                         ["Reg Start", "registration_start", "date", ""], ["Exam Start", "exam_start", "date", ""],
                         ["Exam End", "exam_end", "date", ""], ["Result Declaration", "result_declaration", "date", ""]].map(([label, key, type, ph]) => (
                         <div key={key}>
-                          <label className="block text-xs font-semibold text-gray-600 mb-0.5">{label}</label>
+                          <label className="block text-base font-semibold text-gray-600 mb-0.5">{label}</label>
                           <input type={type} placeholder={ph} value={(semForm as Record<string, string>)[key]}
                             onChange={(e) => setSemForm((f) => ({ ...f, [key]: e.target.value }))}
-                            className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-[#0D6E6E]" />
+                            className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-base focus:outline-none focus:ring-1 focus:ring-[#0D6E6E]" />
                         </div>
                       ))}
                     </div>
                     <div className="flex gap-2">
-                      <button onClick={() => setShowSemCreate(null)} className="flex-1 py-2 border border-gray-200 rounded-lg text-xs font-medium">Cancel</button>
-                      <button onClick={() => createSem.mutate({ ...semForm, calendar_id: cal.id })} disabled={createSem.isPending}
-                        className="flex-1 py-2 bg-[#0D6E6E] text-white rounded-lg text-xs font-bold">
+                      <button onClick={() => setShowSemCreate(null)} className="flex-1 py-2 border border-gray-200 rounded-lg text-base font-medium">Cancel</button>
+                      <button
+                        onClick={() => {
+                          if (!semForm.name.trim() || !semForm.start_date || !semForm.end_date) {
+                            toast.error("Semester name, start date and end date are required."); return;
+                          }
+                          createSem.mutate({ ...semForm, calendar_id: cal.id });
+                        }}
+                        disabled={createSem.isPending}
+                        className="flex-1 py-2 bg-[#0D6E6E] text-white rounded-lg text-base font-bold">
                         {createSem.isPending ? "Saving…" : "Add Semester"}
                       </button>
                     </div>
@@ -160,23 +182,23 @@ export default function CalendarPage() {
                       <BookOpen size={15} className="text-[#0D6E6E] shrink-0" />
                       <div className="flex-1">
                         <p className="text-sm font-semibold text-gray-800">{sem.name}</p>
-                        <p className="text-xs text-gray-700">
+                        <p className="text-sm text-gray-700">
                           {formatDate(sem.start_date, "short")} – {formatDate(sem.end_date, "short")}
                           {sem.exam_start && ` · Exam: ${formatDate(sem.exam_start, "short")}`}
                           {sem.result_declaration && ` · Results: ${formatDate(sem.result_declaration, "short")}`}
                         </p>
                       </div>
-                      <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${STATUS_COLOR[sem.status] ?? "bg-gray-100"}`}>{sem.status}</span>
+                      <span className={`px-2 py-0.5 rounded-full text-sm font-semibold ${STATUS_COLOR[sem.status] ?? "bg-gray-100"}`}>{sem.status}</span>
                       {isAdmin && (
                         <select value={sem.status} onChange={(e) => updateStatus.mutate({ id: sem.id, type: "sem", status: e.target.value })}
-                          className="text-xs border border-gray-200 rounded-lg px-2 py-1 focus:outline-none">
+                          className="text-sm border border-gray-200 rounded-lg px-2 py-1 focus:outline-none">
                           {["upcoming","active","completed"].map((s) => <option key={s} value={s}>{s}</option>)}
                         </select>
                       )}
                     </div>
                   ))}
                   {semesters.filter((s) => s.calendar_id === cal.id).length === 0 && (
-                    <p className="text-xs text-gray-600 text-center py-4">No semesters added yet.</p>
+                    <p className="text-sm text-gray-600 text-center py-4">No semesters added yet.</p>
                   )}
                 </div>
               </div>
