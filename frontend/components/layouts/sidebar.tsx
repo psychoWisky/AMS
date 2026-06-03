@@ -4,7 +4,7 @@ import { useRole } from "@/stores/auth.store";
 import { cn } from "@/lib/utils";
 import {
   LayoutDashboard, CalendarDays, BookOpen, Users, ClipboardList,
-  BarChart3, FlaskConical, Bell, Settings, ChevronLeft, ChevronRight, GraduationCap, LogOut, FileText,
+  BarChart3, FlaskConical, Bell, Settings, ChevronLeft, ChevronRight, GraduationCap, LogOut, FileText, ClipboardCheck,
 } from "lucide-react";
 import { useAuthStore } from "@/stores/auth.store";
 import { api } from "@/services/api";
@@ -18,6 +18,7 @@ const NAV = [
   { label: "Grading",         icon: BarChart3,       href: "/grading",      roles: ["super_admin","academic_admin","hod","faculty","registrar","examiner"] },
   { label: "Admit Card",      icon: FileText,        href: "/admit-card",   roles: ["super_admin","academic_admin","hod","registrar","examiner","student"] },
   { label: "Research / PG",   icon: FlaskConical,    href: "/research",     roles: ["super_admin","academic_admin","hod","faculty","student","research_supervisor"] },
+  { label: "Admissions",      icon: ClipboardCheck,  href: "/admissions",   roles: ["super_admin","academic_admin","registrar"] },
   { label: "Users",           icon: Users,           href: "/users",        roles: ["super_admin","academic_admin"] },
   { label: "Notifications",   icon: Bell,            href: "/notifications",roles: [] },
 ];
