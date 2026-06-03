@@ -84,34 +84,179 @@ export default function AdmitCardPage() {
   });
 
   function handlePrint() {
-    const el = printRef.current;
-    if (!el) return;
-    const win = window.open("", "_blank", "width=900,height=700");
+    if (!admitCard) return;
+    const win = window.open("", "_blank", "width=900,height=750");
     if (!win) return;
-    win.document.write(`
-      <html><head><title>Admit Card — ${admitCard?.student.full_name}</title>
-      <style>
-        body { font-family: Arial, sans-serif; padding: 32px; color: #111; }
-        h1 { font-size: 22px; text-align: center; margin-bottom: 4px; }
-        .subtitle { text-align: center; color: #555; font-size: 14px; margin-bottom: 24px; }
-        .header-bar { background: #0D6E6E; color: white; padding: 12px 20px; border-radius: 8px; margin-bottom: 20px; display:flex; justify-content:space-between; align-items:center; }
-        .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px; }
-        .info-box { border: 1px solid #ddd; border-radius: 6px; padding: 10px 14px; }
-        .label { font-size: 11px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px; }
-        .value { font-size: 15px; font-weight: bold; color: #111; }
-        table { width: 100%; border-collapse: collapse; margin-top: 8px; }
-        th { background: #f0f7f7; padding: 8px 12px; text-align: left; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
-        td { padding: 8px 12px; border-bottom: 1px solid #eee; font-size: 14px; }
-        .sig-row { display: flex; justify-content: space-between; margin-top: 40px; }
-        .sig-box { text-align: center; border-top: 1px solid #999; padding-top: 6px; width: 160px; font-size: 12px; color: #555; }
-        .footer { margin-top: 16px; font-size: 11px; color: #888; text-align: center; border-top: 1px solid #eee; padding-top: 10px; }
-        .badge { background: #0D6E6E; color: white; border-radius: 4px; padding: 2px 8px; font-size: 11px; font-weight: bold; }
-        @media print { body { padding: 0; } }
-      </style></head><body>
-      ${el.innerHTML}
-      </body></html>`);
+    const card = admitCard;
+    const examPeriod = card.exam.exam_start
+      ? `${new Date(card.exam.exam_start).toLocaleDateString("en-IN", { day: "2-digit", month: "long", year: "numeric" })} to ${new Date(card.exam.exam_end!).toLocaleDateString("en-IN", { day: "2-digit", month: "long", year: "numeric" })}`
+      : "To be announced";
+    const generatedOn = new Date(card.generated_at).toLocaleDateString("en-IN", { day: "2-digit", month: "long", year: "numeric" });
+
+    const courseRows = card.courses.map((c, i) => `
+      <tr style="background:${i % 2 === 0 ? "#fff" : "#f7fafa"}">
+        <td style="padding:9px 14px;font-family:monospace;font-weight:700;color:#0D6E6E;border-bottom:1px solid #e5e7eb">${c.course_number}</td>
+        <td style="padding:9px 14px;border-bottom:1px solid #e5e7eb">${c.course_title}</td>
+        <td style="padding:9px 14px;text-align:center;border-bottom:1px solid #e5e7eb">${c.credit_structure}</td>
+        <td style="padding:9px 14px;text-align:center;border-bottom:1px solid #e5e7eb">${c.section ?? "—"}</td>
+      </tr>`).join("");
+
+    win.document.write(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>Admit Card — ${card.student.full_name}</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: "Segoe UI", Arial, sans-serif; background: #f0f4f4; display: flex; justify-content: center; padding: 30px 20px; color: #1a1a1a; }
+    .page { width: 780px; background: #fff; border: 2px solid #0D6E6E; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 24px rgba(0,0,0,0.12); }
+    /* Header */
+    .header { background: linear-gradient(135deg, #0a5555 0%, #0D6E6E 60%, #0f8080 100%); color: #fff; padding: 24px 32px; display: flex; align-items: center; gap: 20px; }
+    .emblem { width: 72px; height: 72px; border-radius: 50%; background: rgba(255,255,255,0.15); border: 2px solid rgba(255,255,255,0.4); display: flex; align-items: center; justify-content: center; font-size: 28px; flex-shrink: 0; }
+    .header-text { flex: 1; }
+    .univ-name { font-size: 18px; font-weight: 700; letter-spacing: 0.3px; }
+    .univ-sub { font-size: 12px; opacity: 0.8; margin-top: 2px; }
+    .doc-title { text-align: right; }
+    .doc-title h2 { font-size: 20px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; border: 2px solid rgba(255,255,255,0.5); padding: 6px 16px; border-radius: 6px; }
+    .doc-title p { font-size: 11px; opacity: 0.75; margin-top: 4px; }
+    /* Notice bar */
+    .notice { background: #fff3cd; border-bottom: 1px solid #ffc107; padding: 8px 32px; font-size: 12px; color: #7a5800; font-weight: 600; text-align: center; letter-spacing: 0.2px; }
+    /* Body */
+    .body { padding: 24px 32px; }
+    /* Ref row */
+    .ref-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; padding-bottom: 14px; border-bottom: 2px dashed #b2d8d8; }
+    .ref-label { font-size: 11px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; }
+    .ref-value { font-weight: 700; font-family: monospace; color: #0D6E6E; font-size: 14px; }
+    /* Info grid */
+    .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px; }
+    .info-box { border: 1px solid #d1e8e8; border-radius: 8px; padding: 10px 14px; background: #f7fafa; }
+    .info-box.full { grid-column: 1 / -1; }
+    .info-label { font-size: 10px; font-weight: 700; color: #0D6E6E; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 3px; }
+    .info-value { font-size: 14px; font-weight: 700; color: #111; }
+    /* Section heading */
+    .section-heading { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: #0D6E6E; border-left: 3px solid #0D6E6E; padding-left: 10px; margin-bottom: 10px; }
+    /* Course table */
+    table { width: 100%; border-collapse: collapse; border: 1px solid #d1e8e8; border-radius: 8px; overflow: hidden; margin-bottom: 24px; font-size: 13px; }
+    thead { background: #0D6E6E; color: #fff; }
+    thead th { padding: 10px 14px; text-align: left; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+    thead th:last-child, thead th:nth-last-child(2) { text-align: center; }
+    /* Instructions */
+    .instructions { background: #f0f7f7; border: 1px solid #b2d8d8; border-radius: 8px; padding: 14px 18px; margin-bottom: 24px; }
+    .instructions h4 { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: #0D6E6E; margin-bottom: 8px; }
+    .instructions ol { padding-left: 18px; }
+    .instructions li { font-size: 11.5px; color: #444; margin-bottom: 4px; line-height: 1.5; }
+    /* Signatures */
+    .sig-row { display: flex; justify-content: space-between; align-items: flex-end; margin-top: 8px; }
+    .sig-box { text-align: center; width: 180px; }
+    .sig-line { border-top: 1.5px solid #555; padding-top: 6px; margin-top: 40px; font-size: 11.5px; color: #444; font-weight: 600; }
+    .sig-sub { font-size: 10px; color: #888; margin-top: 2px; }
+    /* Footer */
+    .footer { background: #0D6E6E; color: rgba(255,255,255,0.8); text-align: center; padding: 8px 20px; font-size: 10.5px; }
+    @media print {
+      body { background: #fff; padding: 0; }
+      .page { box-shadow: none; border-radius: 0; width: 100%; border: none; }
+    }
+  </style>
+</head>
+<body>
+<div class="page">
+  <div class="header">
+    <div class="emblem">🎓</div>
+    <div class="header-text">
+      <div class="univ-name">Assam Veterinary and Fishery University</div>
+      <div class="univ-sub">AVFU — Academic Management System</div>
+      <div class="univ-sub" style="margin-top:4px">Khanapara, Guwahati, Assam — 781022</div>
+    </div>
+    <div class="doc-title">
+      <h2>Admit Card</h2>
+      <p>Examination ${card.exam.academic_year}</p>
+    </div>
+  </div>
+
+  <div class="notice">⚠ This admit card is valid only with a valid photo identity proof. Carry it to every examination hall.</div>
+
+  <div class="body">
+    <div class="ref-row">
+      <div><div class="ref-label">Admit Card No.</div><div class="ref-value">${card.admit_card_id.slice(0, 8).toUpperCase()}-${card.admit_card_id.slice(9, 13).toUpperCase()}</div></div>
+      <div style="text-align:right"><div class="ref-label">Generated On</div><div class="ref-value" style="color:#555;font-family:sans-serif;font-size:13px">${generatedOn}</div></div>
+    </div>
+
+    <div class="info-grid">
+      <div class="info-box">
+        <div class="info-label">Student Name</div>
+        <div class="info-value">${card.student.full_name}</div>
+      </div>
+      <div class="info-box">
+        <div class="info-label">Roll Number</div>
+        <div class="info-value" style="font-family:monospace">${card.student.roll_number}</div>
+      </div>
+      <div class="info-box">
+        <div class="info-label">University ID (UID)</div>
+        <div class="info-value" style="font-family:monospace;color:#0D6E6E">${card.student.uid}</div>
+      </div>
+      <div class="info-box">
+        <div class="info-label">Email</div>
+        <div class="info-value" style="font-size:13px">${card.student.email}</div>
+      </div>
+      <div class="info-box">
+        <div class="info-label">Semester</div>
+        <div class="info-value">${card.exam.semester_name}</div>
+      </div>
+      <div class="info-box">
+        <div class="info-label">Examination Period</div>
+        <div class="info-value" style="font-size:13px">${examPeriod}</div>
+      </div>
+    </div>
+
+    <div class="section-heading">Enrolled Courses</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Course No.</th>
+          <th>Course Title</th>
+          <th style="text-align:center">Credits</th>
+          <th style="text-align:center">Section</th>
+        </tr>
+      </thead>
+      <tbody>${courseRows}</tbody>
+    </table>
+
+    <div class="instructions">
+      <h4>Important Instructions</h4>
+      <ol>
+        <li>This admit card must be presented at the examination centre before each paper.</li>
+        <li>Candidates must carry a valid government-issued photo identity proof along with this admit card.</li>
+        <li>Use of mobile phones, electronic devices, or unfair means will lead to cancellation of candidature.</li>
+        <li>Candidates must be seated 15 minutes before the commencement of each examination.</li>
+        <li>This is a system-generated document and does not require a physical signature to be valid.</li>
+      </ol>
+    </div>
+
+    <div class="sig-row">
+      <div class="sig-box">
+        <div class="sig-line">Student Signature</div>
+        <div class="sig-sub">${card.student.full_name}</div>
+      </div>
+      <div style="text-align:center;font-size:11px;color:#888">
+        <div style="font-size:22px;margin-bottom:4px">✓</div>
+        <div style="color:#0D6E6E;font-weight:700;font-size:12px">Verified &amp; Approved</div>
+        <div>Academic Section, AVFU</div>
+      </div>
+      <div class="sig-box">
+        <div class="sig-line">Controller of Examinations</div>
+        <div class="sig-sub">Assam Veterinary and Fishery University</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    Assam Veterinary and Fishery University (AVFU) &nbsp;|&nbsp; Khanapara, Guwahati, Assam &nbsp;|&nbsp; This admit card is computer-generated
+  </div>
+</div>
+<script>window.onload = function() { window.print(); }<\/script>
+</body>
+</html>`);
     win.document.close();
-    setTimeout(() => win.print(), 500);
   }
 
   const semesterLabel = (id: string) => {
@@ -296,7 +441,7 @@ export default function AdmitCardPage() {
             <div className="bg-[#0D6E6E] text-white px-8 py-5 flex items-center justify-between">
               <div>
                 <h1 className="text-2xl font-bold">AVFU — Admit Card</h1>
-                <p className="text-base opacity-90">Atal Bihari Vajpayee Farming University</p>
+                <p className="text-base opacity-90">Assam Veterinary and Fishery University</p>
               </div>
               <div className="text-right text-sm opacity-80">
                 <p>Academic Year: <strong>{admitCard.exam.academic_year}</strong></p>
