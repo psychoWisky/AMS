@@ -35,3 +35,17 @@ export const ROLES = {
 };
 
 export const ADMIN_ROLES = ["super_admin", "academic_admin", "registrar", "examiner", "hod"];
+
+// Centralized labels for CommitteeMember.role (Advisory Committees, Module 3 Phase A).
+// Only the values already in use are mapped here — the newly-requested vocabulary
+// (Member Major / Member Minor / Supporting / Member of Others) is NOT added until
+// the business confirms how it relates to these existing stored values.
+export const COMMITTEE_ROLE_LABELS: Record<string, string> = {
+  major_advisor: "Major Advisor",
+  co_major_advisor: "Co-Major Advisor",
+  member: "Member",
+};
+
+export function committeeRoleLabel(role: string): string {
+  return COMMITTEE_ROLE_LABELS[role] ?? role.replace(/_/g, " ");
+}
