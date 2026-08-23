@@ -184,6 +184,7 @@ def _offering_dict(o: CourseOffering, enrolled: int) -> dict:
 async def list_all_offerings(
     semester_id: Optional[UUID] = None, calendar_id: Optional[UUID] = None,
     department_id: Optional[UUID] = None, level: Optional[str] = None,
+    mine: bool = False,
     db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user),
 ):
     q = select(CourseOffering).options(
@@ -204,6 +205,23 @@ async def list_all_offerings(
             CourseOffering.status == "published",
             CourseOffering.department_id == scope["department_id"],
         )
+    elif mine:
+        # "My courses" — scoping mirrors _authorize_offering_management's role priority
+        # (enrollment.py) applied as a list filter instead of a single-offering guard.
+        # The current user is always derived server-side; a client can never widen this
+        # to another faculty member's assignments.
+        if user.role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR):
+            pass  # unrestricted, same as _authorize_offering_management
+        elif user.role == UserRole.HOD:
+            if not user.department_id:
+                return []
+            q = q.where(CourseOffering.department_id == user.department_id)
+        elif user.role == UserRole.FACULTY:
+            q = q.where(CourseOffering.id.in_(
+                select(OfferingFaculty.offering_id).where(OfferingFaculty.faculty_id == user.id)
+            ))
+        else:
+            return []  # fail closed for roles with no defined "mine" scope
     else:
         if department_id: q = q.where(CourseOffering.department_id == department_id)
         if level: q = q.join(Course, Course.id == CourseOffering.course_id).where(Course.program_level == level)
@@ -246,7 +264,7 @@ async def get_offering(offering_id: UUID, db: AsyncSession = Depends(get_db), _:
         select(CourseOffering).options(
             selectinload(CourseOffering.course),
             selectinload(CourseOffering.department),
-            selectinload(CourseOffering.faculty_assignments).selectinload(OfferingFaculty.faculty),
+            selectinload(CourseOffering.faculty_assignments).selectinload(OfferingFaculty.faculty).selectinload(User.department),
             selectinload(CourseOffering.enrollments),
         ).where(CourseOffering.id == offering_id)
     )
@@ -264,7 +282,12 @@ async def get_offering(offering_id: UUID, db: AsyncSession = Depends(get_db), _:
         "department_id": str(o.department_id) if o.department_id else None,
         "department_name": o.department.name if o.department else None,
         "stream": o.department.stream if o.department else None,
-        "faculty": [{"id": str(fa.faculty_id), "name": fa.faculty.full_name, "role": fa.role} for fa in o.faculty_assignments],
+        "faculty": [{
+            "id": str(fa.faculty_id), "name": fa.faculty.full_name,
+            "designation": fa.faculty.designation,
+            "department_name": fa.faculty.department.name if fa.faculty.department else None,
+            "role": fa.role, "is_leader": fa.role == "primary",
+        } for fa in o.faculty_assignments],
         "enrolled_count": enrolled,
     }
 

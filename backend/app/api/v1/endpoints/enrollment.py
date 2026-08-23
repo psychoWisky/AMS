@@ -70,6 +70,7 @@ def _enroll_dict(e: StudentEnrollment) -> dict:
         "student_id": str(e.student_id),
         "student_name": e.student.full_name if e.student else None,
         "student_roll": e.student.student_roll if e.student else None,
+        "student_email": e.student.email if e.student else None,
         "offering_id": str(e.offering_id),
         "status": e.status,
         "enrolled_at": e.enrolled_at.isoformat(),

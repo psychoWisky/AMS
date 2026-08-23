@@ -14,6 +14,7 @@ const NAV = [
   { label: "Dashboard",       icon: LayoutDashboard, href: "/dashboard",    roles: [] },
   { label: "Academic Calendar",icon: CalendarDays,   href: "/calendar",     roles: ["super_admin","academic_admin","registrar","hod","faculty","student","examiner"] },
   { label: "Courses",         icon: BookOpen,        href: "/courses",      roles: ["super_admin","academic_admin","hod","faculty","student"] },
+  { label: "Teacher Courses", icon: BookOpen,        href: "/teacher-courses", roles: ["super_admin","academic_admin","hod","faculty","registrar"] },
   { label: "Enrollment",      icon: ClipboardList,   href: "/enrollment",   roles: ["super_admin","academic_admin","hod","faculty","student","registrar"] },
   { label: "Grading",         icon: BarChart3,       href: "/grading",      roles: ["super_admin","academic_admin","hod","faculty","registrar","examiner"] },
   { label: "Admit Card",      icon: FileText,        href: "/admit-card",   roles: ["super_admin","academic_admin","hod","registrar","examiner","student"] },
