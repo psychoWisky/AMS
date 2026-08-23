@@ -9,6 +9,7 @@ interface AuthUser {
   role: string;
   designation: string | null;
   department_id: string | null;
+  program_id: string | null;
 }
 
 interface AuthState {

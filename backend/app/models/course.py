@@ -42,6 +42,7 @@ class CourseOffering(Base):
     calendar_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_academic_calendars.id"))
     semester_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_semesters.id"))
     course_id: Mapped[uuid.UUID]   = mapped_column(UUID(as_uuid=True), ForeignKey("ams_courses.id"))
+    department_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_departments.id"))
     max_enrollment: Mapped[int]    = mapped_column(Integer, default=60)
     section: Mapped[str | None]    = mapped_column(String(20))   # A / B / C
     practical_group: Mapped[str | None] = mapped_column(String(20))  # G1 / G2
@@ -50,11 +51,12 @@ class CourseOffering(Base):
     created_at: Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
-    __table_args__ = (UniqueConstraint("semester_id", "course_id", "section", name="uq_offering_section"),)
+    __table_args__ = (UniqueConstraint("semester_id", "course_id", "department_id", "section", name="uq_offering_section"),)
 
     calendar: Mapped["AcademicCalendar"] = relationship("AcademicCalendar", foreign_keys=[calendar_id])
     semester: Mapped["Semester"] = relationship("Semester", back_populates="offerings")
     course: Mapped["Course"] = relationship("Course", back_populates="offerings")
+    department: Mapped["Department | None"] = relationship("Department", foreign_keys=[department_id])
     faculty_assignments: Mapped[list["OfferingFaculty"]] = relationship("OfferingFaculty", back_populates="offering", cascade="all, delete-orphan")
     enrollments: Mapped[list["StudentEnrollment"]] = relationship("StudentEnrollment", back_populates="offering")
     grade_sheets: Mapped[list["GradeSheet"]] = relationship("GradeSheet", back_populates="offering")

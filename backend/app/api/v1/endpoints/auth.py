@@ -6,7 +6,7 @@ from typing import Optional, List
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 from pydantic import BaseModel, EmailStr
 
 from app.db.base import get_db
@@ -44,6 +44,17 @@ class CreateUserRequest(BaseModel):
     student_roll: Optional[str] = None
     admission_year: Optional[int] = None
 
+class UpdateUserRequest(BaseModel):
+    role: Optional[UserRole] = None
+    designation: Optional[str] = None
+    mobile: Optional[str] = None
+    department_id: Optional[UUID] = None
+    program_id: Optional[UUID] = None
+    employee_id: Optional[str] = None
+    student_roll: Optional[str] = None
+    admission_year: Optional[int] = None
+    is_active: Optional[bool] = None
+
 
 def _user_dict(u: User) -> dict:
     return {
@@ -53,6 +64,7 @@ def _user_dict(u: User) -> dict:
         "role": u.role.value,
         "designation": u.designation,
         "department_id": str(u.department_id) if u.department_id else None,
+        "program_id": str(u.program_id) if u.program_id else None,
     }
 
 
@@ -144,6 +156,35 @@ async def create_user(
     db.add(user)
     await db.commit()
     return {"message": "User created.", "id": str(user.id)}
+
+
+@router.patch("/users/{user_id}")
+async def update_user(
+    user_id: UUID,
+    body: UpdateUserRequest,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+):
+    target = await db.get(User, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    demoting = body.role is not None and body.role != UserRole.SUPER_ADMIN
+    deactivating = body.is_active is False
+    if target.role == UserRole.SUPER_ADMIN and (demoting or deactivating):
+        count_result = await db.execute(
+            select(func.count()).select_from(User).where(
+                User.role == UserRole.SUPER_ADMIN, User.is_active == True,
+            )
+        )
+        if count_result.scalar() <= 1:
+            raise HTTPException(status_code=400, detail="Cannot change role/status: at least one active Super Admin must remain.")
+
+    for field, value in body.model_dump(exclude_none=True).items():
+        setattr(target, field, value)
+
+    await db.commit()
+    return {"message": "User updated."}
 
 
 @router.get("/users")

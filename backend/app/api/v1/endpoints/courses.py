@@ -9,7 +9,7 @@ from pydantic import BaseModel, model_validator
 
 from app.db.base import get_db
 from app.core.dependencies import get_current_user, require_roles
-from app.models.user import User, UserRole
+from app.models.user import User, UserRole, Program, Department
 from app.models.course import Course, CourseOffering, OfferingFaculty
 
 router = APIRouter(prefix="/courses", tags=["Courses"])
@@ -61,6 +61,7 @@ class OfferingIn(BaseModel):
     calendar_id: UUID
     semester_id: UUID
     course_id: UUID
+    department_id: UUID
     max_enrollment: int = 60
     section: Optional[str] = None
     practical_group: Optional[str] = None
@@ -72,6 +73,9 @@ class OfferingOut(BaseModel):
     status: str
     course_number: Optional[str] = None
     course_title: Optional[str] = None
+    department_id: Optional[UUID] = None
+    department_name: Optional[str] = None
+    stream: Optional[str] = None
     faculty_names: List[str] = []
     enrolled_count: int = 0
     model_config = {"from_attributes": True}
@@ -145,33 +149,75 @@ async def update_course_status(
 
 # ── Offerings ─────────────────────────────────────────────────────────────────
 
+async def _resolve_student_scope(user: User, db: AsyncSession) -> Optional[dict]:
+    """Resolve a student's (program_level, department_id) from User -> Program -> Department.
+    Returns None if the student's academic program is not fully configured (fail closed)."""
+    if not user.program_id:
+        return None
+    program = await db.get(Program, user.program_id)
+    if not program or not program.department_id:
+        return None
+    department = await db.get(Department, program.department_id)
+    if not department or not department.stream:
+        return None
+    return {"level": program.level, "department_id": program.department_id}
+
+
+def _offering_dict(o: CourseOffering, enrolled: int) -> dict:
+    return {
+        "id": str(o.id), "calendar_id": str(o.calendar_id),
+        "semester_id": str(o.semester_id), "course_id": str(o.course_id),
+        "course_number": o.course.course_number if o.course else None,
+        "course_title": o.course.title if o.course else None,
+        "credit_structure": o.course.credit_structure if o.course else None,
+        "max_enrollment": o.max_enrollment, "section": o.section,
+        "practical_group": o.practical_group, "status": o.status,
+        "department_id": str(o.department_id) if o.department_id else None,
+        "department_name": o.department.name if o.department else None,
+        "stream": o.department.stream if o.department else None,
+        "faculty_names": [fa.faculty.full_name for fa in o.faculty_assignments if fa.faculty],
+        "enrolled_count": enrolled,
+    }
+
+
 @router.get("/offerings/all")
 async def list_all_offerings(
     semester_id: Optional[UUID] = None, calendar_id: Optional[UUID] = None,
-    db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user),
+    department_id: Optional[UUID] = None, level: Optional[str] = None,
+    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user),
 ):
     q = select(CourseOffering).options(
         selectinload(CourseOffering.course),
+        selectinload(CourseOffering.department),
         selectinload(CourseOffering.faculty_assignments).selectinload(OfferingFaculty.faculty),
         selectinload(CourseOffering.enrollments),
     )
     if semester_id: q = q.where(CourseOffering.semester_id == semester_id)
     if calendar_id: q = q.where(CourseOffering.calendar_id == calendar_id)
+
+    if user.role == UserRole.STUDENT:
+        # Eligibility is derived server-side; client-supplied department_id/level are ignored.
+        scope = await _resolve_student_scope(user, db)
+        if not scope:
+            return []
+        q = q.where(
+            CourseOffering.status == "published",
+            CourseOffering.department_id == scope["department_id"],
+        )
+    else:
+        if department_id: q = q.where(CourseOffering.department_id == department_id)
+        if level: q = q.join(Course, Course.id == CourseOffering.course_id).where(Course.program_level == level)
+
     result = await db.execute(q)
+    offerings = result.scalars().all()
+
+    if user.role == UserRole.STUDENT and offerings:
+        offerings = [o for o in offerings if o.course and o.course.program_level == scope["level"]]
+
     items = []
-    for o in result.scalars().all():
+    for o in offerings:
         enrolled = sum(1 for e in o.enrollments if e.status == "approved")
-        items.append({
-            "id": str(o.id), "calendar_id": str(o.calendar_id),
-            "semester_id": str(o.semester_id), "course_id": str(o.course_id),
-            "course_number": o.course.course_number if o.course else None,
-            "course_title": o.course.title if o.course else None,
-            "credit_structure": o.course.credit_structure if o.course else None,
-            "max_enrollment": o.max_enrollment, "section": o.section,
-            "practical_group": o.practical_group, "status": o.status,
-            "faculty_names": [fa.faculty.full_name for fa in o.faculty_assignments if fa.faculty],
-            "enrolled_count": enrolled,
-        })
+        items.append(_offering_dict(o, enrolled))
     return items
 
 
@@ -182,7 +228,8 @@ async def create_offering(
 ):
     offering = CourseOffering(
         calendar_id=body.calendar_id, semester_id=body.semester_id,
-        course_id=body.course_id, max_enrollment=body.max_enrollment,
+        course_id=body.course_id, department_id=body.department_id,
+        max_enrollment=body.max_enrollment,
         section=body.section, practical_group=body.practical_group,
         created_by=user.id,
     )
@@ -198,6 +245,7 @@ async def get_offering(offering_id: UUID, db: AsyncSession = Depends(get_db), _:
     result = await db.execute(
         select(CourseOffering).options(
             selectinload(CourseOffering.course),
+            selectinload(CourseOffering.department),
             selectinload(CourseOffering.faculty_assignments).selectinload(OfferingFaculty.faculty),
             selectinload(CourseOffering.enrollments),
         ).where(CourseOffering.id == offering_id)
@@ -213,6 +261,9 @@ async def get_offering(offering_id: UUID, db: AsyncSession = Depends(get_db), _:
         "credit_structure": o.course.credit_structure if o.course else None,
         "max_enrollment": o.max_enrollment, "section": o.section,
         "practical_group": o.practical_group, "status": o.status,
+        "department_id": str(o.department_id) if o.department_id else None,
+        "department_name": o.department.name if o.department else None,
+        "stream": o.department.stream if o.department else None,
         "faculty": [{"id": str(fa.faculty_id), "name": fa.faculty.full_name, "role": fa.role} for fa in o.faculty_assignments],
         "enrolled_count": enrolled,
     }

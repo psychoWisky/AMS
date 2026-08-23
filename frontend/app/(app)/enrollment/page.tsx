@@ -80,7 +80,11 @@ export default function EnrollmentPage() {
           {/* Available courses */}
           <div className="bg-white rounded-2xl border border-gray-200 p-5">
             <h2 className="font-bold text-gray-800 mb-4">Available Courses</h2>
-            {offerings.length === 0 ? <p className="text-sm text-gray-600 text-center py-8">No published offerings.</p> : (
+            {offerings.length === 0 ? (
+              <p className="text-sm text-gray-600 text-center py-8">
+                No eligible courses found. If this seems wrong, your academic program may not be configured — contact administration.
+              </p>
+            ) : (
               <div className="space-y-2">
                 {offerings.map((o) => {
                   const already = myEnrollments.some((e) => e.offering_id === o.id);

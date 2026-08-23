@@ -9,13 +9,15 @@ import { BookOpen, Plus, Search, Loader2, Globe, EyeOff } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 
 interface Course { id: string; course_number: string; title: string; credit_structure: string; course_type: string; program_level: string; status: string; department_id: string | null; }
-interface Offering { id: string; course_number: string; course_title: string; credit_structure: string; section: string | null; max_enrollment: number; enrolled_count: number; status: string; faculty_names: string[]; }
+interface Offering { id: string; course_number: string; course_title: string; credit_structure: string; section: string | null; max_enrollment: number; enrolled_count: number; status: string; faculty_names: string[]; department_id: string | null; department_name: string | null; stream: string | null; }
 interface Calendar { id: string; name: string; academic_year: string; }
 interface Semester { id: string; calendar_id: string; name: string; }
 interface FacultyUser { id: string; full_name: string; designation: string | null; }
+interface DepartmentOpt { id: string; name: string; code: string; stream: string | null; }
 
 const CREDIT_FORMATS = ["2+0","0+2","1+1","0+1","3+0","2+1","1+2","3+1","4+0","0+4","2+2"];
 const LEVELS = ["UG","PG","PhD"];
+const STREAMS = [{ value: "fisheries", label: "Fisheries" }, { value: "veterinary", label: "Veterinary" }];
 const STATUS_COLOR: Record<string, string> = { active: "bg-green-100 text-green-700", inactive: "bg-gray-100 text-gray-600", archived: "bg-red-100 text-red-700", draft: "bg-gray-100 text-gray-700", published: "bg-green-100 text-green-700", closed: "bg-red-100 text-red-700" };
 
 export default function CoursesPage() {
@@ -28,7 +30,7 @@ export default function CoursesPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [showOfferingCreate, setShowOfferingCreate] = useState(false);
   const [form, setForm] = useState({ course_number: "", title: "", credit_theory: "3", credit_practical: "0", program_level: "UG" });
-  const [offeringForm, setOfferingForm] = useState({ calendar_id: "", semester_id: "", course_id: "", max_enrollment: "60", section: "", faculty_ids: [] as string[] });
+  const [offeringForm, setOfferingForm] = useState({ calendar_id: "", semester_id: "", stream: "", department_id: "", course_id: "", max_enrollment: "60", section: "", faculty_ids: [] as string[] });
   const [confirm, setConfirm] = useState<{ action: () => void; title: string; message: string; confirmLabel: string; confirmClassName?: string } | null>(null);
 
   const { data: courses = [], isLoading } = useQuery<Course[]>({
@@ -54,6 +56,12 @@ export default function CoursesPage() {
     enabled: !!offeringForm.calendar_id,
   });
 
+  const { data: streamDepartments = [] } = useQuery<DepartmentOpt[]>({
+    queryKey: ["ams-departments-for-offering", offeringForm.stream],
+    queryFn: async () => (await api.get(`/departments?stream=${offeringForm.stream}`)).data,
+    enabled: !!offeringForm.stream,
+  });
+
   const { data: facultyUsers = [] } = useQuery<FacultyUser[]>({
     queryKey: ["ams-faculty"],
     queryFn: async () => (await api.get("/auth/users")).data.filter((u: { role: string }) => ["faculty","hod","research_supervisor"].includes(u.role)),
@@ -71,6 +79,7 @@ export default function CoursesPage() {
       calendar_id: offeringForm.calendar_id,
       semester_id: offeringForm.semester_id,
       course_id: offeringForm.course_id,
+      department_id: offeringForm.department_id,
       max_enrollment: parseInt(offeringForm.max_enrollment),
       section: offeringForm.section || null,
       faculty_ids: offeringForm.faculty_ids,
@@ -79,7 +88,7 @@ export default function CoursesPage() {
       toast.success("Offering created.");
       qc.invalidateQueries({ queryKey: ["ams-offerings"] });
       setShowOfferingCreate(false);
-      setOfferingForm({ calendar_id: "", semester_id: "", course_id: "", max_enrollment: "60", section: "", faculty_ids: [] });
+      setOfferingForm({ calendar_id: "", semester_id: "", stream: "", department_id: "", course_id: "", max_enrollment: "60", section: "", faculty_ids: [] });
     },
     onError: (e: unknown) => toast.error((e as {response?:{data?:{detail?:string}}})?.response?.data?.detail ?? "Failed to create offering."),
   });
@@ -258,6 +267,23 @@ export default function CoursesPage() {
                 </select>
               </div>
               <div>
+                <label className="block text-base font-semibold text-gray-700 mb-1">Stream *</label>
+                <select value={offeringForm.stream} onChange={(e) => setOfferingForm((f) => ({ ...f, stream: e.target.value, department_id: "" }))}
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
+                  <option value="">Select stream…</option>
+                  {STREAMS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-base font-semibold text-gray-700 mb-1">Department *</label>
+                <select value={offeringForm.department_id} onChange={(e) => setOfferingForm((f) => ({ ...f, department_id: e.target.value }))}
+                  disabled={!offeringForm.stream}
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E] disabled:opacity-50">
+                  <option value="">Select department…</option>
+                  {streamDepartments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                </select>
+              </div>
+              <div>
                 <label className="block text-base font-semibold text-gray-700 mb-1">Course *</label>
                 <select value={offeringForm.course_id} onChange={(e) => setOfferingForm((f) => ({ ...f, course_id: e.target.value }))}
                   className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
@@ -290,12 +316,12 @@ export default function CoursesPage() {
               </div>
             </div>
             <div className="flex gap-3 mt-5">
-              <button onClick={() => { setShowOfferingCreate(false); setOfferingForm({ calendar_id: "", semester_id: "", course_id: "", max_enrollment: "60", section: "", faculty_ids: [] }); }}
+              <button onClick={() => { setShowOfferingCreate(false); setOfferingForm({ calendar_id: "", semester_id: "", stream: "", department_id: "", course_id: "", max_enrollment: "60", section: "", faculty_ids: [] }); }}
                 className="flex-1 py-2.5 border border-gray-200 rounded-xl text-base font-medium hover:bg-gray-50">Cancel</button>
               <button
                 onClick={() => {
-                  if (!offeringForm.calendar_id || !offeringForm.semester_id || !offeringForm.course_id) {
-                    toast.error("Academic year, semester and course are required."); return;
+                  if (!offeringForm.calendar_id || !offeringForm.semester_id || !offeringForm.department_id || !offeringForm.course_id) {
+                    toast.error("Academic year, semester, department and course are required."); return;
                   }
                   createOffering.mutate();
                 }}
@@ -318,7 +344,7 @@ export default function CoursesPage() {
           ) : (
             <table className="w-full text-sm">
               <thead className="bg-gray-50 border-b border-gray-200">
-                <tr>{["Course", "Title", "Credits", "Section", "Faculty", "Enrollment", "Status", ...(isAdmin ? ["Action"] : [])].map((h) => (
+                <tr>{["Course", "Title", "Department", "Credits", "Section", "Faculty", "Enrollment", "Status", ...(isAdmin ? ["Action"] : [])].map((h) => (
                   <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700">{h}</th>
                 ))}</tr>
               </thead>
@@ -327,6 +353,7 @@ export default function CoursesPage() {
                   <tr key={o.id} className={i % 2 === 0 ? "bg-white" : "bg-gray-50/50"}>
                     <td className="px-4 py-3 font-mono font-bold text-[#0D6E6E]">{o.course_number}</td>
                     <td className="px-4 py-3 max-w-xs truncate">{o.course_title}</td>
+                    <td className="px-4 py-3 text-gray-600">{o.department_name ?? "—"}</td>
                     <td className="px-4 py-3 font-mono text-sm">{o.credit_structure}</td>
                     <td className="px-4 py-3">{o.section ?? "—"}</td>
                     <td className="px-4 py-3 text-gray-600">{o.faculty_names.join(", ") || "—"}</td>
