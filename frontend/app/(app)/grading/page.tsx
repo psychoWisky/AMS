@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { useRole, useUser } from "@/stores/auth.store";
@@ -19,7 +20,9 @@ export default function GradingPage() {
   const role = useRole();
   const user = useUser();
   const qc = useQueryClient();
-  const [selectedOffering, setSelectedOffering] = useState("");
+  const searchParams = useSearchParams();
+  // Optional deep-link support (e.g. from Student Academic Progress: /grading?offering=<id>).
+  const [selectedOffering, setSelectedOffering] = useState(() => searchParams.get("offering") ?? "");
   const [selectedSheet, setSelectedSheet] = useState<SheetDetail | null>(null);
   const [editedMarks, setEditedMarks] = useState<Record<string, { internal: string; external: string; absent: boolean }>>({});
   const [otp, setOtp] = useState("");

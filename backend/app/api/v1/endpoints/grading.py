@@ -12,12 +12,57 @@ from pydantic import BaseModel
 
 from app.db.base import get_db
 from app.core.dependencies import get_current_user, require_roles
-from app.models.user import User, UserRole
+from app.models.user import User, UserRole, Program
 from app.models.grading import GradeSheet, GradeEntry, ApprovalStage, DigitalSignature, compute_grade
-from app.models.course import CourseOffering
+from app.models.course import CourseOffering, OfferingFaculty
 from app.models.enrollment import StudentEnrollment
+from app.models.research import AdvisoryCommittee, CommitteeMember
 
 router = APIRouter(prefix="/grading", tags=["Grading"])
+
+_ADMIN_ROLES = (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR)
+
+
+async def _authorize_student_academic_view(student_id: UUID, user: User, db: AsyncSession) -> None:
+    """Who may view a student's academic-progress data (GPA, etc.).
+    Mirrors the role-priority style of research.py's _authorize_committee_view /
+    enrollment.py's _authorize_offering_management: admins unrestricted, HOD via
+    the student's Program.department_id, student self-only, and faculty/research
+    supervisor only via an established relationship (shared course assignment or
+    advisory committee membership) — never a bare role check."""
+    if user.role in _ADMIN_ROLES:
+        return
+    if user.role == UserRole.STUDENT:
+        if student_id == user.id:
+            return
+        raise HTTPException(403, "You can only view your own academic progress.")
+    if user.role == UserRole.HOD:
+        student = await db.get(User, student_id)
+        if student and student.program_id and user.department_id:
+            program = await db.get(Program, student.program_id)
+            if program and program.department_id == user.department_id:
+                return
+        raise HTTPException(403, "You can only view students within your own department.")
+    if user.role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
+        course_link = await db.execute(
+            select(OfferingFaculty.id)
+            .join(StudentEnrollment, StudentEnrollment.offering_id == OfferingFaculty.offering_id)
+            .where(OfferingFaculty.faculty_id == user.id, StudentEnrollment.student_id == student_id)
+            .limit(1)
+        )
+        if course_link.scalar_one_or_none():
+            return
+        committee_link = await db.execute(
+            select(CommitteeMember.id)
+            .join(AdvisoryCommittee, AdvisoryCommittee.id == CommitteeMember.committee_id)
+            .where(CommitteeMember.faculty_id == user.id, AdvisoryCommittee.student_id == student_id)
+            .limit(1)
+        )
+        if committee_link.scalar_one_or_none():
+            return
+        raise HTTPException(403, "You can only view academic progress for students you teach or advise.")
+    raise HTTPException(403, "Insufficient permissions.")
+
 
 APPROVAL_PIPELINE = [
     (1, "faculty"),
@@ -326,7 +371,8 @@ async def publish_sheet(
 # ── GPA / CGPA ────────────────────────────────────────────────────────────────
 
 @router.get("/student/{student_id}/gpa")
-async def student_gpa(student_id: UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def student_gpa(student_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    await _authorize_student_academic_view(student_id, user, db)
     result = await db.execute(
         select(GradeEntry).options(
             selectinload(GradeEntry.sheet).selectinload(GradeSheet.offering).selectinload(CourseOffering.course)
