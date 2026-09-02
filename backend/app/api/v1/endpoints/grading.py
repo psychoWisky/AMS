@@ -1,6 +1,5 @@
 """Grading, Tabulation, GPA (Modules 5.5, 6, 7, 8)."""
-import random, string, hashlib, smtplib
-from email.mime.text import MIMEText
+import random, string
 from typing import Optional, List
 from uuid import UUID
 from datetime import datetime, timezone, timedelta
@@ -21,6 +20,39 @@ from app.models.research import AdvisoryCommittee, CommitteeMember
 router = APIRouter(prefix="/grading", tags=["Grading"])
 
 _ADMIN_ROLES = (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR)
+# Roles that see/approve every gradesheet regardless of department/offering —
+# REGISTRAR and EXAMINER are university-wide approval stages in APPROVAL_PIPELINE
+# (not department-scoped), consistent with how they're treated as unrestricted
+# elsewhere in this codebase (e.g. enrollment.py's "mine" scoping).
+_GRADING_UNRESTRICTED_ROLES = (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR, UserRole.EXAMINER)
+
+
+async def _authorize_offering_grading(offering_id: UUID, user: User, db: AsyncSession) -> None:
+    """BUSINESS_LOGIC.md Section P — department-isolation audit finding. Every
+    gradesheet-touching endpoint (view, create, edit, submit, and each approval
+    stage) must be tied back to the offering's department/assignment, not just
+    a bare role-name match. Mirrors the established pattern in courses.py's
+    _authorize_department_manage / enrollment.py's _authorize_offering_management.
+    """
+    if user.role in _GRADING_UNRESTRICTED_ROLES:
+        return
+    offering = await db.get(CourseOffering, offering_id)
+    if not offering:
+        raise HTTPException(404, "Offering not found.")
+    if user.role == UserRole.HOD:
+        if user.department_id and offering.department_id and user.department_id == offering.department_id:
+            return
+        raise HTTPException(403, "You can only access gradesheets within your own department.")
+    if user.role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
+        assigned = await db.execute(
+            select(OfferingFaculty.id).where(
+                OfferingFaculty.offering_id == offering_id, OfferingFaculty.faculty_id == user.id,
+            ).limit(1)
+        )
+        if assigned.scalar_one_or_none():
+            return
+        raise HTTPException(403, "You can only access gradesheets for courses you are assigned to teach.")
+    raise HTTPException(403, "Insufficient permissions.")
 
 
 async def _authorize_student_academic_view(student_id: UUID, user: User, db: AsyncSession) -> None:
@@ -105,16 +137,11 @@ def _compute_totals(entry: GradeEntry, offering: CourseOffering) -> None:
 
 
 def _send_notification_email(to: str, subject: str, body: str):
-    from app.core.config import settings
-    if not settings.SMTP_USER: return
-    msg = MIMEText(body, "plain")
-    msg["Subject"] = subject; msg["From"] = settings.SMTP_FROM; msg["To"] = to
-    try:
-        with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10) as s:
-            s.starttls(); s.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
-            s.sendmail(settings.SMTP_FROM, [to], msg.as_string())
-    except Exception:
-        pass
+    # Delegates to the shared helper (Section 28.4, STUDENT_SIDE_IMPLEMENTATION_PLAN.md)
+    # now reused by Orientation credential emails — kept as a thin wrapper here so this
+    # file's existing call sites don't need to change.
+    from app.core.email import send_email
+    send_email(to, subject, body)
 
 
 # ── Grade Sheets ──────────────────────────────────────────────────────────────
@@ -125,6 +152,7 @@ async def create_sheet(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_roles(UserRole.FACULTY, UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
 ):
+    await _authorize_offering_grading(offering_id, user, db)
     existing = await db.execute(
         select(GradeSheet).where(GradeSheet.offering_id == offering_id, GradeSheet.sheet_type == sheet_type)
     )
@@ -153,7 +181,7 @@ async def create_sheet(
 
 
 @router.get("/sheets/{sheet_id}")
-async def get_sheet(sheet_id: UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def get_sheet(sheet_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
     result = await db.execute(
         select(GradeSheet).options(
             selectinload(GradeSheet.entries).selectinload(GradeEntry.student),
@@ -163,6 +191,7 @@ async def get_sheet(sheet_id: UUID, db: AsyncSession = Depends(get_db), _: User 
     )
     sheet = result.scalar_one_or_none()
     if not sheet: raise HTTPException(404, "Sheet not found.")
+    await _authorize_offering_grading(sheet.offering_id, user, db)
     return {
         "id": str(sheet.id),
         "offering_id": str(sheet.offering_id),
@@ -187,8 +216,9 @@ async def get_sheet(sheet_id: UUID, db: AsyncSession = Depends(get_db), _: User 
 
 @router.get("/offering/{offering_id}/sheets")
 async def sheets_for_offering(
-    offering_id: UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user),
+    offering_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user),
 ):
+    await _authorize_offering_grading(offering_id, user, db)
     result = await db.execute(select(GradeSheet).where(GradeSheet.offering_id == offering_id))
     return [{"id": str(s.id), "sheet_type": s.sheet_type, "status": s.status, "is_locked": s.is_locked} for s in result.scalars().all()]
 
@@ -203,6 +233,7 @@ async def save_grades(
     )
     sheet = result.scalar_one_or_none()
     if not sheet: raise HTTPException(404, "Sheet not found.")
+    await _authorize_offering_grading(sheet.offering_id, user, db)
     if sheet.is_locked: raise HTTPException(400, "Grade sheet is locked.")
     if sheet.status not in ("draft", "submitted"):
         raise HTTPException(400, "Grades can only be edited in draft/submitted state.")
@@ -234,6 +265,7 @@ async def submit_sheet(
 ):
     sheet = await db.get(GradeSheet, sheet_id)
     if not sheet: raise HTTPException(404, "Sheet not found.")
+    await _authorize_offering_grading(sheet.offering_id, user, db)
     if sheet.status != "draft": raise HTTPException(400, "Sheet is not in draft.")
     sheet.status = "submitted"; sheet.submitted_at = datetime.now(timezone.utc)
     await db.commit()
@@ -249,6 +281,7 @@ async def request_approval_otp(
 ):
     sheet = await db.get(GradeSheet, sheet_id)
     if not sheet: raise HTTPException(404, "Sheet not found.")
+    await _authorize_offering_grading(sheet.offering_id, user, db)
     # Find the current pending stage matching user role
     result = await db.execute(
         select(ApprovalStage).where(
@@ -278,6 +311,10 @@ async def approve_sheet_stage(
     sheet_id: UUID, body: SignatureRequest, request: Request,
     db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user),
 ):
+    sheet_lookup = await db.get(GradeSheet, sheet_id)
+    if not sheet_lookup: raise HTTPException(404, "Sheet not found.")
+    await _authorize_offering_grading(sheet_lookup.offering_id, user, db)
+
     result = await db.execute(
         select(ApprovalStage).where(
             ApprovalStage.sheet_id == sheet_id,
@@ -331,6 +368,10 @@ async def reject_sheet_stage(
     sheet_id: UUID, remarks: str, db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    sheet = await db.get(GradeSheet, sheet_id)
+    if not sheet: raise HTTPException(404, "Sheet not found.")
+    await _authorize_offering_grading(sheet.offering_id, user, db)
+
     result = await db.execute(
         select(ApprovalStage).where(
             ApprovalStage.sheet_id == sheet_id,
@@ -343,7 +384,6 @@ async def reject_sheet_stage(
     if not remarks.strip(): raise HTTPException(400, "Rejection remarks required.")
 
     stage.status = "rejected"; stage.remarks = remarks; stage.approver_id = user.id
-    sheet = await db.get(GradeSheet, sheet_id)
     sheet.status = "draft"; sheet.is_locked = False
 
     # Reset all stages back to pending

@@ -1,3 +1,5 @@
+import secrets
+import string
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from jose import jwt, JWTError
@@ -8,6 +10,13 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 def hash_password(plain: str) -> str:
     return pwd_context.hash(plain)
+
+def generate_temp_password(length: int = 10) -> str:
+    """Cryptographically secure temporary credential (e.g. Orientation account
+    creation). Uses `secrets`, not `random`, unlike this project's existing
+    OTP generators — deliberately not repeating that known weakness here."""
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
 
 def verify_password(plain: str, hashed: str) -> bool:
     return pwd_context.verify(plain, hashed)

@@ -1,7 +1,7 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, date, timezone
 from enum import Enum
-from sqlalchemy import String, Boolean, DateTime, ForeignKey, Text, Enum as SAEnum
+from sqlalchemy import String, Boolean, DateTime, Date, ForeignKey, Text, Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID
 from app.db.base import Base
@@ -30,12 +30,27 @@ class Department(Base):
     users: Mapped[list["User"]] = relationship("User", back_populates="department", foreign_keys="User.department_id")
 
 
+class College(Base):
+    """Master data entity for Super Admin (BUSINESS_LOGIC.md Section N.5). Flat,
+    no relationship to Department/Program yet — none was confirmed (Open Question 49)."""
+    __tablename__ = "ams_colleges"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    code: Mapped[str] = mapped_column(String(20), unique=True, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 class User(Base):
     __tablename__ = "ams_users"
     id: Mapped[uuid.UUID]       = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     email: Mapped[str]          = mapped_column(String(255), unique=True, nullable=False, index=True)
     hashed_password: Mapped[str | None] = mapped_column(String(255))
+    # Salutation (Dr./Mr/Mrs/Miss) and middle name — added for HOD Add Faculty
+    # (BUSINESS_LOGIC.md Section N.3). Nullable: pre-existing accounts have neither.
+    title: Mapped[str | None]       = mapped_column(String(10))
     first_name: Mapped[str | None]  = mapped_column(String(100))
+    middle_name: Mapped[str | None] = mapped_column(String(100))
     last_name: Mapped[str | None]   = mapped_column(String(100))
     mobile: Mapped[str | None]      = mapped_column(String(20))
     role: Mapped[UserRole]          = mapped_column(SAEnum(UserRole, name="ams_user_role"), nullable=False)
@@ -48,6 +63,21 @@ class User(Base):
     is_active: Mapped[bool]    = mapped_column(Boolean, default=True)
     is_verified: Mapped[bool]  = mapped_column(Boolean, default=False)
     profile_photo: Mapped[str | None] = mapped_column(String(500))
+    # Student Self-Service profile fields (BUSINESS_LOGIC.md K.1) — student-editable
+    # via PATCH /auth/me. Nullable: most existing users (created before this field
+    # set existed) will have these unset; profile-completion status is derived from
+    # whether they are set, not assumed from account existence (see auth.py).
+    date_of_birth: Mapped[date | None] = mapped_column(Date)
+    gender: Mapped[str | None]         = mapped_column(String(20))
+    blood_group: Mapped[str | None]    = mapped_column(String(10))
+    father_name: Mapped[str | None]    = mapped_column(String(200))
+    abc_id: Mapped[str | None]         = mapped_column(String(50))
+    address: Mapped[str | None]        = mapped_column(Text)
+    # Set True for accounts created with a system-generated temporary password
+    # (Orientation credential generation); a distinct concept from profile
+    # completion — see core/dependencies.py's require_complete_profile, which
+    # does NOT check this flag.
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -56,7 +86,8 @@ class User(Base):
 
     @property
     def full_name(self) -> str:
-        return f"{self.first_name or ''} {self.last_name or ''}".strip() or self.email
+        parts = [self.first_name, self.middle_name, self.last_name]
+        return " ".join(p for p in parts if p) or self.email
 
 
 class Program(Base):

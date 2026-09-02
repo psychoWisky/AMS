@@ -30,22 +30,41 @@ PROGRAMS = [
 ]
 
 USERS = [
-    # (email, password, first, last, role, designation, emp_id/roll)
-    ("superadmin@avfu.ac.in",  "Admin@123", "Super",    "Admin",   "super_admin",    "System Administrator",     "EMP001", None),
-    ("academic@avfu.ac.in",    "Admin@123", "Academic", "Officer", "academic_admin", "Academic Cell Officer",    "EMP002", None),
-    ("registrar@avfu.ac.in",   "Admin@123", "Dr. R.K.", "Sharma",  "registrar",      "University Registrar",     "EMP003", None),
-    ("examiner@avfu.ac.in",    "Admin@123", "Dr. S.",   "Patel",   "examiner",       "Controller of Exams",      "EMP004", None),
-    ("hod.agro@avfu.ac.in",    "Admin@123", "Dr. A.",   "Kumar",   "hod",            "Head of Dept - Agronomy",  "EMP005", None),
-    ("hod.vet@avfu.ac.in",     "Admin@123", "Dr. P.",   "Nair",    "hod",            "Head of Dept - Veterinary","EMP006", None),
-    ("faculty1@avfu.ac.in",    "Admin@123", "Dr. M.",   "Rao",     "faculty",        "Assistant Professor",      "EMP007", None),
-    ("faculty2@avfu.ac.in",    "Admin@123", "Dr. L.",   "Singh",   "faculty",        "Associate Professor",      "EMP008", None),
-    ("faculty3@avfu.ac.in",    "Admin@123", "Prof. K.", "Verma",   "faculty",        "Professor",                "EMP009", None),
-    ("student1@avfu.ac.in",    "Test@123",  "Rahul",    "Gupta",   "student",        "B.Sc. Agriculture Yr-2",   None, "AVFU/2023/BSCAG/001"),
-    ("student2@avfu.ac.in",    "Test@123",  "Priya",    "Sharma",  "student",        "B.Sc. Agriculture Yr-2",   None, "AVFU/2023/BSCAG/002"),
-    ("student3@avfu.ac.in",    "Test@123",  "Amit",     "Joshi",   "student",        "M.Sc. Agriculture Yr-1",   None, "AVFU/2024/MSCAG/001"),
-    ("student4@avfu.ac.in",    "Test@123",  "Sunita",   "Devi",    "student",        "B.V.Sc & A.H. Yr-3",       None, "AVFU/2022/BVSC/001"),
-    ("researcher1@avfu.ac.in", "Test@123",  "Dr. V.",   "Mishra",  "research_supervisor", "Senior Research Fellow", "EMP010", None),
+    # (email, password, first, last, role, designation, emp_id/roll, dept_code)
+    # dept_code is a DEVELOPMENT-DATA convenience column (not an AVFU business
+    # rule) so at least two departments are represented among HOD/faculty/
+    # students, letting department isolation actually be demonstrated/tested
+    # end-to-end (BUSINESS_LOGIC.md Section N — Seed / Development Data).
+    # Previously every user was hardcoded to AGRO regardless of role, which
+    # made HOD/faculty/student department scoping untestable against seed data.
+    ("superadmin@avfu.ac.in",  "Admin@123", "Super",    "Admin",   "super_admin",    "System Administrator",     "EMP001", None, "AGRO"),
+    ("academic@avfu.ac.in",    "Admin@123", "Academic", "Officer", "academic_admin", "Academic Cell Officer",    "EMP002", None, "AGRO"),
+    ("registrar@avfu.ac.in",   "Admin@123", "Dr. R.K.", "Sharma",  "registrar",      "University Registrar",     "EMP003", None, "AGRO"),
+    ("examiner@avfu.ac.in",    "Admin@123", "Dr. S.",   "Patel",   "examiner",       "Controller of Exams",      "EMP004", None, "AGRO"),
+    ("hod.agro@avfu.ac.in",    "Admin@123", "Dr. A.",   "Kumar",   "hod",            "Head of Dept - Agronomy",  "EMP005", None, "AGRO"),
+    ("hod.vet@avfu.ac.in",     "Admin@123", "Dr. P.",   "Nair",    "hod",            "Head of Dept - Veterinary","EMP006", None, "VETM"),
+    ("faculty1@avfu.ac.in",    "Admin@123", "Dr. M.",   "Rao",     "faculty",        "Assistant Professor",      "EMP007", None, "AGRO"),
+    ("faculty2@avfu.ac.in",    "Admin@123", "Dr. L.",   "Singh",   "faculty",        "Associate Professor",      "EMP008", None, "AGRO"),
+    ("faculty3@avfu.ac.in",    "Admin@123", "Prof. K.", "Verma",   "faculty",        "Professor",                "EMP009", None, "VETM"),
+    ("student1@avfu.ac.in",    "Test@123",  "Rahul",    "Gupta",   "student",        "B.Sc. Agriculture Yr-2",   None, "AVFU/2023/BSCAG/001", "AGRO"),
+    ("student2@avfu.ac.in",    "Test@123",  "Priya",    "Sharma",  "student",        "B.Sc. Agriculture Yr-2",   None, "AVFU/2023/BSCAG/002", "AGRO"),
+    ("student3@avfu.ac.in",    "Test@123",  "Amit",     "Joshi",   "student",        "M.Sc. Agriculture Yr-1",   None, "AVFU/2024/MSCAG/001", "AGRO"),
+    ("student4@avfu.ac.in",    "Test@123",  "Sunita",   "Devi",    "student",        "B.V.Sc & A.H. Yr-3",       None, "AVFU/2022/BVSC/001", "VETM"),
+    ("researcher1@avfu.ac.in", "Test@123",  "Dr. V.",   "Mishra",  "research_supervisor", "Senior Research Fellow", "EMP010", None, "AGRO"),
 ]
+
+# Development-data only: maps each seeded STUDENT email to their Program code
+# (PROGRAMS above), so User.program_id -> Program.department_id resolves
+# correctly for department-scoped course/offering visibility
+# (_resolve_student_scope in courses.py/enrollment.py). Previously no seeded
+# student had program_id set at all, which made student course visibility
+# untestable against seed data (every student resolved to "no scope").
+STUDENT_PROGRAM_CODE = {
+    "student1@avfu.ac.in": "BSCAG",
+    "student2@avfu.ac.in": "BSCAG",
+    "student3@avfu.ac.in": "MSCAG",
+    "student4@avfu.ac.in": "BVSC",
+}
 
 COURSES = [
     ("AGR101", "Principles of Agronomy",          "AGRO", 3, 0, "UG"),
@@ -85,7 +104,7 @@ async def seed():
             prog_map[code] = p.id
 
         # Users
-        for email, pw, first, last, role, desig, emp_id, roll in USERS:
+        for email, pw, first, last, role, desig, emp_id, roll, dept_code in USERS:
             u = User(
                 email=email,
                 hashed_password=hash_password(pw),
@@ -94,7 +113,8 @@ async def seed():
                 designation=desig,
                 employee_id=emp_id,
                 student_roll=roll,
-                department_id=dept_map.get("AGRO"),
+                department_id=dept_map.get(dept_code),
+                program_id=prog_map.get(STUDENT_PROGRAM_CODE.get(email)),
                 is_active=True, is_verified=True,
             )
             db.add(u)

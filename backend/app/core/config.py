@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     SMTP_FROM: str = ""
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30
+    # DEMO ASSUMPTION (Section 28.12, STUDENT_SIDE_IMPLEMENTATION_PLAN.md): the real
+    # AVFU university email format is not yet confirmed. This is a configurable
+    # placeholder so the real format can be swapped in later without code changes.
+    ORIENTATION_EMAIL_DOMAIN: str = "ams.avfu.demo"
 
     @property
     def origins(self) -> list[str]:

@@ -4,7 +4,7 @@ import { useRole } from "@/stores/auth.store";
 import { cn } from "@/lib/utils";
 import {
   LayoutDashboard, CalendarDays, BookOpen, Users, ClipboardList,
-  BarChart3, FlaskConical, Bell, Settings, ChevronLeft, ChevronRight, GraduationCap, LogOut, FileText, ClipboardCheck,
+  BarChart3, FlaskConical, Bell, Settings, ChevronLeft, ChevronRight, GraduationCap, LogOut, FileText, ClipboardCheck, IdCard, UserCog, ShieldCheck,
 } from "lucide-react";
 import { useAuthStore } from "@/stores/auth.store";
 import { api } from "@/services/api";
@@ -13,15 +13,27 @@ import { useState } from "react";
 const NAV = [
   { label: "Dashboard",       icon: LayoutDashboard, href: "/dashboard",    roles: [] },
   { label: "Academic Calendar",icon: CalendarDays,   href: "/calendar",     roles: ["super_admin","academic_admin","registrar","hod","faculty","student","examiner"] },
-  { label: "Courses",         icon: BookOpen,        href: "/courses",      roles: ["super_admin","academic_admin","hod","faculty","student"] },
-  { label: "Teacher Courses", icon: BookOpen,        href: "/teacher-courses", roles: ["super_admin","academic_admin","hod","faculty","registrar"] },
+  // "faculty" deliberately excluded here (BUSINESS_LOGIC.md Section N — Faculty
+  // has no need for a generic all-courses catalog; their course-relevant view
+  // is "Teacher Courses" (their own assigned offerings) below.
+  { label: "Courses",         icon: BookOpen,        href: "/courses",      roles: ["super_admin","academic_admin","hod","student"] },
+  // "hod" deliberately excluded here (BUSINESS_LOGIC.md Section N.1) — HOD's
+  // course-offering management already lives at Courses -> Offer Course;
+  // this page is instructor-assigned "my courses" and does not apply to HOD.
+  { label: "Teacher Courses", icon: BookOpen,        href: "/teacher-courses", roles: ["super_admin","academic_admin","faculty","registrar"] },
+  { label: "Faculties",       icon: UserCog,         href: "/faculties",    roles: ["hod"] },
   { label: "Enrollment",      icon: ClipboardList,   href: "/enrollment",   roles: ["super_admin","academic_admin","hod","faculty","student","registrar"] },
+  { label: "Course Registration",icon: ClipboardCheck,href: "/course-registration", roles: ["student"] },
+  { label: "Course Request",  icon: ClipboardList,   href: "/course-request", roles: ["super_admin","academic_admin","hod","faculty","research_supervisor"] },
   { label: "Academic Progress",icon: GraduationCap,  href: "/academic-progress", roles: ["super_admin","academic_admin","hod","faculty","student","registrar","research_supervisor"] },
   { label: "Grading",         icon: BarChart3,       href: "/grading",      roles: ["super_admin","academic_admin","hod","faculty","registrar","examiner"] },
   { label: "Admit Card",      icon: FileText,        href: "/admit-card",   roles: ["super_admin","academic_admin","hod","registrar","examiner","student"] },
   { label: "Research / PG",   icon: FlaskConical,    href: "/research",     roles: ["super_admin","academic_admin","hod","faculty","student","research_supervisor"] },
   { label: "Admissions",      icon: ClipboardCheck,  href: "/admissions",   roles: ["super_admin","academic_admin","registrar"] },
+  { label: "Orientation",     icon: ClipboardCheck,  href: "/orientation",  roles: ["super_admin","academic_admin"] },
+  { label: "Student Management",icon: IdCard,        href: "/student-management", roles: ["student"] },
   { label: "Users",           icon: Users,           href: "/users",        roles: ["super_admin","academic_admin"] },
+  { label: "Administration",  icon: ShieldCheck,     href: "/admin",        roles: ["super_admin","academic_admin"] },
   { label: "Notifications",   icon: Bell,            href: "/notifications",roles: [] },
 ];
 

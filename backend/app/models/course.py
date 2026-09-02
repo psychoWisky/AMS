@@ -17,6 +17,16 @@ class Course(Base):
     credit_practical: Mapped[int]  = mapped_column(Integer, default=0)
     # course_type derived from credits but stored for quick filter
     course_type: Mapped[str]    = mapped_column(String(20), default="theory")  # theory / practical / both
+    # Confirmed HOD "Course Type" (BUSINESS_LOGIC.md L.2/M.1, Rule 21) — a
+    # pedagogical/administrative category, DELIBERATELY a separate field from
+    # `course_type` above (which remains theory/practical/both, unchanged, to
+    # avoid corrupting its existing derivation/meaning). Nullable: existing rows
+    # predate this field. Values: optional / core / compulsory / research /
+    # seminar / deficiency / bridge / prerequisite / mandatory_mba.
+    category: Mapped[str | None] = mapped_column(String(30))
+    # Confirmed HOD "Credit Type" (BUSINESS_LOGIC.md L.2, Rule 22). Nullable for
+    # the same reason. Values: credit / non_credit.
+    credit_type: Mapped[str | None] = mapped_column(String(20))
     program_level: Mapped[str]  = mapped_column(String(20), default="UG")      # UG / PG / PhD
     description: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str]         = mapped_column(String(20), default="active")  # active / inactive / archived

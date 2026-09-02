@@ -1,7 +1,16 @@
-"""Student Academic Progress — Phase A (Module 1).
+"""Student Credit Details (BUSINESS_LOGIC.md Section K.6).
 
 Read-only aggregation of a student's already-existing academic data
 (enrollment, course, credit, department/program) into a single view.
+
+Renamed from the original "academic_progress"/"/academic-progress" naming
+(Module 1 Phase A) once BUSINESS_LOGIC.md confirmed this endpoint's actual
+content — a per-course credit ledger + credit summary — corresponds to the
+"Student Credit Details" module specifically, not a generic "academic
+progress" concept. See STUDENT_SIDE_IMPLEMENTATION_PLAN.md for the rename
+record. The frontend page consuming this endpoint remains at the broader
+`/academic-progress` route, since that page also aggregates GPA/committee
+data from other endpoints and is not itself a 1:1 match for this rename.
 
 Deliberately does NOT model: Progress Report status/workflow, Sign/approval,
 Thesis Evaluation, required-credit totals, or Remaining Credit — none of these
@@ -21,7 +30,7 @@ from app.models.course import CourseOffering, OfferingFaculty
 from app.models.enrollment import StudentEnrollment
 from app.models.research import AdvisoryCommittee, CommitteeMember
 
-router = APIRouter(prefix="/academic-progress", tags=["Academic Progress"])
+router = APIRouter(prefix="/credit-details", tags=["Student Credit Details"])
 
 _ADMIN_ROLES = (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR)
 
@@ -32,13 +41,13 @@ _ADMIN_ROLES = (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRA
 # carrying its own local authorization helper (see courses.py/enrollment.py's
 # duplicated _resolve_student_scope, research.py's own committee helpers).
 
-async def _authorize_student_academic_view(student_id: UUID, user: User, db: AsyncSession) -> None:
+async def _authorize_student_credit_view(student_id: UUID, user: User, db: AsyncSession) -> None:
     if user.role in _ADMIN_ROLES:
         return
     if user.role == UserRole.STUDENT:
         if student_id == user.id:
             return
-        raise HTTPException(403, "You can only view your own academic progress.")
+        raise HTTPException(403, "You can only view your own credit details.")
     if user.role == UserRole.HOD:
         student = await db.get(User, student_id)
         if student and student.program_id and user.department_id:
@@ -63,12 +72,12 @@ async def _authorize_student_academic_view(student_id: UUID, user: User, db: Asy
         )
         if committee_link.scalar_one_or_none():
             return
-        raise HTTPException(403, "You can only view academic progress for students you teach or advise.")
+        raise HTTPException(403, "You can only view credit details for students you teach or advise.")
     raise HTTPException(403, "Insufficient permissions.")
 
 
 @router.get("/student/{student_id}")
-async def get_student_academic_progress(
+async def get_student_credit_details(
     student_id: UUID,
     calendar_id: Optional[UUID] = None,
     semester_id: Optional[UUID] = None,
@@ -78,7 +87,7 @@ async def get_student_academic_progress(
     student = await db.get(User, student_id)
     if not student:
         raise HTTPException(404, "Student not found.")
-    await _authorize_student_academic_view(student_id, user, db)
+    await _authorize_student_credit_view(student_id, user, db)
 
     program = await db.get(Program, student.program_id) if student.program_id else None
     department = None

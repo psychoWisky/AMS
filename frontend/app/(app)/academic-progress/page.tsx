@@ -20,7 +20,7 @@ interface ProgressData {
 interface GpaSemester { semester_id: string; sgpa: number; credits: number }
 interface GpaData { cgpa: number; semesters: GpaSemester[] }
 interface CommitteeMemberOut { id: string; faculty_name: string | null; role: string; accepted: boolean | null }
-interface CommitteeSummary { status: string; research_title: string | null; research_area: string | null; members: CommitteeMemberOut[] }
+interface CommitteeSummary { status_label: string; research_title: string | null; research_area: string | null; members: CommitteeMemberOut[] }
 interface StudentOpt { id: string; full_name: string; role: string; }
 interface CalendarOpt { id: string; name: string; academic_year: string }
 interface SemesterOpt { id: string; calendar_id: string; name: string }
@@ -62,8 +62,8 @@ export default function AcademicProgressPage() {
   });
 
   const { data: progress, isLoading: progressLoading, isError: progressError } = useQuery<ProgressData>({
-    queryKey: ["ams-academic-progress", targetStudentId, calendarId, semesterId],
-    queryFn: async () => (await api.get(`/academic-progress/student/${targetStudentId}`, {
+    queryKey: ["ams-credit-details", targetStudentId, calendarId, semesterId],
+    queryFn: async () => (await api.get(`/credit-details/student/${targetStudentId}`, {
       params: { ...(calendarId ? { calendar_id: calendarId } : {}), ...(semesterId ? { semester_id: semesterId } : {}) },
     })).data,
     enabled: !!targetStudentId,
@@ -227,7 +227,7 @@ export default function AcademicProgressPage() {
             <div className="bg-white rounded-2xl border border-gray-200 p-5">
               <div className="flex items-center justify-between mb-3">
                 <h2 className="text-base font-bold text-gray-900">Advisory Committee</h2>
-                <span className="px-2 py-0.5 rounded-full text-sm font-semibold bg-gray-100 text-gray-700 capitalize">{committee.status}</span>
+                <span className="px-2 py-0.5 rounded-full text-sm font-semibold bg-gray-100 text-gray-700">{committee.status_label}</span>
               </div>
               {committee.research_title && <p className="text-sm text-gray-700 mb-1">{committee.research_title}</p>}
               {committee.members.length === 0 ? (
