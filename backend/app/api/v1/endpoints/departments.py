@@ -12,12 +12,18 @@ from pydantic import BaseModel
 
 from app.db.base import get_db
 from app.core.dependencies import get_current_user, require_roles
-from app.models.user import User, UserRole, Department, Program, College
+from app.models.user import User, UserRole, Department, Program, College, Designation
 
 router = APIRouter(prefix="/departments", tags=["Departments"])
 admin_router = APIRouter(prefix="/admin", tags=["Admin — Master Data"])
 
 _MASTER_DATA_ROLES = (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)
+# Designation management is deliberately narrower than the general master-data
+# roles above — Section 5 of the designation-management task explicitly scopes
+# create/edit/deactivate to SUPER_ADMIN only (ACADEMIC_ADMIN is NOT included,
+# unlike Department/Program/College). Reading (for HOD's Add Faculty dropdown)
+# uses the same unrestricted get_current_user pattern as College/Department.
+_DESIGNATION_MANAGE_ROLES = (UserRole.SUPER_ADMIN,)
 
 
 class DeptIn(BaseModel):
@@ -44,6 +50,13 @@ class CollegeIn(BaseModel):
     name: str; code: str
 
 class CollegeUpdate(BaseModel):
+    name: Optional[str] = None
+    is_active: Optional[bool] = None
+
+class DesignationIn(BaseModel):
+    name: str
+
+class DesignationUpdate(BaseModel):
     name: Optional[str] = None
     is_active: Optional[bool] = None
 
@@ -163,6 +176,80 @@ async def deactivate_college(
     c = await db.get(College, college_id)
     if not c: raise HTTPException(404, "College not found.")
     c.is_active = False
+    await db.commit()
+
+
+# ── Designations (Super Admin master data — designation-management task) ──────
+# Replaces the previously hardcoded Professor/Associate Professor/Assistant
+# Professor Literal in auth.py's CreateFacultyRequest. ams_users.designation
+# stays a plain string (see Designation model docstring) — this table is only
+# the controlled source HOD's Add Faculty form selects from, not a FK target.
+
+def _normalize_designation_name(name: str) -> str:
+    normalized = " ".join(name.strip().split())
+    if not normalized:
+        raise HTTPException(400, "Designation name is required.")
+    return normalized
+
+
+@admin_router.get("/designations")
+async def list_designations(active: Optional[bool] = None, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    """Any authenticated user may read this (mirrors Department/Program/College) —
+    HOD's Add Faculty form depends on being able to fetch active designations.
+    `active=true` -> only active rows; `active=false` -> only inactive rows;
+    omitted -> all rows (this is the Super Admin Administration view's default)."""
+    q = select(Designation)
+    if active is not None:
+        q = q.where(Designation.is_active == active)
+    result = await db.execute(q.order_by(Designation.name))
+    return [{"id": str(d.id), "name": d.name, "is_active": d.is_active, "created_at": d.created_at.isoformat()} for d in result.scalars().all()]
+
+
+@admin_router.post("/designations", status_code=201)
+async def create_designation(
+    body: DesignationIn, db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(*_DESIGNATION_MANAGE_ROLES)),
+):
+    name = _normalize_designation_name(body.name)
+    existing = await db.execute(select(Designation).where(func.lower(Designation.name) == name.lower()))
+    if existing.scalar_one_or_none():
+        raise HTTPException(400, "A designation with this name already exists.")
+    d = Designation(name=name)
+    db.add(d); await db.commit(); await db.refresh(d)
+    return {"id": str(d.id), "message": "Designation created."}
+
+
+@admin_router.patch("/designations/{designation_id}")
+async def update_designation(
+    designation_id: UUID, body: DesignationUpdate, db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(*_DESIGNATION_MANAGE_ROLES)),
+):
+    d = await db.get(Designation, designation_id)
+    if not d: raise HTTPException(404, "Designation not found.")
+    updates = body.model_dump(exclude_none=True)
+    if "name" in updates:
+        name = _normalize_designation_name(updates["name"])
+        dup = await db.execute(select(Designation).where(func.lower(Designation.name) == name.lower(), Designation.id != designation_id))
+        if dup.scalar_one_or_none():
+            raise HTTPException(400, "A designation with this name already exists.")
+        updates["name"] = name
+    for k, v in updates.items():
+        setattr(d, k, v)
+    await db.commit()
+    return {"message": "Designation updated."}
+
+
+@admin_router.delete("/designations/{designation_id}", status_code=204)
+async def deactivate_designation(
+    designation_id: UUID, db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(*_DESIGNATION_MANAGE_ROLES)),
+):
+    """Soft-delete only (is_active=False) — ams_users.designation has no FK to
+    this table, so existing faculty records are never affected; the row simply
+    stops appearing in the active list HOD's Add Faculty form offers."""
+    d = await db.get(Designation, designation_id)
+    if not d: raise HTTPException(404, "Designation not found.")
+    d.is_active = False
     await db.commit()
 
 

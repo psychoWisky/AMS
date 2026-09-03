@@ -9,14 +9,14 @@ interface Faculty {
   id: string; email: string; full_name: string; title: string | null;
   designation: string | null; mobile: string | null;
 }
+interface DesignationOpt { id: string; name: string; is_active: boolean; }
 
 const TITLES = ["Dr.", "Mr", "Mrs", "Miss"];
-const DESIGNATIONS = ["Professor", "Associate Professor", "Assistant Professor"];
 
 const EMPTY_FORM = {
   title: "Dr.", first_name: "", middle_name: "", last_name: "",
   date_of_birth: "", gender: "", email: "", mobile: "",
-  designation: "Assistant Professor", address: "",
+  designation: "", address: "",
 };
 
 export default function FacultiesPage() {
@@ -28,6 +28,15 @@ export default function FacultiesPage() {
   const { data: faculty = [], isLoading } = useQuery<Faculty[]>({
     queryKey: ["ams-hod-faculty"],
     queryFn: async () => (await api.get("/auth/users", { params: { role: "faculty" } })).data,
+  });
+
+  // Designation-management task — Super Admin-managed master data replaces the
+  // previously hardcoded 3-value list; only active designations are offered here.
+  // The HOD Add Faculty form is selection-only — no create/edit/delete controls.
+  const { data: designations = [], isLoading: designationsLoading, isError: designationsError } = useQuery<DesignationOpt[]>({
+    queryKey: ["ams-active-designations"],
+    queryFn: async () => (await api.get("/admin/designations", { params: { active: true } })).data,
+    enabled: showCreate,
   });
 
   const createFaculty = useMutation({
@@ -45,7 +54,7 @@ export default function FacultiesPage() {
   );
 
   function submit() {
-    if (!form.first_name || !form.last_name || !form.email || !form.date_of_birth || !form.gender || !form.mobile || !form.address) {
+    if (!form.first_name || !form.last_name || !form.email || !form.date_of_birth || !form.gender || !form.mobile || !form.address || !form.designation) {
       toast.error("Please fill in all required fields.");
       return;
     }
@@ -163,9 +172,15 @@ export default function FacultiesPage() {
                 <div>
                   <label className="block text-base font-semibold text-gray-700 mb-1">Designation *</label>
                   <select value={form.designation} onChange={(e) => setForm((f) => ({ ...f, designation: e.target.value }))}
-                    className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
-                    {DESIGNATIONS.map((d) => <option key={d} value={d}>{d}</option>)}
+                    disabled={designationsLoading}
+                    className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E] disabled:bg-gray-50">
+                    <option value="">{designationsLoading ? "Loading…" : "Select…"}</option>
+                    {designations.map((d) => <option key={d.id} value={d.name}>{d.name}</option>)}
                   </select>
+                  {designationsError && <p className="text-xs text-red-600 mt-1">Could not load designations. Please close and reopen this form.</p>}
+                  {!designationsLoading && !designationsError && designations.length === 0 && (
+                    <p className="text-xs text-amber-700 mt-1">No active designations available — contact a Super Admin.</p>
+                  )}
                 </div>
               </div>
               <div>

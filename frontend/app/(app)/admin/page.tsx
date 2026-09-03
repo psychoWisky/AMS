@@ -3,17 +3,18 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { toast } from "sonner";
-import { ShieldCheck, Plus, Pencil, Loader2, Building2, GraduationCap, School, Lock } from "lucide-react";
+import { ShieldCheck, Plus, Pencil, Loader2, Building2, GraduationCap, School, Lock, BadgeCheck } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 
 interface DepartmentRow { id: string; name: string; code: string; stream: string | null; is_active: boolean; }
 interface ProgramRow { id: string; name: string; code: string; level: string; department_id: string; duration_years: number; is_active: boolean; }
 interface CollegeRow { id: string; name: string; code: string; is_active: boolean; }
+interface DesignationRow { id: string; name: string; is_active: boolean; created_at: string; }
 interface RoleRow { value: string; label: string; user_count: number; }
 
-const TABS = ["departments", "programmes", "colleges", "roles"] as const;
+const TABS = ["departments", "programmes", "colleges", "designations", "roles"] as const;
 type Tab = (typeof TABS)[number];
-const TAB_LABEL: Record<Tab, string> = { departments: "Departments", programmes: "Programmes", colleges: "Colleges", roles: "Roles" };
+const TAB_LABEL: Record<Tab, string> = { departments: "Departments", programmes: "Programmes", colleges: "Colleges", designations: "Designations", roles: "Roles" };
 
 export default function AdminPage() {
   const qc = useQueryClient();
@@ -104,6 +105,34 @@ export default function AdminPage() {
   function closeCollegeForm() { setShowCollegeForm(false); setEditCollege(null); setCollegeForm({ name: "", code: "" }); }
   function openEditCollege(c: CollegeRow) { setEditCollege(c); setCollegeForm({ name: c.name, code: c.code }); setShowCollegeForm(true); }
 
+  // ── Designations ─────────────────────────────────────────────────────────
+  const [showDesigForm, setShowDesigForm] = useState(false);
+  const [editDesig, setEditDesig] = useState<DesignationRow | null>(null);
+  const [desigForm, setDesigForm] = useState({ name: "" });
+
+  const { data: designations = [], isLoading: desigLoading } = useQuery<DesignationRow[]>({
+    queryKey: ["ams-admin-designations"],
+    queryFn: async () => (await api.get("/admin/designations")).data,
+    enabled: tab === "designations",
+  });
+
+  const saveDesignation = useMutation({
+    mutationFn: () => editDesig
+      ? api.patch(`/admin/designations/${editDesig.id}`, { name: desigForm.name })
+      : api.post("/admin/designations", desigForm),
+    onSuccess: () => { toast.success(editDesig ? "Designation updated." : "Designation created."); qc.invalidateQueries({ queryKey: ["ams-admin-designations"] }); closeDesigForm(); },
+    onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed."),
+  });
+
+  const toggleDesigActive = useMutation({
+    mutationFn: ({ id, is_active }: { id: string; is_active: boolean }) => api.patch(`/admin/designations/${id}`, { is_active }),
+    onSuccess: () => { toast.success("Designation status updated."); qc.invalidateQueries({ queryKey: ["ams-admin-designations"] }); },
+    onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed."),
+  });
+
+  function closeDesigForm() { setShowDesigForm(false); setEditDesig(null); setDesigForm({ name: "" }); }
+  function openEditDesig(d: DesignationRow) { setEditDesig(d); setDesigForm({ name: d.name }); setShowDesigForm(true); }
+
   // ── Roles (read-only) ────────────────────────────────────────────────────
   const { data: roles = [], isLoading: rolesLoading } = useQuery<RoleRow[]>({
     queryKey: ["ams-admin-roles"],
@@ -115,7 +144,7 @@ export default function AdminPage() {
     <div className="p-6 max-w-5xl mx-auto">
       <div className="mb-6">
         <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2"><ShieldCheck size={24} className="text-[#0D6E6E]" />Administration</h1>
-        <p className="text-gray-700 text-base mt-1">Master data — roles, departments, programmes and colleges</p>
+        <p className="text-gray-700 text-base mt-1">Master data — roles, departments, programmes, colleges and designations</p>
       </div>
 
       <div className="flex gap-2 mb-5">
@@ -231,6 +260,39 @@ export default function AdminPage() {
         </>
       )}
 
+      {/* ── Designations tab ────────────────────────────────────────────── */}
+      {tab === "designations" && (
+        <>
+          <div className="flex justify-end mb-3">
+            <button onClick={() => setShowDesigForm(true)} className="flex items-center gap-2 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-xl font-semibold text-sm hover:bg-[#178F8F]"><Plus size={15} /> Add Designation</button>
+          </div>
+          <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+            {desigLoading ? <div className="flex justify-center py-12"><Loader2 className="animate-spin text-gray-600" /></div> : designations.length === 0 ? (
+              <div className="text-center py-16 text-gray-600"><BadgeCheck size={40} className="mx-auto mb-3 opacity-30" /><p>No designations added yet.</p></div>
+            ) : (
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 border-b border-gray-200"><tr>{["Name", "Status", "Action"].map((h) => <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700">{h}</th>)}</tr></thead>
+                <tbody>
+                  {designations.map((d, i) => (
+                    <tr key={d.id} className={i % 2 === 0 ? "bg-white" : "bg-gray-50/50"}>
+                      <td className="px-4 py-3 font-medium flex items-center gap-2"><BadgeCheck size={14} className="text-gray-400" />{d.name}</td>
+                      <td className="px-4 py-3"><span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${d.is_active ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-600"}`}>{d.is_active ? "Active" : "Inactive"}</span></td>
+                      <td className="px-4 py-3">
+                        <div className="flex gap-1.5">
+                          <button onClick={() => openEditDesig(d)} className="p-1.5 text-gray-600 hover:bg-gray-100 rounded-lg" title="Edit"><Pencil size={15} /></button>
+                          <button onClick={() => setConfirm({ action: () => toggleDesigActive.mutate({ id: d.id, is_active: !d.is_active }), title: d.is_active ? "Deactivate Designation" : "Activate Designation", message: `${d.is_active ? "Deactivate" : "Activate"} ${d.name}? Existing faculty records using this designation are not affected — it only ${d.is_active ? "disappears from" : "reappears in"} the Add Faculty selection list.` })}
+                            className={`text-xs font-semibold px-2 py-1 rounded-lg ${d.is_active ? "text-red-600 hover:bg-red-50" : "text-green-700 hover:bg-green-50"}`}>{d.is_active ? "Deactivate" : "Activate"}</button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </>
+      )}
+
       {/* ── Roles tab (read-only) ───────────────────────────────────────── */}
       {tab === "roles" && (
         <>
@@ -315,6 +377,22 @@ export default function AdminPage() {
             <div className="flex gap-3 mt-5">
               <button onClick={closeCollegeForm} className="flex-1 py-2.5 border border-gray-200 rounded-xl text-base font-medium hover:bg-gray-50">Cancel</button>
               <button onClick={() => { if (!collegeForm.name || !collegeForm.code) { toast.error("Name and Code are required."); return; } saveCollege.mutate(); }} disabled={saveCollege.isPending} className="flex-1 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-base font-bold hover:bg-[#178F8F] disabled:opacity-60">{saveCollege.isPending ? "Saving…" : editCollege ? "Save Changes" : "Create"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Designation form modal */}
+      {showDesigForm && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
+            <h3 className="text-xl font-bold mb-4">{editDesig ? "Edit Designation" : "Add Designation"}</h3>
+            <div className="space-y-3">
+              <div><label className="block text-base font-semibold text-gray-700 mb-1">Name *</label><input value={desigForm.name} onChange={(e) => setDesigForm({ name: e.target.value })} placeholder="e.g. Professor" className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" /></div>
+            </div>
+            <div className="flex gap-3 mt-5">
+              <button onClick={closeDesigForm} className="flex-1 py-2.5 border border-gray-200 rounded-xl text-base font-medium hover:bg-gray-50">Cancel</button>
+              <button onClick={() => { if (!desigForm.name.trim()) { toast.error("Name is required."); return; } saveDesignation.mutate(); }} disabled={saveDesignation.isPending} className="flex-1 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-base font-bold hover:bg-[#178F8F] disabled:opacity-60">{saveDesignation.isPending ? "Saving…" : editDesig ? "Save Changes" : "Create"}</button>
             </div>
           </div>
         </div>

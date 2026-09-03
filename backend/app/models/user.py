@@ -41,6 +41,21 @@ class College(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class Designation(Base):
+    """Master data entity for Super Admin (BUSINESS_LOGIC.md Section N.5 /
+    designation-management investigation). `User.designation` remains a plain
+    string column (NOT a foreign key to this table) — existing values such as
+    "University Registrar"/"Controller of Exams" must keep working untouched;
+    this table is only the controlled source offered to HOD's Add Faculty form
+    for NEW faculty designation selection, mirroring College's flat, FK-less
+    master-data pattern exactly."""
+    __tablename__ = "ams_designations"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(200), unique=True, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 class User(Base):
     __tablename__ = "ams_users"
     id: Mapped[uuid.UUID]       = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

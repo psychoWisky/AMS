@@ -14,7 +14,7 @@ from app.core.security import verify_password, hash_password, create_access_toke
 from app.core.dependencies import get_current_user, require_roles, is_profile_complete, get_missing_profile_fields
 from app.core.config import settings
 from app.core.email import send_email
-from app.models.user import User, UserRole, RefreshToken
+from app.models.user import User, UserRole, RefreshToken, Designation
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
@@ -22,7 +22,6 @@ router = APIRouter(prefix="/auth", tags=["Auth"])
 # email domain, matching the convention already used by every seeded staff
 # account (seed.py). Not a secret; not sourced from .env.
 _AVFU_STAFF_EMAIL_DOMAIN = "avfu.ac.in"
-_FACULTY_DESIGNATIONS = ("Professor", "Associate Professor", "Assistant Professor")
 _FACULTY_TITLES = ("Dr.", "Mr", "Mrs", "Miss")
 
 
@@ -99,7 +98,10 @@ class CreateFacultyRequest(BaseModel):
     gender: str
     email: EmailStr
     mobile: str
-    designation: Literal["Professor", "Associate Professor", "Assistant Professor"]
+    # Validated against active app.models.user.Designation rows at request
+    # time (create_faculty), not a static Literal — designation-management
+    # task, replaces the previously hardcoded 3-value list.
+    designation: str
     address: str
 
     @field_validator("email")
@@ -334,6 +336,15 @@ async def create_faculty(
     if not user.department_id:
         raise HTTPException(400, "Your account has no department assigned; contact an administrator.")
 
+    # Designation-management task — backend-authoritative check against active
+    # Designation master-data rows, replacing the previous static Literal.
+    designation_check = await db.execute(
+        select(Designation).where(func.lower(Designation.name) == body.designation.strip().lower(), Designation.is_active == True)
+    )
+    designation_row = designation_check.scalar_one_or_none()
+    if not designation_row:
+        raise HTTPException(400, "Designation is not a currently active option. Please select a valid designation.")
+
     existing = await db.execute(select(User).where(User.email == body.email))
     if existing.scalar_one_or_none():
         raise HTTPException(409, "This email is already registered.")
@@ -348,7 +359,7 @@ async def create_faculty(
         date_of_birth=body.date_of_birth,
         gender=body.gender,
         mobile=body.mobile,
-        designation=body.designation,
+        designation=designation_row.name,
         address=body.address,
         role=UserRole.FACULTY,
         department_id=user.department_id,  # never client-supplied — always the HOD's own department
