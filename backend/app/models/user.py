@@ -56,6 +56,28 @@ class Designation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class Role(Base):
+    """Role MASTER DATA for the Super Admin Administration UI (role-management
+    task). This is deliberately NOT the authorization mechanism — `UserRole`
+    (the Python/PostgreSQL enum above) and `User.role` remain the sole source
+    of truth for every `require_roles(...)` check in this codebase, byte-for-
+    byte unchanged. `ams_roles` has no foreign key from `User.role` and never
+    will in this step; `code` for the 8 seeded rows matches the `UserRole`
+    enum member names purely so `user_count` can be computed by joining on
+    `User.role`'s string value, not because the two are structurally linked.
+    A "custom" (`is_system=False`) role created here grants NO system access —
+    it cannot be selected as an actual User.role until a real permission
+    system is built (out of scope here); the Admin UI must disclose this."""
+    __tablename__ = "ams_roles"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    code: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    is_system: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
 class User(Base):
     __tablename__ = "ams_users"
     id: Mapped[uuid.UUID]       = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

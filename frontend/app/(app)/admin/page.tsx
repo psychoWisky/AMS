@@ -3,14 +3,14 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { toast } from "sonner";
-import { ShieldCheck, Plus, Pencil, Loader2, Building2, GraduationCap, School, Lock, BadgeCheck } from "lucide-react";
+import { ShieldCheck, Plus, Pencil, Loader2, Building2, GraduationCap, School, Lock, BadgeCheck, Trash2, Info } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 
 interface DepartmentRow { id: string; name: string; code: string; stream: string | null; is_active: boolean; }
 interface ProgramRow { id: string; name: string; code: string; level: string; department_id: string; duration_years: number; is_active: boolean; }
 interface CollegeRow { id: string; name: string; code: string; is_active: boolean; }
 interface DesignationRow { id: string; name: string; is_active: boolean; created_at: string; }
-interface RoleRow { value: string; label: string; user_count: number; }
+interface RoleRow { id: string; code: string; name: string; is_system: boolean; is_active: boolean; user_count: number; }
 
 const TABS = ["departments", "programmes", "colleges", "designations", "roles"] as const;
 type Tab = (typeof TABS)[number];
@@ -133,12 +133,43 @@ export default function AdminPage() {
   function closeDesigForm() { setShowDesigForm(false); setEditDesig(null); setDesigForm({ name: "" }); }
   function openEditDesig(d: DesignationRow) { setEditDesig(d); setDesigForm({ name: d.name }); setShowDesigForm(true); }
 
-  // ── Roles (read-only) ────────────────────────────────────────────────────
+  // ── Roles ────────────────────────────────────────────────────────────────
+  // MASTER DATA ONLY (role-management task) — a "custom" (non-system) role
+  // created here is a catalog entry only. It cannot be selected as an actual
+  // user's role and grants no system access until a real permission model is
+  // built — the banner below states this explicitly so nobody is misled.
+  const [showRoleForm, setShowRoleForm] = useState(false);
+  const [editRole, setEditRole] = useState<RoleRow | null>(null);
+  const [roleForm, setRoleForm] = useState({ code: "", name: "" });
+
   const { data: roles = [], isLoading: rolesLoading } = useQuery<RoleRow[]>({
     queryKey: ["ams-admin-roles"],
     queryFn: async () => (await api.get("/admin/roles")).data,
     enabled: tab === "roles",
   });
+
+  const saveRole = useMutation({
+    mutationFn: () => editRole
+      ? api.patch(`/admin/roles/${editRole.id}`, editRole.is_system ? { name: roleForm.name } : roleForm)
+      : api.post("/admin/roles", roleForm),
+    onSuccess: () => { toast.success(editRole ? "Role updated." : "Role created."); qc.invalidateQueries({ queryKey: ["ams-admin-roles"] }); closeRoleForm(); },
+    onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed."),
+  });
+
+  const toggleRoleActive = useMutation({
+    mutationFn: ({ id, is_active }: { id: string; is_active: boolean }) => api.patch(`/admin/roles/${id}`, { is_active }),
+    onSuccess: () => { toast.success("Role status updated."); qc.invalidateQueries({ queryKey: ["ams-admin-roles"] }); },
+    onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed."),
+  });
+
+  const deleteRole = useMutation({
+    mutationFn: (id: string) => api.delete(`/admin/roles/${id}`),
+    onSuccess: () => { toast.success("Role deleted."); qc.invalidateQueries({ queryKey: ["ams-admin-roles"] }); },
+    onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed to delete role."),
+  });
+
+  function closeRoleForm() { setShowRoleForm(false); setEditRole(null); setRoleForm({ code: "", name: "" }); }
+  function openEditRole(r: RoleRow) { setEditRole(r); setRoleForm({ code: r.code, name: r.name }); setShowRoleForm(true); }
 
   return (
     <div className="p-6 max-w-5xl mx-auto">
@@ -293,22 +324,45 @@ export default function AdminPage() {
         </>
       )}
 
-      {/* ── Roles tab (read-only) ───────────────────────────────────────── */}
+      {/* ── Roles tab ────────────────────────────────────────────────────── */}
       {tab === "roles" && (
         <>
-          <div className="flex items-center gap-2 mb-3 text-sm text-gray-600 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
-            <Lock size={14} className="text-amber-600" />
-            Roles are a fixed part of the application's authorization model and cannot be created, edited, or deleted from this screen. See BUSINESS_LOGIC.md Section N.5 for the reasoning.
+          <div className="flex items-start gap-2 mb-3 text-sm text-gray-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2.5">
+            <Info size={15} className="text-amber-600 shrink-0 mt-0.5" />
+            <span>Custom roles are currently master-data entries only. They do not grant system permissions or change application access until role permissions are implemented. The 8 system roles below (marked "System") are what actually control access and cannot be renamed to a different code, changed to custom, or deleted.</span>
+          </div>
+          <div className="flex justify-end mb-3">
+            <button onClick={() => setShowRoleForm(true)} className="flex items-center gap-2 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-xl font-semibold text-sm hover:bg-[#178F8F]"><Plus size={15} /> Add Role</button>
           </div>
           <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
             {rolesLoading ? <div className="flex justify-center py-12"><Loader2 className="animate-spin text-gray-600" /></div> : (
               <table className="w-full text-sm">
-                <thead className="bg-gray-50 border-b border-gray-200"><tr>{["Role", "Active Users"].map((h) => <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700">{h}</th>)}</tr></thead>
+                <thead className="bg-gray-50 border-b border-gray-200"><tr>{["Name", "Code", "Type", "Status", "Users", "Action"].map((h) => <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700">{h}</th>)}</tr></thead>
                 <tbody>
                   {roles.map((r, i) => (
-                    <tr key={r.value} className={i % 2 === 0 ? "bg-white" : "bg-gray-50/50"}>
-                      <td className="px-4 py-3 font-medium">{r.label}</td>
+                    <tr key={r.id} className={i % 2 === 0 ? "bg-white" : "bg-gray-50/50"}>
+                      <td className="px-4 py-3 font-medium">{r.name}</td>
+                      <td className="px-4 py-3 font-mono text-[#0D6E6E]">{r.code}</td>
+                      <td className="px-4 py-3">
+                        {r.is_system ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-50 text-blue-700 rounded-full text-xs font-semibold"><Lock size={11} /> System</span>
+                        ) : (
+                          <span className="px-2 py-0.5 bg-purple-50 text-purple-700 rounded-full text-xs font-semibold">Custom</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3"><span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${r.is_active ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-600"}`}>{r.is_active ? "Active" : "Inactive"}</span></td>
                       <td className="px-4 py-3 text-gray-600">{r.user_count}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex gap-1.5">
+                          <button onClick={() => openEditRole(r)} className="p-1.5 text-gray-600 hover:bg-gray-100 rounded-lg" title="Edit"><Pencil size={15} /></button>
+                          <button onClick={() => setConfirm({ action: () => toggleRoleActive.mutate({ id: r.id, is_active: !r.is_active }), title: r.is_active ? "Deactivate Role" : "Activate Role", message: `${r.is_active ? "Deactivate" : "Activate"} ${r.name}?` })}
+                            className={`text-xs font-semibold px-2 py-1 rounded-lg ${r.is_active ? "text-red-600 hover:bg-red-50" : "text-green-700 hover:bg-green-50"}`}>{r.is_active ? "Deactivate" : "Activate"}</button>
+                          {!r.is_system && (
+                            <button onClick={() => setConfirm({ action: () => deleteRole.mutate(r.id), title: "Delete Role", message: r.user_count > 0 ? `${r.name} has ${r.user_count} user(s) and cannot be deleted.` : `Permanently delete ${r.name}? This cannot be undone.` })}
+                              disabled={r.user_count > 0} className="p-1.5 text-red-500 hover:bg-red-50 rounded-lg disabled:opacity-30 disabled:hover:bg-transparent" title={r.user_count > 0 ? "Has users assigned" : "Delete"}><Trash2 size={15} /></button>
+                          )}
+                        </div>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -393,6 +447,38 @@ export default function AdminPage() {
             <div className="flex gap-3 mt-5">
               <button onClick={closeDesigForm} className="flex-1 py-2.5 border border-gray-200 rounded-xl text-base font-medium hover:bg-gray-50">Cancel</button>
               <button onClick={() => { if (!desigForm.name.trim()) { toast.error("Name is required."); return; } saveDesignation.mutate(); }} disabled={saveDesignation.isPending} className="flex-1 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-base font-bold hover:bg-[#178F8F] disabled:opacity-60">{saveDesignation.isPending ? "Saving…" : editDesig ? "Save Changes" : "Create"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Role form modal */}
+      {showRoleForm && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
+            <h3 className="text-xl font-bold mb-1">{editRole ? "Edit Role" : "Add Role"}</h3>
+            {!editRole && (
+              <p className="text-sm text-gray-600 mb-4">This creates a master-data entry only — it will not grant any system access (see notice above).</p>
+            )}
+            {editRole?.is_system && (
+              <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 mb-4">This is a system role — only its display name can be changed.</p>
+            )}
+            <div className="space-y-3">
+              <div>
+                <label className="block text-base font-semibold text-gray-700 mb-1">Code *</label>
+                <input value={roleForm.code} onChange={(e) => setRoleForm((f) => ({ ...f, code: e.target.value }))}
+                  disabled={!!editRole?.is_system} placeholder="e.g. LAB_ASSISTANT"
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base font-mono focus:outline-none focus:ring-2 focus:ring-[#0D6E6E] disabled:bg-gray-50" />
+              </div>
+              <div>
+                <label className="block text-base font-semibold text-gray-700 mb-1">Name *</label>
+                <input value={roleForm.name} onChange={(e) => setRoleForm((f) => ({ ...f, name: e.target.value }))} placeholder="e.g. Lab Assistant"
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+              </div>
+            </div>
+            <div className="flex gap-3 mt-5">
+              <button onClick={closeRoleForm} className="flex-1 py-2.5 border border-gray-200 rounded-xl text-base font-medium hover:bg-gray-50">Cancel</button>
+              <button onClick={() => { if (!roleForm.name.trim() || (!editRole && !roleForm.code.trim())) { toast.error("Code and Name are required."); return; } saveRole.mutate(); }} disabled={saveRole.isPending} className="flex-1 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-base font-bold hover:bg-[#178F8F] disabled:opacity-60">{saveRole.isPending ? "Saving…" : editRole ? "Save Changes" : "Create"}</button>
             </div>
           </div>
         </div>

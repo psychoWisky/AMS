@@ -3,6 +3,7 @@ management (BUSINESS_LOGIC.md Section N.5). Department/Program list+create
 endpoints are unchanged from before this revision; edit/deactivate and the
 College/Roles surfaces are new, added to this file rather than a duplicate
 module since Department/Program already lived here."""
+import re
 from typing import List, Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
@@ -12,7 +13,7 @@ from pydantic import BaseModel
 
 from app.db.base import get_db
 from app.core.dependencies import get_current_user, require_roles
-from app.models.user import User, UserRole, Department, Program, College, Designation
+from app.models.user import User, UserRole, Department, Program, College, Designation, Role
 
 router = APIRouter(prefix="/departments", tags=["Departments"])
 admin_router = APIRouter(prefix="/admin", tags=["Admin — Master Data"])
@@ -24,6 +25,9 @@ _MASTER_DATA_ROLES = (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)
 # unlike Department/Program/College). Reading (for HOD's Add Faculty dropdown)
 # uses the same unrestricted get_current_user pattern as College/Department.
 _DESIGNATION_MANAGE_ROLES = (UserRole.SUPER_ADMIN,)
+# Role master-data management (role-management task) — Super Admin only, same
+# reasoning as Designations: not broadened to Academic Admin.
+_ROLE_MANAGE_ROLES = (UserRole.SUPER_ADMIN,)
 
 
 class DeptIn(BaseModel):
@@ -57,6 +61,15 @@ class DesignationIn(BaseModel):
     name: str
 
 class DesignationUpdate(BaseModel):
+    name: Optional[str] = None
+    is_active: Optional[bool] = None
+
+class RoleIn(BaseModel):
+    code: str
+    name: str
+
+class RoleUpdate(BaseModel):
+    code: Optional[str] = None
     name: Optional[str] = None
     is_active: Optional[bool] = None
 
@@ -253,17 +266,141 @@ async def deactivate_designation(
     await db.commit()
 
 
-# ── Roles (read-only — BUSINESS_LOGIC.md Section N.5 "Role management" note) ──
+# ── Roles (master data — role-management task) ─────────────────────────────────
+# CRITICAL: this is MASTER DATA ONLY. UserRole (the Python/PostgreSQL enum),
+# User.role, require_roles(), and every existing authorization check are
+# completely untouched by this section — ams_roles has NO foreign key from
+# User.role and a "custom" (is_system=False) role can never be selected as an
+# actual User.role or grant any system access. See Role's model docstring.
 
-@admin_router.get("/roles")
-async def list_roles(db: AsyncSession = Depends(get_db), _: User = Depends(require_roles(*_MASTER_DATA_ROLES))):
-    """UserRole is a fixed Python/PostgreSQL enum, not a database-managed RBAC
-    table — every require_roles(...) check in this codebase depends on it being
-    a closed, known set. This endpoint is deliberately READ-ONLY: no create/
-    edit/delete, so the UI cannot imply a capability the architecture doesn't
-    safely support. See BUSINESS_LOGIC.md Section N.5 for the full rationale."""
+_ROLE_CODE_RE = re.compile(r"[^A-Z0-9]+")
+
+
+def _normalize_role_code(code: str) -> str:
+    normalized = _ROLE_CODE_RE.sub("_", code.strip().upper()).strip("_")
+    if not normalized:
+        raise HTTPException(400, "Role code is required.")
+    return normalized
+
+
+def _normalize_role_name(name: str) -> str:
+    normalized = " ".join(name.strip().split())
+    if not normalized:
+        raise HTTPException(400, "Role name is required.")
+    return normalized
+
+
+async def _role_user_counts(db: AsyncSession) -> dict:
+    """Maps UserRole enum VALUE (lowercase, e.g. 'super_admin') -> live active
+    user count. Role.code (e.g. 'SUPER_ADMIN') is matched against this by enum
+    member NAME lookup in the caller — a code with no matching UserRole member
+    (i.e. every custom role) simply never appears here, so its count is 0."""
     counts_result = await db.execute(
         select(User.role, func.count()).where(User.is_active == True).group_by(User.role)
     )
-    counts = {row[0].value: row[1] for row in counts_result.all()}
-    return [{"value": r.value, "label": r.value.replace("_", " ").title(), "user_count": counts.get(r.value, 0)} for r in UserRole]
+    return {row[0].value: row[1] for row in counts_result.all()}
+
+
+def _role_dict(r: Role, counts: dict) -> dict:
+    try:
+        user_count = counts.get(UserRole[r.code].value, 0)
+    except KeyError:
+        user_count = 0  # custom role code has no corresponding UserRole member
+    return {
+        "id": str(r.id), "code": r.code, "name": r.name,
+        "is_system": r.is_system, "is_active": r.is_active,
+        "user_count": user_count,
+        "created_at": r.created_at.isoformat(), "updated_at": r.updated_at.isoformat(),
+    }
+
+
+@admin_router.get("/roles")
+async def list_roles(active: Optional[bool] = None, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    """Any authenticated user may read this (mirrors Designations) — the
+    Administration UI and any future role-aware selector both depend on it.
+    `active=true`/`active=false` filter; omitted -> all rows."""
+    q = select(Role)
+    if active is not None:
+        q = q.where(Role.is_active == active)
+    result = await db.execute(q.order_by(Role.is_system.desc(), Role.name))
+    counts = await _role_user_counts(db)
+    return [_role_dict(r, counts) for r in result.scalars().all()]
+
+
+@admin_router.post("/roles", status_code=201)
+async def create_role(
+    body: RoleIn, db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(*_ROLE_MANAGE_ROLES)),
+):
+    """Creates a CUSTOM (is_system=False) master-data row only — never
+    system=True, never selectable as a real User.role, never grants access."""
+    code = _normalize_role_code(body.code)
+    name = _normalize_role_name(body.name)
+
+    dup_code = await db.execute(select(Role).where(func.upper(Role.code) == code))
+    if dup_code.scalar_one_or_none():
+        raise HTTPException(400, "A role with this code already exists.")
+    dup_name = await db.execute(select(Role).where(func.lower(Role.name) == name.lower()))
+    if dup_name.scalar_one_or_none():
+        raise HTTPException(400, "A role with this name already exists.")
+
+    r = Role(code=code, name=name, is_system=False, is_active=True)
+    db.add(r); await db.commit(); await db.refresh(r)
+    return {"id": str(r.id), "message": "Role created.", "is_system": False}
+
+
+@admin_router.patch("/roles/{role_id}")
+async def update_role(
+    role_id: UUID, body: RoleUpdate, db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(*_ROLE_MANAGE_ROLES)),
+):
+    r = await db.get(Role, role_id)
+    if not r: raise HTTPException(404, "Role not found.")
+
+    updates = body.model_dump(exclude_none=True)
+    if "code" in updates:
+        if r.is_system:
+            raise HTTPException(400, "The code of a system role cannot be changed.")
+        code = _normalize_role_code(updates["code"])
+        dup_code = await db.execute(select(Role).where(func.upper(Role.code) == code, Role.id != role_id))
+        if dup_code.scalar_one_or_none():
+            raise HTTPException(400, "A role with this code already exists.")
+        updates["code"] = code
+    if "name" in updates:
+        name = _normalize_role_name(updates["name"])
+        dup_name = await db.execute(select(Role).where(func.lower(Role.name) == name.lower(), Role.id != role_id))
+        if dup_name.scalar_one_or_none():
+            raise HTTPException(400, "A role with this name already exists.")
+        updates["name"] = name
+
+    for k, v in updates.items():
+        setattr(r, k, v)
+    await db.commit()
+    return {"message": "Role updated."}
+
+
+@admin_router.delete("/roles/{role_id}", status_code=204)
+async def delete_role(
+    role_id: UUID, db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(*_ROLE_MANAGE_ROLES)),
+):
+    """System roles are NEVER deletable (hard or soft) — this is the one rule
+    protecting the ability to authorize Super Admin itself. Custom roles are
+    hard-deleted (no ams_users row can reference a custom code, since User.role
+    only ever holds a real UserRole enum value), but only once their computed
+    user_count is 0, exactly as specified."""
+    r = await db.get(Role, role_id)
+    if not r: raise HTTPException(404, "Role not found.")
+    if r.is_system:
+        raise HTTPException(400, "System roles cannot be deleted.")
+
+    counts = await _role_user_counts(db)
+    try:
+        user_count = counts.get(UserRole[r.code].value, 0)
+    except KeyError:
+        user_count = 0
+    if user_count > 0:
+        raise HTTPException(400, "This role has users assigned and cannot be deleted.")
+
+    await db.delete(r)
+    await db.commit()
