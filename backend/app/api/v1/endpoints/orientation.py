@@ -10,6 +10,8 @@ SUPER_ADMIN/ACADEMIC_ADMIN. This is an explicit, isolated, documented
 substitution — not a silent permanent mapping — and should be replaced with a
 real Incharge Academic Cell role check the moment that role is added (Phase 0).
 """
+import re
+import unicodedata
 from typing import Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
@@ -20,7 +22,6 @@ from sqlalchemy.orm import selectinload
 from pydantic import BaseModel, EmailStr
 
 from app.db.base import get_db
-from app.core.config import settings
 from app.core.dependencies import get_current_user, require_roles
 from app.core.security import hash_password, generate_temp_password
 from app.core.email import send_email
@@ -28,6 +29,49 @@ from app.models.user import User, UserRole, Program
 from app.models.orientation import OrientationCandidate
 
 router = APIRouter(prefix="/orientation", tags=["Orientation"])
+
+# Student university email domain (AVFU-confirmed production format,
+# firstname.lastname@avfu.ac.in — see BUSINESS_LOGIC.md Section 28 investigation
+# on student email generation). Deliberately a LOCAL constant, independent of
+# settings.ORIENTATION_EMAIL_DOMAIN (kept unchanged for now) and independent of
+# auth.py's faculty-only _AVFU_STAFF_EMAIL_DOMAIN — student and faculty email
+# generation are separate concerns that happen to share the same domain today.
+_STUDENT_EMAIL_DOMAIN = "avfu.ac.in"
+
+_NON_ALPHA_RE = re.compile(r"[^a-z]")
+
+
+def _ascii_alpha(token: str) -> str:
+    """Lowercase, strip diacritics (NFKD decompose + drop combining marks),
+    then keep only ASCII letters. 'José' -> 'jose', "O'Brien" -> 'obrien'."""
+    decomposed = unicodedata.normalize("NFKD", token)
+    ascii_only = decomposed.encode("ascii", "ignore").decode("ascii")
+    return _NON_ALPHA_RE.sub("", ascii_only.lower())
+
+
+def _student_email_local_part(candidate_name: str) -> str:
+    """Deterministic firstname.lastname local-part rule (BUSINESS_LOGIC.md
+    Section 28 investigation, Section 3/4/5 of the implementation task):
+    trim/collapse whitespace, split on whitespace, first token = first name,
+    last token = last name (middle tokens ignored for the email), each
+    normalized to ASCII-letters-only. Single usable token -> first-name-only
+    fallback, never a trailing/malformed dot. Raises ValueError if no
+    alphabetic characters survive normalization at all (caller turns this
+    into a 400, per instruction not to invent a placeholder name)."""
+    tokens = candidate_name.strip().split()
+    if not tokens:
+        raise ValueError("Candidate name has no usable characters for an email address.")
+
+    first = _ascii_alpha(tokens[0])
+    last = _ascii_alpha(tokens[-1]) if len(tokens) > 1 else ""
+
+    if first and last:
+        return f"{first}.{last}"
+    if first:
+        return first
+    if last:
+        return last
+    raise ValueError("Candidate name has no usable characters for an email address.")
 
 # Demo substitution for "Incharge Academic Cell" — see module docstring.
 _INCHARGE_ROLES = (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)
@@ -170,18 +214,37 @@ async def decide_selection(
         await db.commit()
         return {"message": "Candidate marked as not selected."}
 
+    # University email local-part is derived once, up front, from the
+    # candidate's name (Section 3/4 of the student-email task) — a ValueError
+    # here means the name has no usable alphabetic characters at all, which is
+    # a genuine input problem, not something to paper over with a placeholder.
+    try:
+        email_local = _student_email_local_part(c.name)
+    except ValueError:
+        raise HTTPException(400, "Candidate name has no usable characters to generate a university email address.")
+
     # ── Selected: generate roll number + account, under a SAVEPOINT so a rare
     # concurrent-roll-number collision can be retried without discarding the
     # candidate/program rows already loaded in this session (Section 28.11 —
     # deliberately NOT a bare SELECT COUNT(*)-then-insert, which the project's
     # existing admission-number generator already demonstrates is unsafe).
+    # The SAME savepoint/IntegrityError-retry pattern now also absorbs
+    # firstname.lastname email collisions: attempt 1 uses the unsuffixed
+    # local-part, each retry appends the next numeric suffix (2, 3, 4, ...)
+    # before '@avfu.ac.in' — never after the domain, never reusing a value
+    # the unique index still considers occupied. _next_roll_no itself is
+    # unchanged; roll-number and email generation remain independent concerns
+    # that simply happen to share this retry loop.
     program = c.program
     university_email = None
     temp_password = generate_temp_password()
     student = None
-    for _attempt in range(5):
+    _MAX_ACCOUNT_CREATION_ATTEMPTS = 20
+    for attempt in range(_MAX_ACCOUNT_CREATION_ATTEMPTS):
         roll_no = await _next_roll_no(c.academic_year, program.code, db)
-        university_email = f"{roll_no.lower()}@{settings.ORIENTATION_EMAIL_DOMAIN}"
+        suffix = attempt + 1  # 1 -> unsuffixed, 2 -> "…2", 3 -> "…3", ...
+        local_part = email_local if suffix == 1 else f"{email_local}{suffix}"
+        university_email = f"{local_part}@{_STUDENT_EMAIL_DOMAIN}"
         try:
             async with db.begin_nested():
                 student = User(
@@ -204,7 +267,7 @@ async def decide_selection(
             student = None
             continue
     if not student:
-        raise HTTPException(409, "Could not generate a unique roll number after several attempts. Please try again.")
+        raise HTTPException(409, "Could not generate a unique student roll number/email after several attempts. Please try again.")
 
     c.selection_status = "selected"
     c.roll_no = student.student_roll
