@@ -44,7 +44,7 @@ const STUDENT_TILES: DashboardTile[] = [
   { key: "advisory-committee", title: "Advisory Committee", description: "Your committee members and roles", icon: FlaskConical, color: "bg-green-50 text-green-700", implemented: true, href: "/research" },
   { key: "admission-result", title: "Admission & Result", description: "Admission status and results", icon: ClipboardCheck, color: "bg-blue-50 text-blue-700", implemented: false },
   { key: "progress-report", title: "Progress Report", description: "Submit and track your progress report", icon: FileText, color: "bg-amber-50 text-amber-700", implemented: false },
-  { key: "ppw", title: "PPW", description: "Proposed Programme of Work", icon: FileSpreadsheet, color: "bg-amber-50 text-amber-700", implemented: false },
+  { key: "ppw", title: "PPW", description: "Proposed Programme of Work", icon: FileSpreadsheet, color: "bg-amber-50 text-amber-700", implemented: true, href: "/ppw" },
   { key: "migration", title: "Migration", description: "Student migration request", icon: ArrowRightLeft, color: "bg-red-50 text-red-700", implemented: false },
   { key: "publication", title: "Publication", description: "Your research publications", icon: BookMarked, color: "bg-indigo-50 text-indigo-700", implemented: false },
   { key: "comprehensive-exam", title: "Comprehensive Exam", description: "Comprehensive examination status", icon: CheckSquare, color: "bg-purple-50 text-purple-700", implemented: false },

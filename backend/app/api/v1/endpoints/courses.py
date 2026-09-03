@@ -25,7 +25,7 @@ from typing import Optional, List
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel, model_validator
@@ -33,7 +33,7 @@ from pydantic import BaseModel, model_validator
 from app.db.base import get_db
 from app.core.dependencies import get_current_user, require_roles
 from app.models.user import User, UserRole, Program, Department
-from app.models.course import Course, CourseOffering, OfferingFaculty
+from app.models.course import Course, CourseOffering, OfferingFaculty, CourseAvailability
 
 router = APIRouter(prefix="/courses", tags=["Courses"])
 
@@ -152,6 +152,20 @@ def _authorize_department_manage(department_id: Optional[UUID], user: User) -> N
     raise HTTPException(403, "Insufficient permissions.")
 
 
+def _course_visibility_condition(department_id: UUID):
+    """Shared course-visibility predicate (course-availability task) — a
+    course is visible to `department_id` if that department OWNS it
+    (`Course.department_id`) OR has an explicit `CourseAvailability` grant.
+    Defined exactly once and reused by list_courses/get_course's STUDENT
+    branches and PPW's available-courses endpoint (ppw.py), per instruction
+    not to duplicate this logic. CourseOffering/offering visibility is
+    unrelated and intentionally untouched."""
+    return or_(
+        Course.department_id == department_id,
+        Course.id.in_(select(CourseAvailability.course_id).where(CourseAvailability.department_id == department_id)),
+    )
+
+
 # ── Credit structure listing ──────────────────────────────────────────────────
 
 @router.get("/credit-formats")
@@ -162,6 +176,83 @@ async def credit_formats():
 @router.get("/category-values")
 async def category_values():
     return {"category": CATEGORY_VALUES, "credit_type": CREDIT_TYPE_VALUES}
+
+
+# ── Course Availability — fixed-path routes (course-availability task) ─────────
+# Standing, semester-independent cross-department accessibility — separate from
+# Course.department_id (ownership, never changed here) and CourseOffering
+# (semester-specific, untouched by this task). "Option A": the RECEIVING
+# department's HOD manages the grant; the owning department's course record
+# and course-management authorization (_authorize_department_manage) are
+# never touched by any endpoint here or below. Registered BEFORE the dynamic
+# GET /{course_id} route (same convention as /credit-formats, /category-values
+# above) so "/search"/"available-to-me" are never swallowed by {course_id}.
+
+class AvailabilityIn(BaseModel):
+    # Optional: if omitted, defaults to the caller's own department (HOD).
+    # If supplied, it MUST equal the caller's own department for HOD — never
+    # client-controlled beyond that, per instruction "do not allow the request
+    # body to arbitrarily select any department." Admins may target any dept.
+    department_id: Optional[UUID] = None
+
+
+def _authorize_availability_manage(department_id: UUID, user: User) -> None:
+    if user.role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN):
+        return
+    if user.role == UserRole.HOD:
+        if user.department_id and department_id == user.department_id:
+            return
+        raise HTTPException(403, "You can only manage course availability for your own department.")
+    raise HTTPException(403, "Insufficient permissions.")
+
+
+@router.get("/search")
+async def search_courses(
+    q: Optional[str] = None, db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.HOD)),
+):
+    """Deliberately NOT department-scoped — HOD/Admin only. This is the narrow,
+    explicitly-authorized cross-department discovery surface a receiving HOD
+    uses to find an existing other-department course to grant availability
+    for (Section 6's "Add Existing Course" search). It does not replace or
+    weaken GET /courses's strict department scoping for STUDENT/HOD's own
+    catalogue view — that endpoint and its authorization are untouched."""
+    query = select(Course).options(selectinload(Course.department)).where(Course.status == "active")
+    if q:
+        like = f"%{q}%"
+        query = query.where(or_(Course.course_number.ilike(like), Course.title.ilike(like)))
+    result = await db.execute(query.order_by(Course.course_number).limit(50))
+    return [CourseOut.from_orm(c) for c in result.scalars().all()]
+
+
+@router.get("/available-to-me")
+async def list_courses_available_to_my_department(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.HOD)),
+):
+    """Courses NOT owned by the caller's department but explicitly made
+    available to it — the "Courses available to your department" list
+    (Section 5). For SUPER_ADMIN/ACADEMIC_ADMIN (no home department), this is
+    intentionally empty rather than an error — there is no meaningful "my
+    department" for those roles; use GET /courses/{id}/availability instead."""
+    if not user.department_id:
+        return []
+    result = await db.execute(
+        select(CourseAvailability)
+        .options(selectinload(CourseAvailability.course).selectinload(Course.department))
+        .where(CourseAvailability.department_id == user.department_id)
+        .join(Course, Course.id == CourseAvailability.course_id)
+        .order_by(Course.course_number)
+    )
+    return [{
+        "availability_id": str(a.id),
+        "course_id": str(a.course_id),
+        "course_number": a.course.course_number if a.course else None,
+        "course_title": a.course.title if a.course else None,
+        "credit_structure": a.course.credit_structure if a.course else None,
+        "owning_department_id": str(a.course.department_id) if a.course and a.course.department_id else None,
+        "owning_department_name": a.course.department.name if a.course and a.course.department else None,
+    } for a in result.scalars().all()]
 
 
 # ── Courses ───────────────────────────────────────────────────────────────────
@@ -185,7 +276,9 @@ async def list_courses(
         scope = await _resolve_student_scope(user, db)
         if not scope:
             return []
-        q = q.where(Course.department_id == scope["department_id"])
+        # Course-availability task — widened from strict ownership equality to
+        # ownership-OR-explicit-availability (see _course_visibility_condition).
+        q = q.where(_course_visibility_condition(scope["department_id"]))
     elif user.role == UserRole.HOD:
         if not user.department_id:
             return []
@@ -219,7 +312,11 @@ async def get_course(course_id: UUID, db: AsyncSession = Depends(get_db), user: 
     if not c: raise HTTPException(404, "Course not found.")
     if user.role == UserRole.STUDENT:
         scope = await _resolve_student_scope(user, db)
-        if not scope or c.department_id != scope["department_id"]:
+        visible = False
+        if scope:
+            check = await db.execute(select(Course.id).where(Course.id == c.id, _course_visibility_condition(scope["department_id"])))
+            visible = check.scalar_one_or_none() is not None
+        if not visible:
             raise HTTPException(404, "Course not found.")
     elif user.role == UserRole.HOD:
         if not (user.department_id and c.department_id and user.department_id == c.department_id):
@@ -284,6 +381,71 @@ async def update_course_status(
     _authorize_department_manage(c.department_id, user)
     c.status = status; await db.commit()
     return {"message": f"Status set to {status}."}
+
+
+@router.get("/{course_id}/availability")
+async def list_course_availability(
+    course_id: UUID, db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.HOD)),
+):
+    c = await db.get(Course, course_id)
+    if not c: raise HTTPException(404, "Course not found.")
+    result = await db.execute(
+        select(CourseAvailability).options(selectinload(CourseAvailability.department)).where(CourseAvailability.course_id == course_id)
+    )
+    return [{
+        "id": str(a.id), "department_id": str(a.department_id),
+        "department_name": a.department.name if a.department else None,
+        "created_at": a.created_at.isoformat(),
+    } for a in result.scalars().all()]
+
+
+@router.post("/{course_id}/availability", status_code=201)
+async def add_course_availability(
+    course_id: UUID, body: AvailabilityIn, db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.HOD)),
+):
+    c = await db.get(Course, course_id)
+    if not c: raise HTTPException(404, "Course not found.")
+
+    target_department_id = body.department_id or user.department_id
+    if not target_department_id:
+        raise HTTPException(400, "department_id is required.")
+    _authorize_availability_manage(target_department_id, user)
+
+    if c.department_id == target_department_id:
+        raise HTTPException(400, "This course is already owned by that department and is inherently available to it.")
+
+    existing = await db.execute(
+        select(CourseAvailability).where(CourseAvailability.course_id == course_id, CourseAvailability.department_id == target_department_id)
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(409, "This course is already available to that department.")
+
+    a = CourseAvailability(course_id=course_id, department_id=target_department_id)
+    db.add(a)
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(409, "This course is already available to that department.")
+    return {"id": str(a.id), "message": "Course made available to the department."}
+
+
+@router.delete("/{course_id}/availability/{department_id}", status_code=204)
+async def remove_course_availability(
+    course_id: UUID, department_id: UUID, db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.HOD)),
+):
+    _authorize_availability_manage(department_id, user)
+    result = await db.execute(
+        select(CourseAvailability).where(CourseAvailability.course_id == course_id, CourseAvailability.department_id == department_id)
+    )
+    a = result.scalar_one_or_none()
+    if not a:
+        return
+    await db.delete(a)
+    await db.commit()
 
 
 # ── Offerings ─────────────────────────────────────────────────────────────────

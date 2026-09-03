@@ -46,6 +46,30 @@ class Course(Base):
         return f"{self.credit_theory}+{self.credit_practical}"
 
 
+class CourseAvailability(Base):
+    """Cross-department course accessibility (course-availability task) —
+    deliberately SEPARATE from `Course.department_id` (the course's actual/
+    owning department, unchanged by this model) and from `CourseOffering`
+    (a semester-specific teaching assignment, also unchanged/untouched by this
+    task). This table answers only "which OTHER departments' students may
+    see/select this course for standing curriculum-planning purposes (e.g.
+    PPW)" — a receiving department's HOD manages rows where
+    `department_id == their own department`; the owning department's course
+    record itself is never modified by an availability grant. A course is
+    always implicitly available to its own owning department without a row
+    here — do not create a redundant self-referential row."""
+    __tablename__ = "ams_course_availability"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    course_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_courses.id", ondelete="CASCADE"))
+    department_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_departments.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (UniqueConstraint("course_id", "department_id", name="uq_course_availability"),)
+
+    course: Mapped["Course"] = relationship("Course", foreign_keys=[course_id])
+    department: Mapped["Department"] = relationship("Department", foreign_keys=[department_id])
+
+
 class CourseOffering(Base):
     __tablename__ = "ams_course_offerings"
     id: Mapped[uuid.UUID]          = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
