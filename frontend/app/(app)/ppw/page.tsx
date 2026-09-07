@@ -3,7 +3,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { toast } from "sonner";
-import { FileSpreadsheet, Plus, X, Loader2, Search } from "lucide-react";
+import { FileSpreadsheet, Plus, X, Loader2, Search, CheckCircle2, Clock, RotateCcw } from "lucide-react";
 
 interface PpwCourseRow {
   id: string; sl_no: number; course_id: string; course_number: string | null;
@@ -19,9 +19,15 @@ interface PpwHeader {
   program_level: string | null; department_name: string | null; college_name: string | null;
   admission_year: number | null;
 }
+// signature_status: "not_applicable" | "not_submitted" | "pending" | "approved" | "reverted"
 interface CommitteeRow {
   category: string; faculty_name: string | null; designation: string | null;
-  department_name: string | null; signature_status: string;
+  department_name: string | null; signature_status: string; signed_at: string | null;
+  is_current_stage: boolean; remark: string | null;
+}
+interface HodApproval {
+  status: string; approver_name: string | null; department_name: string | null;
+  signed_at: string | null; is_current_stage: boolean; remark: string | null;
 }
 interface Ppw {
   id: string; status: string;
@@ -30,8 +36,10 @@ interface Ppw {
   submitted_at: string | null;
   classifications: ClassificationSummary[];
   header: PpwHeader;
-  committee: { committee_found: boolean; rows: CommitteeRow[] };
+  committee: { committee_found: boolean; cycle_number: number | null; cycle_status: string | null; revert_remark: string | null; reverted_at: string | null; rows: CommitteeRow[] };
+  hod_approval: HodApproval;
   signatures: { head: string; dpgs: string };
+  is_editable: boolean;
 }
 interface AvailableCourse {
   id: string; course_number: string; title: string; credit_structure: string;
@@ -39,6 +47,20 @@ interface AvailableCourse {
 }
 
 const CLASSIFICATION_ORDER = ["major", "minor", "supporting", "research", "seminar", "compulsory"];
+
+const STATUS_LABELS: Record<string, string> = {
+  draft: "Draft", major_advisor_pending: "Awaiting Major Advisor Approval",
+  committee_pending: "Awaiting Advisory Committee Approval", hod_pending: "Awaiting HOD Approval",
+  hod_approved: "Approved by HOD", reverted: "Reverted — Needs Correction",
+};
+
+function SignatureBadge({ status }: { status: string }) {
+  if (status === "approved") return <span className="inline-flex items-center gap-1 text-green-700 text-sm font-semibold"><CheckCircle2 size={15} /> Approved</span>;
+  if (status === "reverted") return <span className="inline-flex items-center gap-1 text-red-600 text-sm font-semibold"><RotateCcw size={15} /> Reverted</span>;
+  if (status === "pending") return <span className="inline-flex items-center gap-1 text-amber-600 text-sm font-semibold"><Clock size={15} /> Pending</span>;
+  if (status === "not_applicable") return <span className="text-gray-400 text-sm">Not applicable</span>;
+  return <span className="text-gray-400 text-sm">—</span>;
+}
 
 export default function PpwPage() {
   const qc = useQueryClient();
@@ -82,7 +104,12 @@ function PpwEditor({ ppw }: { ppw: Ppw }) {
   const qc = useQueryClient();
   const [addingFor, setAddingFor] = useState<string | null>(null);
   const [courseSearch, setCourseSearch] = useState("");
-  const isDraft = ppw.status === "draft";
+  // Phase 2: editable while draft OR reverted (student may correct and resubmit) —
+  // was "draft"-only in Phase 1. `is_editable` is server-computed (ppw.py's
+  // _EDITABLE_STATUSES), never re-derived here, so the UI can never drift from
+  // what the backend actually allows.
+  const isDraft = ppw.is_editable;
+  const isReverted = ppw.status === "reverted";
 
   const { data: availableCourses = [] } = useQuery<AvailableCourse[]>({
     queryKey: ["ams-ppw-available-courses"],
@@ -138,7 +165,9 @@ function PpwEditor({ ppw }: { ppw: Ppw }) {
         <div>
           <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2"><FileSpreadsheet size={24} className="text-[#0D6E6E]" />PPW — Proposed Programme of Work</h1>
           <p className="text-gray-700 text-base mt-1">
-            Status: <span className={`font-semibold ${isDraft ? "text-amber-700" : "text-green-700"}`}>{isDraft ? "Draft" : "Submitted (locked)"}</span>
+            Status: <span className={`font-semibold ${ppw.status === "draft" ? "text-amber-700" : ppw.status === "hod_approved" ? "text-green-700" : ppw.status === "reverted" ? "text-red-600" : "text-blue-700"}`}>
+              {STATUS_LABELS[ppw.status] ?? ppw.status}
+            </span>
             {ppw.submitted_at && <span className="text-gray-500"> — submitted {new Date(ppw.submitted_at).toLocaleString()}</span>}
           </p>
         </div>
@@ -152,15 +181,23 @@ function PpwEditor({ ppw }: { ppw: Ppw }) {
           {isDraft && (
             <button onClick={() => submitPpw.mutate()} disabled={submitPpw.isPending}
               className="px-4 py-2.5 bg-[#0D6E6E] text-white rounded-xl font-semibold text-sm hover:bg-[#178F8F] disabled:opacity-60">
-              {submitPpw.isPending ? "Submitting…" : "Submit PPW"}
+              {submitPpw.isPending ? (isReverted ? "Resubmitting…" : "Submitting…") : (isReverted ? "Resubmit PPW" : "Submit PPW")}
             </button>
           )}
         </div>
       </div>
 
-      {!isDraft && (
-        <div className="bg-green-50 border border-green-200 text-green-800 rounded-2xl px-4 py-3 text-sm font-medium">
-          This PPW has been submitted and is locked. No further edits, course additions, or removals are possible in this phase.
+      {isReverted && (
+        <div className="bg-red-50 border border-red-200 text-red-800 rounded-2xl px-4 py-3 text-sm">
+          <p className="font-semibold flex items-center gap-1.5"><RotateCcw size={15} /> Your PPW was reverted for correction.</p>
+          {ppw.committee.revert_remark && <p className="mt-1">Remark: {ppw.committee.revert_remark}</p>}
+          <p className="mt-1">Please make the necessary corrections above and resubmit. Resubmitting starts a new approval cycle from the Major Advisor stage.</p>
+        </div>
+      )}
+
+      {!isDraft && !isReverted && (
+        <div className="bg-blue-50 border border-blue-200 text-blue-800 rounded-2xl px-4 py-3 text-sm font-medium">
+          This PPW has been submitted and is locked while under approval ({STATUS_LABELS[ppw.status] ?? ppw.status}). No further edits, course additions, or removals are possible until a new cycle begins.
         </div>
       )}
 
@@ -264,6 +301,33 @@ function PpwEditor({ ppw }: { ppw: Ppw }) {
         </div>
       </section>
 
+      {/* Approval Status — quick-glance, dynamic per Section 11's requirement (distinct from the document-style preview below) */}
+      {ppw.status !== "draft" && (
+        <section className="bg-white rounded-2xl border border-gray-200 p-5">
+          <h2 className="font-bold text-gray-800 mb-4">Approval Status</h2>
+          <div className="space-y-2">
+            {ppw.committee.rows.filter((r) => r.signature_status !== "not_applicable").map((row) => (
+              <div key={row.category} className={`flex items-center justify-between px-3 py-2 rounded-lg ${row.is_current_stage ? "bg-amber-50 border border-amber-200" : "bg-gray-50"}`}>
+                <div>
+                  <p className="font-semibold text-sm text-gray-800">{row.category}</p>
+                  <p className="text-xs text-gray-500">{row.faculty_name ?? "Not assigned"}{row.designation ? ` — ${row.designation}` : ""}</p>
+                  {row.remark && <p className="text-xs text-red-600 mt-0.5">Remark: {row.remark}</p>}
+                </div>
+                <SignatureBadge status={row.signature_status} />
+              </div>
+            ))}
+            <div className={`flex items-center justify-between px-3 py-2 rounded-lg ${ppw.hod_approval.is_current_stage ? "bg-amber-50 border border-amber-200" : "bg-gray-50"}`}>
+              <div>
+                <p className="font-semibold text-sm text-gray-800">HOD</p>
+                <p className="text-xs text-gray-500">{ppw.hod_approval.approver_name ?? (ppw.hod_approval.department_name ? `Department: ${ppw.hod_approval.department_name}` : "Not yet reached")}</p>
+                {ppw.hod_approval.remark && <p className="text-xs text-red-600 mt-0.5">Remark: {ppw.hod_approval.remark}</p>}
+              </div>
+              <SignatureBadge status={ppw.hod_approval.status} />
+            </div>
+          </div>
+        </section>
+      )}
+
       {/* Section 3 — Preview (document style) */}
       <section className="bg-white rounded-2xl border border-gray-200 p-8">
         <h2 className="font-bold text-gray-800 mb-4">PPW Preview</h2>
@@ -320,14 +384,15 @@ function PpwEditor({ ppw }: { ppw: Ppw }) {
 
           <p className="font-bold mt-6 mb-2">Endorsement of Students Advisory Committee</p>
           <table className="w-full text-xs border border-gray-300">
-            <thead><tr className="bg-gray-50">{["Advisory Committee", "Name & Designation", "Department", "Signature"].map((h) => <th key={h} className="border border-gray-300 px-2 py-1 text-left">{h}</th>)}</tr></thead>
+            <thead><tr className="bg-gray-50">{["Advisory Committee", "Name & Designation", "Department", "Signature", "Signed On"].map((h) => <th key={h} className="border border-gray-300 px-2 py-1 text-left">{h}</th>)}</tr></thead>
             <tbody>
               {ppw.committee.rows.map((row) => (
-                <tr key={row.category}>
+                <tr key={row.category} className={row.is_current_stage ? "bg-amber-50" : undefined}>
                   <td className="border border-gray-300 px-2 py-1 font-semibold">{row.category}</td>
                   <td className="border border-gray-300 px-2 py-1">{row.faculty_name ? `${row.faculty_name}${row.designation ? ` (${row.designation})` : ""}` : "Not assigned"}</td>
                   <td className="border border-gray-300 px-2 py-1">{row.department_name ?? "—"}</td>
-                  <td className="border border-gray-300 px-2 py-1 text-amber-700 italic">Pending</td>
+                  <td className="border border-gray-300 px-2 py-1"><SignatureBadge status={row.signature_status} />{row.remark && <p className="text-red-600 mt-0.5">{row.remark}</p>}</td>
+                  <td className="border border-gray-300 px-2 py-1 text-gray-500">{row.signed_at ? new Date(row.signed_at).toLocaleString() : "—"}</td>
                 </tr>
               ))}
             </tbody>
@@ -338,11 +403,15 @@ function PpwEditor({ ppw }: { ppw: Ppw }) {
 
           <div className="grid grid-cols-2 gap-8 mt-10 text-center">
             <div>
-              <p className="border-t border-gray-400 pt-2 italic text-amber-700">Pending</p>
+              <div className="border-t border-gray-400 pt-2 flex flex-col items-center gap-1">
+                <SignatureBadge status={ppw.hod_approval.status} />
+                {ppw.hod_approval.approver_name && <p className="text-xs text-gray-600">{ppw.hod_approval.approver_name}{ppw.hod_approval.department_name ? ` — ${ppw.hod_approval.department_name}` : ""}</p>}
+                {ppw.hod_approval.signed_at && <p className="text-xs text-gray-400">{new Date(ppw.hod_approval.signed_at).toLocaleString()}</p>}
+              </div>
               <p className="font-semibold mt-1">Signature of the Head</p>
             </div>
             <div>
-              <p className="border-t border-gray-400 pt-2 italic text-amber-700">Pending</p>
+              <p className="border-t border-gray-400 pt-2 text-gray-400 text-sm">Not implemented in this phase</p>
               <p className="font-semibold mt-1">Signature of the D.P.G.S</p>
             </div>
           </div>

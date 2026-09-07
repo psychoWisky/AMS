@@ -33,6 +33,7 @@ const NAV = [
   { label: "Orientation",     icon: ClipboardCheck,  href: "/orientation",  roles: ["super_admin","academic_admin"] },
   { label: "Student Management",icon: IdCard,        href: "/student-management", roles: ["student"] },
   { label: "PPW",              icon: FileSpreadsheet, href: "/ppw",          roles: ["student"] },
+  { label: "PPW Approvals",   icon: ClipboardCheck,  href: "/ppw/approvals", roles: ["hod","faculty","research_supervisor"] },
   { label: "Users",           icon: Users,           href: "/users",        roles: ["super_admin","academic_admin"] },
   { label: "Administration",  icon: ShieldCheck,     href: "/admin",        roles: ["super_admin","academic_admin"] },
   { label: "Notifications",   icon: Bell,            href: "/notifications",roles: [] },
