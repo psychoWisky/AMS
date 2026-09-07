@@ -290,7 +290,7 @@ export default function AdmissionsPage() {
                         <span className={`w-2 h-2 rounded-full flex-shrink-0 ${url ? "bg-green-500" : "bg-gray-300"}`} />
                         <span className="text-xs text-gray-600 flex-1">{label}</span>
                         {url && (
-                          <a href={`http://localhost:8001${url}`} target="_blank" rel="noopener noreferrer"
+                          <a href={`${(process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8001/api/v1").replace(/\/api\/v1\/?$/, "")}${url}`} target="_blank" rel="noopener noreferrer"
                             className="text-xs text-teal-700 font-semibold hover:underline flex-shrink-0">View</a>
                         )}
                       </div>
