@@ -15,3 +15,9 @@ reportlab==4.2.5
 qrcode==8.0
 httpx==0.28.1
 aiofiles==24.1.0
+# PPW Phase 3 — Official PPW Document/PDF Generation. AMS-owned HTML->PDF
+# pipeline (Jinja2 template + Playwright/Chromium), independent of eFMS's own
+# copy of these same libraries (eFMS/backend/requirements/base.txt) — no
+# shared installation, no cross-project dependency.
+Jinja2==3.1.6
+playwright==1.62.0

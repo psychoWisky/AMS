@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PPW - {{ ppw.header.student_name }}</title>
+<style>
+  @page {
+    size: A4;
+    margin: 15mm 12mm;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Segoe UI", "Noto Sans", Arial, sans-serif;
+    font-size: 10.5pt;
+    color: #1a1a1a;
+    line-height: 1.45;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  tr { break-inside: avoid; }
+  thead { display: table-header-group; } /* repeats on every printed page */
+  tfoot { display: table-footer-group; }
+
+  .header-table td { vertical-align: top; border: none; padding: 0; }
+  .logo-cell { width: 70px; }
+  .logo-cell img { width: 60px; height: auto; }
+  .univ-name {
+    text-align: center;
+    font-weight: 700;
+    font-size: 15pt;
+    text-decoration: underline;
+    margin: 0 0 2px 0;
+  }
+  .univ-sub { text-align: center; font-size: 10pt; margin: 1px 0; }
+  .reg-form {
+    text-align: right;
+    font-size: 9pt;
+    color: #333;
+    white-space: nowrap;
+  }
+  .doc-title {
+    text-align: center;
+    font-weight: 700;
+    font-size: 13pt;
+    text-decoration: underline;
+    margin: 14px 0 12px 0;
+  }
+  .addr-block { margin: 10px 0; }
+  .narrative { margin: 10px 0; text-align: justify; }
+  .narrative b { font-weight: 600; }
+
+  .section-heading {
+    font-weight: 700;
+    margin: 16px 0 6px 0;
+    font-size: 11pt;
+  }
+
+  table.data-table, table.course-table, table.committee-table {
+    border: 1px solid #444;
+    margin-bottom: 4px;
+  }
+  table.data-table td, table.data-table th,
+  table.course-table td, table.course-table th,
+  table.committee-table td, table.committee-table th {
+    border: 1px solid #666;
+    padding: 4px 6px;
+    font-size: 9.5pt;
+    vertical-align: top;
+  }
+  table.course-table th, table.committee-table th, table.data-table th {
+    background: #eef3f3;
+    font-weight: 700;
+    text-align: left;
+  }
+  .classification-row td {
+    background: #f7f9f9;
+    font-weight: 700;
+  }
+  .empty-state td {
+    text-align: center;
+    color: #666;
+    font-style: italic;
+  }
+  .col-slno { width: 6%; }
+  .col-code { width: 12%; }
+  .col-credit { width: 10%; }
+  .col-dept { width: 22%; }
+
+  .sig-approved { color: #157a3d; font-weight: 700; }
+  .sig-pending { color: #9a6b00; font-weight: 700; }
+  .sig-reverted { color: #b3261e; font-weight: 700; }
+  .sig-na, .sig-none { color: #777; }
+  .remark-line { color: #b3261e; font-size: 8.5pt; margin-top: 2px; }
+  .signed-meta { font-size: 8.5pt; color: #444; }
+
+  .signature-block {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 24px;
+  }
+  .signature-cell {
+    width: 46%;
+    text-align: center;
+    border-top: 1px solid #444;
+    padding-top: 6px;
+  }
+
+  .footer-note {
+    margin-top: 20px;
+    font-size: 8pt;
+    color: #777;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+
+  <table class="header-table">
+    <tr>
+      <td class="logo-cell">
+        {% if logo_data_uri %}
+          <img src="{{ logo_data_uri }}" alt="AVFU Logo">
+        {% endif %}
+      </td>
+      <td>
+        <p class="univ-name">ASSAM VETERINARY AND FISHERIES UNIVERSITY</p>
+        <p class="univ-sub">Faculty : Faculty of Veterinary Science</p>
+        <p class="univ-sub">College : {{ ppw.header.college_name or "—" }}</p>
+      </td>
+      <td class="reg-form">
+        Academic Regulation Form No.PG-11<br>
+        Vide Clause: 2.06.04
+      </td>
+    </tr>
+  </table>
+
+  <p class="doc-title">POST &ndash;GRADUATE PROGRAMME OF WORK (PPW)</p>
+
+  <div class="addr-block">
+    To,<br>
+    The Director, Post Graduate Studies,<br>
+    AVFU, Khanapara - 781022
+  </div>
+
+  <p class="narrative">
+    This is to submit the Proposed Programme of Work of <b>{{ ppw.header.student_name }}</b>{% if ppw.header.student_roll %} (Roll No. {{ ppw.header.student_roll }}){% endif %},
+    a <b>{{ ppw.header.program_level or "—" }}</b> student of <b>{{ ppw.header.program_name or "—" }}</b>
+    under the Department of <b>{{ ppw.header.department_name or "—" }}</b>{% if ppw.header.admission_year %} (Admission Year: {{ ppw.header.admission_year }}){% endif %}{% if academic_year %}, Academic Year <b>{{ academic_year }}</b>{% endif %}{% if semester_name %}, <b>{{ semester_name }}</b>{% endif %}.
+  </p>
+
+  <table class="data-table">
+    <tr><td style="width:32%; font-weight:600;">Field of Investigation for Thesis / Project / Dissertation</td><td>{{ ppw.field_of_investigation or "—" }}</td></tr>
+    <tr><td style="font-weight:600;">Minor Field</td><td>{{ ppw.minor_field or "—" }}</td></tr>
+    <tr><td style="font-weight:600;">Supporting Field</td><td>{{ ppw.supporting_field or "—" }}</td></tr>
+    <tr><td style="font-weight:600;">Research Title</td><td>{{ ppw.research_title or "—" }}</td></tr>
+  </table>
+
+  <p class="section-heading">Courses to be completed by the student to meet Post-Graduation / Ph.D Requirements</p>
+
+  {% for c in ppw.classifications %}
+  <table class="course-table">
+    <thead>
+      <tr class="classification-row">
+        <td colspan="5">{{ c.letter }} &mdash; {{ c.label | upper }} &mdash; {{ c.required_credits }} Credits</td>
+      </tr>
+      <tr>
+        <th class="col-slno">SL NO</th>
+        <th class="col-code">Course Code</th>
+        <th>Course Title</th>
+        <th class="col-credit">Credit</th>
+        <th class="col-dept">Department</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% if c.courses %}
+        {% for row in c.courses %}
+        <tr>
+          <td>{{ row.sl_no }}</td>
+          <td>{{ row.course_number or "—" }}</td>
+          <td>{{ row.course_title or "—" }}</td>
+          <td>{{ row.credit_structure }} ({{ row.credits }})</td>
+          <td>{{ row.department_name or "—" }}</td>
+        </tr>
+        {% endfor %}
+      {% else %}
+        <tr class="empty-state"><td colspan="5">No courses added</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+  {% endfor %}
+
+  <p class="section-heading">Endorsement of Students Advisory Committee</p>
+  <table class="committee-table">
+    <thead>
+      <tr>
+        <th style="width:16%;">Advisory Committee</th>
+        <th style="width:30%;">Name &amp; Designation</th>
+        <th style="width:22%;">Department</th>
+        <th>Signature</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in ppw.committee.rows %}
+      <tr>
+        <td style="font-weight:600;">{{ row.category }}</td>
+        <td>{% if row.faculty_name %}{{ row.faculty_name }}{% if row.designation %} ({{ row.designation }}){% endif %}{% else %}&mdash;{% endif %}</td>
+        <td>{{ row.department_name or "—" }}</td>
+        <td>
+          {% if row.signature_status == "approved" %}
+            <span class="sig-approved">&#10003; Signed</span>
+            {% if row.signed_at %}<div class="signed-meta">{{ row.signed_at }}</div>{% endif %}
+          {% elif row.signature_status == "pending" %}
+            <span class="sig-pending">Pending</span>
+          {% elif row.signature_status == "reverted" %}
+            <span class="sig-reverted">&#10007; Reverted</span>
+            {% if row.remark %}<div class="remark-line">Remark: {{ row.remark }}</div>{% endif %}
+          {% elif row.signature_status == "not_applicable" %}
+            <span class="sig-na">Not Applicable</span>
+          {% else %}
+            <span class="sig-none">&mdash;</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="signature-block">
+    <div class="signature-cell">
+      {% if ppw.hod_approval.status == "approved" %}
+        <span class="sig-approved">&#10003; Signed</span>
+        {% if ppw.hod_approval.approver_name %}<div class="signed-meta">{{ ppw.hod_approval.approver_name }}{% if ppw.hod_approval.department_name %} &mdash; {{ ppw.hod_approval.department_name }}{% endif %}</div>{% endif %}
+        {% if ppw.hod_approval.signed_at %}<div class="signed-meta">{{ ppw.hod_approval.signed_at }}</div>{% endif %}
+      {% elif ppw.hod_approval.status == "pending" %}
+        <span class="sig-pending">Pending</span>
+      {% elif ppw.hod_approval.status == "reverted" %}
+        <span class="sig-reverted">&#10007; Reverted</span>
+        {% if ppw.hod_approval.remark %}<div class="remark-line">Remark: {{ ppw.hod_approval.remark }}</div>{% endif %}
+      {% else %}
+        <span class="sig-none">&mdash;</span>
+      {% endif %}
+      <p style="font-weight:600; margin-top:6px;">Signature of the Head</p>
+    </div>
+    <div class="signature-cell">
+      <span class="sig-na">Not Yet Implemented</span>
+      <p style="font-weight:600; margin-top:6px;">Signature of the D.P.G.S</p>
+    </div>
+  </div>
+
+  <p class="footer-note">Generated by AVFU AMS on {{ generated_at.strftime("%d-%b-%Y %H:%M") }} UTC &mdash; PPW Status: {{ ppw.status }}</p>
+
+</body>
+</html>

@@ -3,7 +3,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { toast } from "sonner";
-import { FileSpreadsheet, Plus, X, Loader2, Search, CheckCircle2, Clock, RotateCcw } from "lucide-react";
+import { FileSpreadsheet, Plus, X, Loader2, Search, CheckCircle2, Clock, RotateCcw, Download } from "lucide-react";
 
 interface PpwCourseRow {
   id: string; sl_no: number; course_id: string; course_number: string | null;
@@ -130,6 +130,40 @@ function PpwEditor({ ppw }: { ppw: Ppw }) {
     onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed to save."),
   });
 
+  // Phase 3 — downloads the official PPW PDF (server-rendered, AMS-owned
+  // Playwright pipeline). Response is a binary blob, not JSON, so errors
+  // arrive as a blob too — read it back as text to surface the real
+  // {detail: "..."} message instead of a generic failure toast.
+  const downloadDocument = useMutation({
+    mutationFn: async () => {
+      const res = await api.get(`/ppw/${ppw.id}/document`, { responseType: "blob" });
+      const blobUrl = window.URL.createObjectURL(res.data);
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      // Roll numbers like "AVFU/2023/BSCAG/002" contain slashes — sanitize
+      // the same way the backend's Content-Disposition filename does, so the
+      // suggested download name is never browser-dependent/ambiguous.
+      const safeRoll = (ppw.header.student_roll ?? ppw.id).replace(/[^a-zA-Z0-9_-]/g, "-");
+      link.download = `PPW-${safeRoll}-${ppw.status}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(blobUrl);
+    },
+    onSuccess: () => toast.success("PPW document downloaded."),
+    onError: async (e: unknown) => {
+      const err = e as { response?: { data?: Blob; status?: number } };
+      let message = "Failed to generate PPW document.";
+      if (err.response?.data instanceof Blob) {
+        try {
+          const parsed = JSON.parse(await err.response.data.text());
+          if (parsed?.detail) message = parsed.detail;
+        } catch { /* non-JSON blob body — keep generic message */ }
+      }
+      toast.error(message);
+    },
+  });
+
   const addCourse = useMutation({
     mutationFn: ({ course_id, classification }: { course_id: string; classification: string }) =>
       api.post(`/ppw/${ppw.id}/courses`, { course_id, classification }),
@@ -182,6 +216,13 @@ function PpwEditor({ ppw }: { ppw: Ppw }) {
             <button onClick={() => submitPpw.mutate()} disabled={submitPpw.isPending}
               className="px-4 py-2.5 bg-[#0D6E6E] text-white rounded-xl font-semibold text-sm hover:bg-[#178F8F] disabled:opacity-60">
               {submitPpw.isPending ? (isReverted ? "Resubmitting…" : "Submitting…") : (isReverted ? "Resubmit PPW" : "Submit PPW")}
+            </button>
+          )}
+          {ppw.status !== "draft" && (
+            <button onClick={() => downloadDocument.mutate()} disabled={downloadDocument.isPending}
+              className="flex items-center gap-1.5 px-4 py-2.5 border border-[#0D6E6E] text-[#0D6E6E] rounded-xl font-semibold text-sm hover:bg-[#E6F4F4] disabled:opacity-60">
+              {downloadDocument.isPending ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
+              {downloadDocument.isPending ? "Generating…" : "Download PPW Document"}
             </button>
           )}
         </div>

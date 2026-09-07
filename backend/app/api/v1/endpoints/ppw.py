@@ -12,11 +12,14 @@ RBAC: student self-only (create/view/edit/submit their own PPW); admin roles
 other module's existing convention. No HOD/Faculty/committee endpoints exist
 yet — Phase 1 explicitly excludes the approval chain.
 """
+import logging
 import random, string
+import urllib.parse
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import List, Optional
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
@@ -29,6 +32,7 @@ from app.core.email import send_email
 from app.core.dependencies import get_current_user, require_roles
 from app.models.user import User, UserRole, Program
 from app.models.course import Course
+from app.models.academic import AcademicCalendar, Semester
 from app.models.research import AdvisoryCommittee, CommitteeMember
 from app.models.ppw import (
     Ppw, PpwCourse, PPW_CLASSIFICATIONS, PPW_CLASSIFICATION_LABELS, PPW_REQUIRED_CREDITS,
@@ -44,6 +48,7 @@ from app.api.v1.endpoints.courses import _resolve_student_scope, _course_visibil
 from app.api.v1.endpoints.research import _student_department_id
 
 router = APIRouter(prefix="/ppw", tags=["PPW"])
+logger = logging.getLogger(__name__)
 
 _ADMIN_ROLES = (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)
 _APPROVER_ROLES = (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR, UserRole.HOD)
@@ -819,3 +824,150 @@ async def revert_ppw_stage(
     p.status = "reverted"
     await db.commit()
     return {"message": "PPW reverted to the student for correction.", "ppw_status": p.status}
+
+
+# ── Phase 3: Official PPW Document / PDF generation ─────────────────────────
+# AMS-owned Jinja2 + Playwright/Chromium pipeline (app/utils/pdf.py). No eFMS
+# code is imported anywhere in this section — eFMS's own html_pdf.py/
+# doc_convert.py are a separate project's files and are not referenced.
+#
+# Deliberately reuses _full_ppw_dict/_committee_rows/_hod_status as-is rather
+# than re-querying/re-deriving approval state a second time — the document
+# must always show exactly what GET /ppw/{id} already shows (same latest
+# cycle, same signature statuses), never a second, potentially-diverging
+# computation.
+
+# Official document classification letters (this task's confirmed A-F
+# mapping) — presentation-only, deliberately NOT written back onto
+# PpwCourse.classification (which stays the plain word values it already
+# used before this phase; see PPW_CLASSIFICATIONS in models/ppw.py).
+_DOCUMENT_CLASSIFICATION_LETTERS = {
+    "major": "A", "minor": "B", "supporting": "C",
+    "research": "D", "seminar": "E", "compulsory": "F",
+}
+
+_TEMPLATES_DIR = Path(__file__).resolve().parents[3] / "templates"
+_jinja_env = None  # lazily constructed — see _render_document_html
+
+
+def _render_document_html(context: dict) -> str:
+    """Renders the PPW document template. Jinja2 environment is created
+    lazily and cached at module level (import cost only, not per-request)."""
+    global _jinja_env
+    if _jinja_env is None:
+        from jinja2 import Environment, FileSystemLoader, select_autoescape
+        _jinja_env = Environment(
+            loader=FileSystemLoader(str(_TEMPLATES_DIR)),
+            autoescape=select_autoescape(["html"]),
+        )
+    template = _jinja_env.get_template("ppw_document.html")
+    return template.render(**context)
+
+
+async def _current_academic_context(db: AsyncSession) -> dict:
+    """Academic year/semester for the official document header.
+
+    AMS has no per-student semester/academic-year assignment anywhere in the
+    schema (no FK from User/Ppw to AcademicCalendar or Semester) — the only
+    authoritative academic-year data in AMS is the admin-managed
+    AcademicCalendar/Semester tables (academic_calendar.py), each with a
+    `status` field the admin sets via PATCH .../status. This reads whichever
+    calendar/semester the admin has marked "active" — never derived from
+    today's date, never hardcoded, and never a per-student value (none
+    exists to read).
+
+    AMS's existing data was found (during this phase's testing) to allow
+    MULTIPLE AcademicCalendar rows to be simultaneously "active" — nothing in
+    academic_calendar.py enforces "at most one active calendar" today. Per
+    explicit product decision for this phase: when more than one is active,
+    the most recently STARTING one (max start_date) is treated as current —
+    deterministic, but does not fix the underlying data-quality gap (multiple
+    active calendars remain possible and are not validated against here).
+    Same tie-break applied to Semester within the chosen calendar. If no
+    calendar is currently marked active, both fields are None and the
+    document renders "-" rather than fabricating a value.
+    """
+    cal_result = await db.execute(
+        select(AcademicCalendar).where(AcademicCalendar.status == "active").order_by(AcademicCalendar.start_date.desc()).limit(1)
+    )
+    calendar = cal_result.scalar_one_or_none()
+    semester_name = None
+    if calendar:
+        sem_result = await db.execute(
+            select(Semester).where(Semester.calendar_id == calendar.id, Semester.status == "active")
+            .order_by(Semester.start_date.desc()).limit(1)
+        )
+        sem = sem_result.scalar_one_or_none()
+        semester_name = sem.name if sem else None
+    return {"academic_year": calendar.academic_year if calendar else None, "semester_name": semester_name}
+
+
+def _pretty_timestamp(iso_value: str | None) -> str | None:
+    if not iso_value:
+        return None
+    try:
+        return datetime.fromisoformat(iso_value).strftime("%d-%b-%Y %H:%M")
+    except ValueError:
+        return iso_value
+
+
+async def _build_document_context(p: Ppw, db: AsyncSession, viewer: User) -> dict:
+    data = await _full_ppw_dict(p, db, viewer)
+    for c in data["classifications"]:
+        c["letter"] = _DOCUMENT_CLASSIFICATION_LETTERS[c["classification"]]
+    for row in data["committee"]["rows"]:
+        row["signed_at"] = _pretty_timestamp(row["signed_at"])
+    data["hod_approval"]["signed_at"] = _pretty_timestamp(data["hod_approval"]["signed_at"])
+    academic = await _current_academic_context(db)
+
+    from app.utils.pdf import get_logo_data_uri
+    return {
+        "ppw": data,
+        "academic_year": academic["academic_year"],
+        "semester_name": academic["semester_name"],
+        "logo_data_uri": get_logo_data_uri(),
+        "generated_at": datetime.now(timezone.utc),
+    }
+
+
+@router.get("/{ppw_id}/document")
+async def get_ppw_document(
+    ppw_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user),
+):
+    """Official PPW document as a PDF — reuses `_authorize_ppw_view` (the
+    same viewer rules as GET /ppw/{id}) and the same latest-cycle approval
+    data every other PPW response already exposes. A draft PPW has no
+    approval state worth documenting yet, so generation is refused (400)
+    until at least one submission has happened."""
+    result = await db.execute(select(Ppw).options(*_PPW_LOAD_OPTIONS).where(Ppw.id == ppw_id))
+    p = result.scalar_one_or_none()
+    if not p:
+        raise HTTPException(404, "PPW not found.")
+    await _authorize_ppw_view(p, user, db)
+    if p.status == "draft":
+        raise HTTPException(400, "PPW must be submitted before the official document can be generated.")
+
+    context = await _build_document_context(p, db, user)
+    html = _render_document_html(context)
+
+    from starlette.concurrency import run_in_threadpool
+    from app.utils.pdf import render_ppw_pdf, ChromiumUnavailable, ChromiumRenderFailed
+    try:
+        pdf_bytes = await run_in_threadpool(render_ppw_pdf, html)
+    except ChromiumUnavailable as exc:
+        logger.error("PPW document generation unavailable (ppw_id=%s): %s", ppw_id, exc)
+        raise HTTPException(503, "PDF generation service is currently unavailable.")
+    except ChromiumRenderFailed as exc:
+        logger.error("PPW document render failed (ppw_id=%s): %s", ppw_id, exc)
+        raise HTTPException(422, "Unable to generate PPW document.")
+
+    roll_or_id = (p.student.student_roll or str(p.student_id)) if p.student else str(p.student_id)
+    safe_roll = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in roll_or_id)
+    filename = f"PPW-{safe_roll}-{p.status}.pdf"
+    encoded_name = urllib.parse.quote(filename, safe="")
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"},
+    )

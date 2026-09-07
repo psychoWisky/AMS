@@ -3,7 +3,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { toast } from "sonner";
-import { ClipboardCheck, Loader2, CheckCircle2, RotateCcw, X } from "lucide-react";
+import { ClipboardCheck, Loader2, CheckCircle2, RotateCcw, X, Download } from "lucide-react";
 
 interface PendingApproval {
   ppw_id: string; student_name: string | null; student_roll: string | null; student_email: string | null;
@@ -95,6 +95,38 @@ export default function PpwApprovalsPage() {
 
   const selectedRow = pending.find((p) => p.ppw_id === selectedId);
 
+  // Phase 3 — same official-document download as the student's own PPW page,
+  // available to the reviewer here since _authorize_ppw_view already grants
+  // them read access to this PPW.
+  const downloadDocument = useMutation({
+    mutationFn: async () => {
+      const res = await api.get(`/ppw/${selectedId}/document`, { responseType: "blob" });
+      const blobUrl = window.URL.createObjectURL(res.data);
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      // Sanitize the same way the backend's Content-Disposition filename
+      // does — roll numbers like "AVFU/2023/BSCAG/002" contain slashes.
+      const safeRoll = (detail?.header.student_roll ?? selectedId ?? "document").replace(/[^a-zA-Z0-9_-]/g, "-");
+      link.download = `PPW-${safeRoll}-${detail?.status ?? "document"}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(blobUrl);
+    },
+    onSuccess: () => toast.success("PPW document downloaded."),
+    onError: async (e: unknown) => {
+      const err = e as { response?: { data?: Blob } };
+      let message = "Failed to generate PPW document.";
+      if (err.response?.data instanceof Blob) {
+        try {
+          const parsed = JSON.parse(await err.response.data.text());
+          if (parsed?.detail) message = parsed.detail;
+        } catch { /* non-JSON blob body — keep generic message */ }
+      }
+      toast.error(message);
+    },
+  });
+
   return (
     <div className="p-6 max-w-6xl mx-auto space-y-6">
       <div>
@@ -139,7 +171,16 @@ export default function PpwApprovalsPage() {
           <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[85vh] overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-xl font-bold text-gray-900">{detail.header.student_name}'s PPW</h2>
-              <button onClick={() => setSelectedId(null)} className="text-gray-400 hover:text-gray-700"><X size={20} /></button>
+              <div className="flex items-center gap-3">
+                {detail.status !== "draft" && (
+                  <button onClick={() => downloadDocument.mutate()} disabled={downloadDocument.isPending}
+                    className="flex items-center gap-1.5 px-3 py-1.5 border border-[#0D6E6E] text-[#0D6E6E] rounded-lg text-xs font-semibold hover:bg-[#E6F4F4] disabled:opacity-60">
+                    {downloadDocument.isPending ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+                    {downloadDocument.isPending ? "Generating…" : "Download Document"}
+                  </button>
+                )}
+                <button onClick={() => setSelectedId(null)} className="text-gray-400 hover:text-gray-700"><X size={20} /></button>
+              </div>
             </div>
 
             <div className="space-y-1 text-sm text-gray-700 mb-4">
