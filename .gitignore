@@ -7,3 +7,6 @@ __pycache__/
 .env
 docs/
 frontend/package-lock.json
+# Server deployment files
+backend/venv/
+deploy.sh
