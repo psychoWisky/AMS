@@ -321,6 +321,31 @@ async def reassign_major_advisor(
 
 # ── Stage 2: Major Advisor selects other members ────────────────────────────────
 
+@router.get("/committees/{committee_id}/eligible-faculty")
+async def list_eligible_faculty(
+    committee_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user),
+):
+    """Faculty directory for the Add Member modal, scoped to whoever is
+    actually allowed to manage THIS committee's members (admin or this
+    committee's own accepted Major Advisor) — reuses `_authorize_manage_members`
+    unchanged. Fixes the Major Advisor (role=FACULTY/RESEARCH_SUPERVISOR) being
+    unable to see a faculty list at all, since the general-purpose
+    `GET /auth/users` directory is intentionally admin/HOD-only and is not
+    being widened here."""
+    c = await db.get(AdvisoryCommittee, committee_id)
+    if not c: raise HTTPException(404, "Committee not found.")
+    await _authorize_manage_members(c, user, db)
+    result = await db.execute(
+        select(User).options(selectinload(User.department))
+        .where(User.role.in_([UserRole.FACULTY, UserRole.HOD, UserRole.RESEARCH_SUPERVISOR]), User.is_active == True)
+        .order_by(User.first_name)
+    )
+    return [{
+        "id": str(u.id), "full_name": u.full_name, "role": u.role.value,
+        "designation": u.designation, "department_id": str(u.department_id) if u.department_id else None,
+    } for u in result.scalars().all()]
+
+
 @router.post("/committees/{committee_id}/members", status_code=201)
 async def add_member(
     committee_id: UUID, body: MemberIn, db: AsyncSession = Depends(get_db),

@@ -209,6 +209,18 @@ function StaffCommitteeView() {
     enabled: canPropose || canLookupUsers,
   });
 
+  // Fix: a Major Advisor with role=FACULTY/RESEARCH_SUPERVISOR has no access
+  // to the general /auth/users directory (admin/HOD-only) and previously saw
+  // "Faculty lookup requires admin or HOD access" when trying to add committee
+  // members despite being allowed to manage them. This committee-scoped
+  // endpoint is authorized the same way add_member itself is (accepted Major
+  // Advisor of THIS committee, or admin) — see research.py.
+  const { data: eligibleFaculty = [] } = useQuery<UserOpt[]>({
+    queryKey: ["ams-committee-eligible-faculty", selected?.id],
+    queryFn: async () => (await api.get(`/research/committees/${selected?.id}/eligible-faculty`)).data,
+    enabled: !!selected?.id && selected.can_manage_members && !canLookupUsers,
+  });
+
   const { data: capacity } = useQuery<CapacityInfo>({
     queryKey: ["ams-advisor-capacity", proposeForm.major_advisor_id],
     queryFn: async () => (await api.get(`/research/committees/faculty/${proposeForm.major_advisor_id}/capacity`)).data,
@@ -217,6 +229,10 @@ function StaffCommitteeView() {
 
   const students = allUsers.filter((u) => u.role === "student");
   const facultyOptions = allUsers.filter((u) => ["faculty", "hod", "research_supervisor"].includes(u.role));
+  // Add Member modal only: admin/HOD keep using the full directory above;
+  // a non-admin accepted Major Advisor uses the committee-scoped list instead.
+  const addMemberFacultyOptions = canLookupUsers ? facultyOptions : eligibleFaculty;
+  const canPickAddMemberFaculty = canLookupUsers || (selected?.can_manage_members ?? false);
 
   function invalidateAll() {
     qc.invalidateQueries({ queryKey: ["ams-committees"] });
@@ -536,7 +552,7 @@ function StaffCommitteeView() {
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
             <h3 className="text-xl font-bold mb-4">Add Committee Member</h3>
             <p className="text-sm text-gray-600 mb-3">For: {selected.student_name}</p>
-            {!canLookupUsers ? (
+            {!canPickAddMemberFaculty ? (
               <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-3">
                 Faculty lookup requires admin or HOD access. Ask an administrator to add this committee member for you.
               </p>
@@ -547,7 +563,7 @@ function StaffCommitteeView() {
                   <select value={memberForm.faculty_id} onChange={(e) => setMemberForm((f) => ({ ...f, faculty_id: e.target.value }))}
                     className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
                     <option value="">Select faculty…</option>
-                    {facultyOptions.map((f) => <option key={f.id} value={f.id}>{f.full_name}{f.designation ? ` — ${f.designation}` : ""}</option>)}
+                    {addMemberFacultyOptions.map((f) => <option key={f.id} value={f.id}>{f.full_name}{f.designation ? ` — ${f.designation}` : ""}</option>)}
                   </select>
                 </div>
                 <div>
@@ -566,7 +582,7 @@ function StaffCommitteeView() {
             <div className="flex gap-3 mt-5">
               <button onClick={() => { setShowAddMember(false); setMemberForm({ faculty_id: "", role: "member_major" }); }}
                 className="flex-1 py-2.5 border border-gray-200 rounded-xl text-base font-medium">Cancel</button>
-              {canLookupUsers && (
+              {canPickAddMemberFaculty && (
                 <button onClick={() => addMember.mutate()} disabled={addMember.isPending || !memberForm.faculty_id}
                   className="flex-1 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-base font-bold disabled:opacity-60">
                   {addMember.isPending ? "Adding…" : "Add Member"}
