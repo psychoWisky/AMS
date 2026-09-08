@@ -123,6 +123,19 @@ export default function AdminPage() {
       ),
   });
 
+  const activateCollege = useMutation({
+    mutationFn: (id: string) => api.put(`/admin/colleges/${id}`, { is_active: true }),
+    onSuccess: () => {
+      toast.success("College activated.");
+      qc.invalidateQueries({ queryKey: ["ams-admin-colleges"] });
+    },
+    onError: (e: unknown) =>
+      toast.error(
+        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
+          "Failed."
+      ),
+  });
+
   function closeCollegeForm() { setShowCollegeForm(false); setEditCollege(null); setCollegeForm({ name: "", code: "" }); }
   function openEditCollege(c: CollegeRow) { setEditCollege(c); setCollegeForm({ name: c.name, code: c.code }); setShowCollegeForm(true); }
 
@@ -314,9 +327,12 @@ export default function AdminPage() {
                       <td className="px-4 py-3">
                         <div className="flex gap-1.5">
                           <button onClick={() => openEditCollege(c)} className="p-1.5 text-gray-600 hover:bg-gray-100 rounded-lg" title="Edit"><Pencil size={15} /></button>
-                          {c.is_active && (
+                          {c.is_active ? (
                             <button onClick={() => setConfirm({ action: () => deactivateCollege.mutate(c.id), title: "Deactivate College", message: `Deactivate ${c.name}? This is a soft delete — it can be reactivated later.` })}
                               className="text-xs font-semibold px-2 py-1 rounded-lg text-red-600 hover:bg-red-50">Deactivate</button>
+                          ) : (
+                            <button onClick={() => setConfirm({ action: () => activateCollege.mutate(c.id), title: "Activate College", message: `Activate ${c.name}?` })}
+                              className="text-xs font-semibold px-2 py-1 rounded-lg text-green-700 hover:bg-green-50">Activate</button>
                           )}
                         </div>
                       </td>
