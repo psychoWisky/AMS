@@ -89,17 +89,38 @@ export default function AdminPage() {
   });
 
   const saveCollege = useMutation({
-    mutationFn: () => editCollege
-      ? api.put(`/admin/colleges/${editCollege.id}`, { name: collegeForm.name })
-      : api.post("/admin/colleges", collegeForm),
-    onSuccess: () => { toast.success(editCollege ? "College updated." : "College created."); qc.invalidateQueries({ queryKey: ["ams-admin-colleges"] }); closeCollegeForm(); },
-    onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed."),
+    mutationFn: async () => {
+      if (editCollege) {
+        return api.put(`/admin/colleges/${editCollege.id}`, {
+          name: collegeForm.name,
+        });
+      }
+
+      return api.post("/admin/colleges", collegeForm);
+    },
+    onSuccess: () => {
+      toast.success(editCollege ? "College updated." : "College created.");
+      qc.invalidateQueries({ queryKey: ["ams-admin-colleges"] });
+      closeCollegeForm();
+    },
+    onError: (e: unknown) =>
+      toast.error(
+        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
+          "Failed."
+      ),
   });
 
   const deactivateCollege = useMutation({
     mutationFn: (id: string) => api.delete(`/admin/colleges/${id}`),
-    onSuccess: () => { toast.success("College deactivated."); qc.invalidateQueries({ queryKey: ["ams-admin-colleges"] }); },
-    onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed."),
+    onSuccess: () => {
+      toast.success("College deactivated.");
+      qc.invalidateQueries({ queryKey: ["ams-admin-colleges"] });
+    },
+    onError: (e: unknown) =>
+      toast.error(
+        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
+          "Failed."
+      ),
   });
 
   function closeCollegeForm() { setShowCollegeForm(false); setEditCollege(null); setCollegeForm({ name: "", code: "" }); }
