@@ -170,11 +170,28 @@ export default function AdminPage() {
   });
 
   const saveRole = useMutation({
-    mutationFn: () => editRole
-      ? api.patch(`/admin/roles/${editRole.id}`, editRole.is_system ? { name: roleForm.name } : roleForm)
-      : api.post("/admin/roles", roleForm),
-    onSuccess: () => { toast.success(editRole ? "Role updated." : "Role created."); qc.invalidateQueries({ queryKey: ["ams-admin-roles"] }); closeRoleForm(); },
-    onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed."),
+    mutationFn: async () => {
+      if (editRole) {
+        return api.patch(
+          `/admin/roles/${editRole.id}`,
+          editRole.is_system
+            ? { name: roleForm.name }
+            : roleForm
+        );
+      }
+
+      return api.post("/admin/roles", roleForm);
+    },
+    onSuccess: () => {
+      toast.success(editRole ? "Role updated." : "Role created.");
+      qc.invalidateQueries({ queryKey: ["ams-admin-roles"] });
+      closeRoleForm();
+    },
+    onError: (e: unknown) =>
+      toast.error(
+        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
+          "Failed."
+      ),
   });
 
   const toggleRoleActive = useMutation({
