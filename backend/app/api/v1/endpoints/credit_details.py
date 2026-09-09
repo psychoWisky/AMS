@@ -29,6 +29,9 @@ from app.models.user import User, UserRole, Program, Department
 from app.models.course import CourseOffering, OfferingFaculty
 from app.models.enrollment import StudentEnrollment
 from app.models.research import AdvisoryCommittee, CommitteeMember
+# Programme<->Department many-to-many redesign — single shared implementation
+# in app/core/student_scope.py.
+from app.core.student_scope import resolve_student_department_id
 
 router = APIRouter(prefix="/credit-details", tags=["Student Credit Details"])
 
@@ -49,11 +52,9 @@ async def _authorize_student_credit_view(student_id: UUID, user: User, db: Async
             return
         raise HTTPException(403, "You can only view your own credit details.")
     if user.role == UserRole.HOD:
-        student = await db.get(User, student_id)
-        if student and student.program_id and user.department_id:
-            program = await db.get(Program, student.program_id)
-            if program and program.department_id == user.department_id:
-                return
+        dept_id = await resolve_student_department_id(student_id, db)
+        if dept_id and user.department_id and dept_id == user.department_id:
+            return
         raise HTTPException(403, "You can only view students within your own department.")
     if user.role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
         course_link = await db.execute(
@@ -90,9 +91,7 @@ async def get_student_credit_details(
     await _authorize_student_credit_view(student_id, user, db)
 
     program = await db.get(Program, student.program_id) if student.program_id else None
-    department = None
-    if program and program.department_id:
-        department = await db.get(Department, program.department_id)
+    department = await db.get(Department, student.department_id) if student.department_id else None
 
     # Courses: derived from the student's own enrollments — no "research course"
     # flag exists anywhere in the schema, so this lists all enrolled courses,

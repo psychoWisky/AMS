@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, date, timezone
 from enum import Enum
-from sqlalchemy import String, Boolean, DateTime, Date, ForeignKey, Text, Enum as SAEnum
+from sqlalchemy import String, Boolean, DateTime, Date, ForeignKey, Text, Enum as SAEnum, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID
 from app.db.base import Base
@@ -28,6 +28,12 @@ class Department(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     users: Mapped[list["User"]] = relationship("User", back_populates="department", foreign_keys="User.department_id")
+    # Programme<->Department many-to-many redesign (confirmed business rule:
+    # one Department, e.g. CSE, may belong to multiple Programmes, e.g. both
+    # B.Tech and M.Tech) — see ProgramDepartment below. A Department with zero
+    # rows here is valid and expected for administrative/support departments
+    # (e.g. Finance & Accounts, Administration) that have no Programme at all.
+    program_links: Mapped[list["ProgramDepartment"]] = relationship("ProgramDepartment", back_populates="department", cascade="all, delete-orphan")
 
 
 class College(Base):
@@ -133,12 +139,44 @@ class Program(Base):
     name: Mapped[str]           = mapped_column(String(200), nullable=False)
     code: Mapped[str]           = mapped_column(String(20), unique=True, nullable=False)
     level: Mapped[str]          = mapped_column(String(20), nullable=False)  # UG / PG / PhD
+    # LEGACY — Programme<->Department many-to-many redesign (confirmed business
+    # rule: one Programme may have multiple Departments, e.g. B.Tech has CSE/
+    # Mechanical/Electrical, and one Department may belong to multiple
+    # Programmes, e.g. CSE belongs to both B.Tech and M.Tech — the opposite
+    # cardinality from this single-FK column). Application code MUST NOT read
+    # this column anymore — use `department_links`/`ams_program_departments`
+    # instead. Column intentionally NOT dropped yet (see migration
+    # 0009_program_department_m2m's docstring) so a "migration 2" can drop it
+    # only after every read is confirmed gone; kept here only as a dormant,
+    # unused column during that transition window.
     department_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_departments.id"))
     duration_years: Mapped[int] = mapped_column(default=4)
     is_active: Mapped[bool]     = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
-    department: Mapped["Department | None"] = relationship("Department", foreign_keys=[department_id])
+    department_links: Mapped[list["ProgramDepartment"]] = relationship("ProgramDepartment", back_populates="program", cascade="all, delete-orphan")
+
+
+class ProgramDepartment(Base):
+    """Programme<->Department many-to-many association (confirmed business
+    rule — see Program.department_id's docstring for the full reasoning).
+    Modeled directly on the existing ams_course_availability convention: a
+    synthetic `id` primary key (not a composite PK), a UniqueConstraint on the
+    pair, and one supporting index on the reverse-lookup column
+    (department_id — program_id is already the unique constraint's leading
+    column). A Department with zero rows here is valid (administrative/
+    support departments); a Programme with zero rows here is unusual but not
+    forbidden at the model level."""
+    __tablename__ = "ams_program_departments"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    program_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_programs.id", ondelete="CASCADE"))
+    department_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_departments.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (UniqueConstraint("program_id", "department_id", name="uq_program_department"),)
+
+    program: Mapped["Program"] = relationship("Program", back_populates="department_links", foreign_keys=[program_id])
+    department: Mapped["Department"] = relationship("Department", back_populates="program_links", foreign_keys=[department_id])
 
 
 class RefreshToken(Base):

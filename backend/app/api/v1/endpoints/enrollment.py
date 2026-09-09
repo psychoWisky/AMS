@@ -42,10 +42,17 @@ from pydantic import BaseModel
 
 from app.db.base import get_db
 from app.core.dependencies import get_current_user, require_roles, require_advisory_committee_established
-from app.models.user import User, UserRole, Program, Department
+from app.models.user import User, UserRole
 from app.models.enrollment import StudentEnrollment, CourseRegistration
 from app.models.course import Course, CourseOffering, OfferingFaculty
 from app.models.research import AdvisoryCommittee, CommitteeMember
+# Programme<->Department many-to-many redesign — single shared student-scope
+# resolvers (app/core/student_scope.py), re-exported under this file's
+# existing private names so every call site below is unchanged.
+from app.core.student_scope import (
+    resolve_student_scope as _resolve_student_scope,
+    resolve_student_department_id as _student_department_id,
+)
 
 router = APIRouter(prefix="/enrollment", tags=["Enrollment"])
 
@@ -66,32 +73,6 @@ _ENROLLMENT_STATUS_LABELS = {
 }
 
 
-async def _resolve_student_scope(user: User, db: AsyncSession) -> Optional[dict]:
-    """Resolve a student's (program_level, department_id) from User -> Program -> Department.
-    Returns None if the student's academic program is not fully configured (fail closed).
-
-    BUSINESS_LOGIC.md Section O — see courses.py's identical helper for why the
-    `department.stream` requirement was removed (it silently blocked all
-    student visibility system-wide, since `stream` is never populated)."""
-    if not user.program_id:
-        return None
-    program = await db.get(Program, user.program_id)
-    if not program or not program.department_id:
-        return None
-    department = await db.get(Department, program.department_id)
-    if not department:
-        return None
-    return {"level": program.level, "department_id": program.department_id}
-
-
-async def _student_department_id(student_id: UUID, db: AsyncSession) -> Optional[UUID]:
-    """Mirrors research.py's identical helper — a student's department via
-    User.program_id -> Program.department_id. Fail-closed if unresolvable."""
-    student = await db.get(User, student_id)
-    if not student or not student.program_id:
-        return None
-    program = await db.get(Program, student.program_id)
-    return program.department_id if program else None
 
 
 async def _get_major_advisor_id(student_id: UUID, db: AsyncSession) -> Optional[UUID]:
@@ -412,10 +393,12 @@ async def list_registrations(
     elif user.role == UserRole.HOD:
         if not user.department_id:
             return []
+        # Programme<->Department many-to-many redesign — the student's OWN
+        # department_id is authoritative now, never inferred via their
+        # Programme's department (a Programme can have many Departments).
         q = (
             q.join(User, CourseRegistration.student_id == User.id)
-             .join(Program, User.program_id == Program.id)
-             .where(Program.department_id == user.department_id)
+             .where(User.department_id == user.department_id)
         )
     elif user.role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
         # A faculty member's registration queue = registrations where they are

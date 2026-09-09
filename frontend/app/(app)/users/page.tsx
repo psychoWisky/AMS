@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { useRole } from "@/stores/auth.store";
@@ -9,7 +9,10 @@ import { ROLES, ADMIN_ROLES } from "@/lib/utils";
 
 interface User { id: string; email: string; full_name: string; role: string; designation: string | null; department_id: string | null; program_id: string | null; }
 interface DepartmentOpt { id: string; name: string; code: string; }
-interface ProgramOpt { id: string; name: string; code: string; level: string; department_id: string; }
+// Programme<->Department many-to-many redesign — Program no longer carries a
+// single department_id (see backend GET /departments/programs); Department
+// options for a chosen Programme come from GET /departments?program_id=...
+interface ProgramOpt { id: string; name: string; code: string; level: string; }
 
 const ROLE_OPTIONS = Object.keys(ROLES);
 
@@ -29,6 +32,9 @@ export default function UsersPage() {
     queryFn: async () => (await api.get("/auth/users")).data,
   });
 
+  // Full, unfiltered Department list — used whenever no Programme is
+  // selected (Programme remains optional for Faculty/HOD; a Department may
+  // still be picked on its own, exactly as before).
   const { data: departments = [] } = useQuery<DepartmentOpt[]>({
     queryKey: ["ams-departments"],
     queryFn: async () => (await api.get("/departments")).data,
@@ -40,6 +46,42 @@ export default function UsersPage() {
     queryFn: async () => (await api.get("/departments/programs")).data,
     enabled: showCreate || !!editUser,
   });
+
+  // Programme<->Department many-to-many redesign — Department options are
+  // now filtered BY Programme (reverse of the old Department->Programme
+  // direction), since one Department may belong to several Programmes.
+  const createDeptQuery = useQuery<DepartmentOpt[]>({
+    queryKey: ["ams-departments-for-program", form.program_id],
+    queryFn: async () => (await api.get("/departments", { params: { program_id: form.program_id } })).data,
+    enabled: showCreate && !!form.program_id,
+  });
+  const editDeptQuery = useQuery<DepartmentOpt[]>({
+    queryKey: ["ams-departments-for-program", editForm.program_id],
+    queryFn: async () => (await api.get("/departments", { params: { program_id: editForm.program_id } })).data,
+    enabled: !!editUser && !!editForm.program_id,
+  });
+  const createDeptOptions = createDeptQuery.data ?? [];
+  const editDeptOptions = editDeptQuery.data ?? [];
+  const createDepartments = form.program_id ? createDeptOptions : departments;
+  const editDepartments = editForm.program_id ? editDeptOptions : departments;
+
+  // If the currently-selected Department is no longer valid for whichever
+  // Programme is now selected, clear it rather than silently submitting an
+  // invalid pair — the backend would reject it anyway, but this avoids a
+  // round-trip error for the common "changed Programme" case. Guarded on
+  // `isSuccess` so this never fires against the query's transient empty
+  // default before its actual data has arrived (which would otherwise wipe
+  // out a perfectly valid pre-existing selection, e.g. when opening Edit).
+  useEffect(() => {
+    if (createDeptQuery.isSuccess && form.program_id && form.department_id && !createDeptOptions.some((d) => d.id === form.department_id)) {
+      setForm((f) => ({ ...f, department_id: "" }));
+    }
+  }, [createDeptQuery.isSuccess, createDeptOptions, form.program_id, form.department_id]);
+  useEffect(() => {
+    if (editDeptQuery.isSuccess && editForm.program_id && editForm.department_id && !editDeptOptions.some((d) => d.id === editForm.department_id)) {
+      setEditForm((f) => ({ ...f, department_id: "" }));
+    }
+  }, [editDeptQuery.isSuccess, editDeptOptions, editForm.program_id, editForm.department_id]);
 
   const createUser = useMutation({
     mutationFn: () => api.post("/auth/users", {
@@ -115,21 +157,23 @@ export default function UsersPage() {
                 </select>
               </div>
               <div>
-                <label className="block text-base font-semibold text-gray-700 mb-1">Department</label>
-                <select value={form.department_id} onChange={(e) => setForm((f) => ({ ...f, department_id: e.target.value, program_id: "" }))}
-                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
-                  <option value="">None</option>
-                  {departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-                </select>
-              </div>
-              <div>
-                <label className="block text-base font-semibold text-gray-700 mb-1">Program</label>
+                <label className="block text-base font-semibold text-gray-700 mb-1">Programme <span className="font-normal text-gray-500">(optional)</span></label>
                 <select value={form.program_id} onChange={(e) => setForm((f) => ({ ...f, program_id: e.target.value }))}
                   className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
                   <option value="">None</option>
-                  {(form.department_id ? programs.filter((p) => p.department_id === form.department_id) : programs)
-                    .map((p) => <option key={p.id} value={p.id}>{p.name} ({p.level})</option>)}
+                  {programs.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.level})</option>)}
                 </select>
+              </div>
+              <div>
+                <label className="block text-base font-semibold text-gray-700 mb-1">Department</label>
+                <select value={form.department_id} onChange={(e) => setForm((f) => ({ ...f, department_id: e.target.value }))}
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
+                  <option value="">None</option>
+                  {createDepartments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                </select>
+                {form.program_id && createDepartments.length === 0 && (
+                  <p className="text-xs text-amber-600 mt-1">No Departments are associated with this Programme yet.</p>
+                )}
               </div>
             </div>
             <div className="flex gap-3 mt-5">
@@ -158,21 +202,23 @@ export default function UsersPage() {
                 </select>
               </div>
               <div>
-                <label className="block text-base font-semibold text-gray-700 mb-1">Department</label>
-                <select value={editForm.department_id} onChange={(e) => setEditForm((f) => ({ ...f, department_id: e.target.value, program_id: "" }))}
-                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
-                  <option value="">None</option>
-                  {departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-                </select>
-              </div>
-              <div>
-                <label className="block text-base font-semibold text-gray-700 mb-1">Program</label>
+                <label className="block text-base font-semibold text-gray-700 mb-1">Programme <span className="font-normal text-gray-500">(optional)</span></label>
                 <select value={editForm.program_id} onChange={(e) => setEditForm((f) => ({ ...f, program_id: e.target.value }))}
                   className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
                   <option value="">None</option>
-                  {(editForm.department_id ? programs.filter((p) => p.department_id === editForm.department_id) : programs)
-                    .map((p) => <option key={p.id} value={p.id}>{p.name} ({p.level})</option>)}
+                  {programs.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.level})</option>)}
                 </select>
+              </div>
+              <div>
+                <label className="block text-base font-semibold text-gray-700 mb-1">Department</label>
+                <select value={editForm.department_id} onChange={(e) => setEditForm((f) => ({ ...f, department_id: e.target.value }))}
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
+                  <option value="">None</option>
+                  {editDepartments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                </select>
+                {editForm.program_id && editDepartments.length === 0 && (
+                  <p className="text-xs text-amber-600 mt-1">No Departments are associated with this Programme yet.</p>
+                )}
               </div>
             </div>
             <div className="flex gap-3 mt-5">

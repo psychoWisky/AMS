@@ -41,8 +41,12 @@ from pydantic import BaseModel
 
 from app.db.base import get_db
 from app.core.dependencies import get_current_user, require_roles
-from app.models.user import User, UserRole, Program, Department
+from app.models.user import User, UserRole, Department
 from app.models.research import AdvisoryCommittee, CommitteeMember
+# Programme<->Department many-to-many redesign — single shared implementation
+# in app/core/student_scope.py, re-exported under this file's existing
+# private name (also imported from here by ppw.py, unchanged).
+from app.core.student_scope import resolve_student_department_id as _student_department_id
 
 router = APIRouter(prefix="/research", tags=["Research"])
 
@@ -93,13 +97,6 @@ class ReassignMajorAdvisorIn(BaseModel):
 # Mirrors the style of _authorize_offering_management / _resolve_student_scope
 # (enrollment.py, courses.py): admin roles unrestricted, HOD via department match,
 # assignment-based access for everyone else.
-
-async def _student_department_id(student_id: UUID, db: AsyncSession) -> Optional[UUID]:
-    student = await db.get(User, student_id)
-    if not student or not student.program_id:
-        return None
-    program = await db.get(Program, student.program_id)
-    return program.department_id if program else None
 
 
 async def _authorize_propose_major_advisor(student_id: UUID, user: User, db: AsyncSession) -> None:
@@ -190,7 +187,9 @@ async def _check_advisor_capacity(faculty_id: UUID, db: AsyncSession) -> None:
 def _committee_dict(c: AdvisoryCommittee) -> dict:
     student = c.student
     program = student.program if student else None
-    department = program.department if program else None
+    # Programme<->Department many-to-many redesign — read directly from the
+    # student's own department, not via Program.
+    department = student.department if student else None
     return {
         "id": str(c.id),
         "student_id": str(c.student_id),
@@ -239,7 +238,10 @@ async def _member_stats(faculty_ids: List[UUID], db: AsyncSession) -> dict:
 
 
 _COMMITTEE_LOAD_OPTIONS = (
-    selectinload(AdvisoryCommittee.student).selectinload(User.program).selectinload(Program.department),
+    selectinload(AdvisoryCommittee.student).selectinload(User.program),
+    # Programme<->Department many-to-many redesign — student.department is
+    # loaded directly (User.department_id), not via student.program.department.
+    selectinload(AdvisoryCommittee.student).selectinload(User.department),
     selectinload(AdvisoryCommittee.members).selectinload(CommitteeMember.faculty).selectinload(User.department),
 )
 
@@ -482,10 +484,12 @@ async def list_committees(db: AsyncSession = Depends(get_db), user: User = Depen
     elif user.role == UserRole.HOD:
         if not user.department_id:
             return []
+        # Programme<->Department many-to-many redesign — the student's OWN
+        # department_id is authoritative now, never inferred via their
+        # Programme's department (a Programme can have many Departments).
         q = (
             q.join(User, AdvisoryCommittee.student_id == User.id)
-             .join(Program, User.program_id == Program.id)
-             .where(Program.department_id == user.department_id)
+             .where(User.department_id == user.department_id)
         )
     elif user.role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
         q = q.where(AdvisoryCommittee.id.in_(

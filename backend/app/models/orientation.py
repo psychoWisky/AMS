@@ -29,6 +29,16 @@ class OrientationCandidate(Base):
 
     academic_year: Mapped[str] = mapped_column(String(20), nullable=False)  # plain year label, e.g. "2026" — see Section 28.4 (not AcademicCalendar-linked yet)
     program_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_programs.id"), nullable=False)
+    # Programme<->Department many-to-many redesign — nullable at the DB level
+    # (existing candidates predate this column and are never guessed at), but
+    # the endpoint layer requires it going forward for new/updated candidates
+    # once a Programme is selected, validated against ams_program_departments
+    # (see departments.py's validate_program_department_pair). Deliberately
+    # NOT part of the uniqueness constraint below — multiple different
+    # candidates/students legitimately share the same Programme+Department
+    # (e.g. many students in B.Tech+CSE), so uniqueness stays scoped to one
+    # person's own repeat application, unchanged.
+    department_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_departments.id"))
 
     # pending / present / absent
     attendance_status: Mapped[str] = mapped_column(String(20), default="pending")
@@ -49,8 +59,9 @@ class OrientationCandidate(Base):
     )
 
     program: Mapped["Program"] = relationship("Program", foreign_keys=[program_id])  # type: ignore[name-defined]
+    department: Mapped["Department | None"] = relationship("Department", foreign_keys=[department_id])  # type: ignore[name-defined]
     student: Mapped["User | None"] = relationship("User", foreign_keys=[student_user_id])  # type: ignore[name-defined]
     creator: Mapped["User | None"] = relationship("User", foreign_keys=[created_by])  # type: ignore[name-defined]
 
 
-from app.models.user import User, Program  # noqa: E402
+from app.models.user import User, Program, Department  # noqa: E402

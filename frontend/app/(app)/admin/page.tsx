@@ -7,7 +7,12 @@ import { ShieldCheck, Plus, Pencil, Loader2, Building2, GraduationCap, School, L
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 
 interface DepartmentRow { id: string; name: string; code: string; stream: string | null; is_active: boolean; }
-interface ProgramRow { id: string; name: string; code: string; level: string; department_id: string; duration_years: number; is_active: boolean; }
+// Programme<->Department many-to-many redesign — a Programme no longer
+// carries a single department_id; associations are managed separately (see
+// the Associations modal below) via ams_program_departments.
+interface ProgramRow { id: string; name: string; code: string; level: string; duration_years: number; is_active: boolean; }
+interface ProgramDepartmentLink { association_id: string; department_id: string; department_name: string; department_code: string; }
+interface DepartmentProgramLink { association_id: string; program_id: string; program_name: string; program_code: string; program_level: string; }
 interface CollegeRow { id: string; name: string; code: string; is_active: boolean; }
 interface DesignationRow { id: string; name: string; is_active: boolean; created_at: string; }
 interface RoleRow { id: string; code: string; name: string; is_system: boolean; is_active: boolean; user_count: number; }
@@ -52,7 +57,7 @@ export default function AdminPage() {
   // ── Programmes ───────────────────────────────────────────────────────────
   const [showProgForm, setShowProgForm] = useState(false);
   const [editProg, setEditProg] = useState<ProgramRow | null>(null);
-  const [progForm, setProgForm] = useState({ name: "", code: "", level: "UG", department_id: "", duration_years: "4" });
+  const [progForm, setProgForm] = useState({ name: "", code: "", level: "UG", duration_years: "4" });
 
   const { data: programmes = [], isLoading: progLoading } = useQuery<ProgramRow[]>({
     queryKey: ["ams-admin-programmes"],
@@ -74,8 +79,41 @@ export default function AdminPage() {
     onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed."),
   });
 
-  function closeProgForm() { setShowProgForm(false); setEditProg(null); setProgForm({ name: "", code: "", level: "UG", department_id: "", duration_years: "4" }); }
-  function openEditProg(p: ProgramRow) { setEditProg(p); setProgForm({ name: p.name, code: p.code, level: p.level, department_id: p.department_id, duration_years: String(p.duration_years) }); setShowProgForm(true); }
+  function closeProgForm() { setShowProgForm(false); setEditProg(null); setProgForm({ name: "", code: "", level: "UG", duration_years: "4" }); }
+  function openEditProg(p: ProgramRow) { setEditProg(p); setProgForm({ name: p.name, code: p.code, level: p.level, duration_years: String(p.duration_years) }); setShowProgForm(true); }
+
+  // ── Programme <-> Department associations (many-to-many redesign) ─────────
+  // Manageable from either side: a Programme row's "Departments" button opens
+  // this with type="program" (checklist = all Departments); a Department
+  // row's "Programmes" button opens it with type="department" (checklist =
+  // all Programmes). Both toggle the SAME ams_program_departments rows via
+  // the same add/remove endpoints — removing a checkbox only removes the
+  // association, never the Programme/Department/any User/Course referencing
+  // either.
+  const [assocFor, setAssocFor] = useState<{ type: "program" | "department"; id: string; name: string } | null>(null);
+
+  const assocQuery = useQuery<(ProgramDepartmentLink | DepartmentProgramLink)[]>({
+    queryKey: ["ams-associations", assocFor?.type, assocFor?.id],
+    queryFn: async () => {
+      const url = assocFor!.type === "program"
+        ? `/departments/programs/${assocFor!.id}/departments`
+        : `/departments/${assocFor!.id}/programs`;
+      return (await api.get(url)).data;
+    },
+    enabled: !!assocFor,
+  });
+  const linkedIds = new Set(
+    (assocQuery.data ?? []).map((r) => assocFor?.type === "program" ? (r as ProgramDepartmentLink).department_id : (r as DepartmentProgramLink).program_id)
+  );
+
+  const toggleAssoc = useMutation({
+    mutationFn: ({ programId, departmentId, linked }: { programId: string; departmentId: string; linked: boolean }) =>
+      linked
+        ? api.delete(`/departments/programs/${programId}/departments/${departmentId}`)
+        : api.post(`/departments/programs/${programId}/departments`, { department_id: departmentId }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["ams-associations", assocFor?.type, assocFor?.id] }),
+    onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed to update association."),
+  });
 
   // ── Colleges ─────────────────────────────────────────────────────────────
   const [showCollegeForm, setShowCollegeForm] = useState(false);
@@ -258,6 +296,8 @@ export default function AdminPage() {
                       <td className="px-4 py-3">
                         <div className="flex gap-1.5">
                           <button onClick={() => openEditDept(d)} className="p-1.5 text-gray-600 hover:bg-gray-100 rounded-lg" title="Edit"><Pencil size={15} /></button>
+                          <button onClick={() => setAssocFor({ type: "department", id: d.id, name: d.name })}
+                            className="text-xs font-semibold px-2 py-1 rounded-lg text-[#0D6E6E] hover:bg-[#E6F4F4]">Programmes</button>
                           <button onClick={() => setConfirm({ action: () => toggleDeptActive.mutate({ id: d.id, is_active: !d.is_active }), title: d.is_active ? "Deactivate Department" : "Activate Department", message: `${d.is_active ? "Deactivate" : "Activate"} ${d.name}? Existing courses/users referencing it are not affected.` })}
                             className={`text-xs font-semibold px-2 py-1 rounded-lg ${d.is_active ? "text-red-600 hover:bg-red-50" : "text-green-700 hover:bg-green-50"}`}>{d.is_active ? "Deactivate" : "Activate"}</button>
                         </div>
@@ -280,19 +320,20 @@ export default function AdminPage() {
           <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
             {progLoading ? <div className="flex justify-center py-12"><Loader2 className="animate-spin text-gray-600" /></div> : (
               <table className="w-full text-sm">
-                <thead className="bg-gray-50 border-b border-gray-200"><tr>{["Name", "Code", "Level", "Department", "Duration", "Status", "Action"].map((h) => <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700">{h}</th>)}</tr></thead>
+                <thead className="bg-gray-50 border-b border-gray-200"><tr>{["Name", "Code", "Level", "Duration", "Status", "Action"].map((h) => <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700">{h}</th>)}</tr></thead>
                 <tbody>
                   {programmes.map((p, i) => (
                     <tr key={p.id} className={i % 2 === 0 ? "bg-white" : "bg-gray-50/50"}>
                       <td className="px-4 py-3 font-medium flex items-center gap-2"><GraduationCap size={14} className="text-gray-400" />{p.name}</td>
                       <td className="px-4 py-3 font-mono text-[#0D6E6E]">{p.code}</td>
                       <td className="px-4 py-3 text-gray-600">{p.level}</td>
-                      <td className="px-4 py-3 text-gray-600">{departments.find((d) => d.id === p.department_id)?.name ?? "—"}</td>
                       <td className="px-4 py-3 text-gray-600">{p.duration_years} yrs</td>
                       <td className="px-4 py-3"><span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${p.is_active ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-600"}`}>{p.is_active ? "Active" : "Inactive"}</span></td>
                       <td className="px-4 py-3">
                         <div className="flex gap-1.5">
                           <button onClick={() => openEditProg(p)} className="p-1.5 text-gray-600 hover:bg-gray-100 rounded-lg" title="Edit"><Pencil size={15} /></button>
+                          <button onClick={() => setAssocFor({ type: "program", id: p.id, name: p.name })}
+                            className="text-xs font-semibold px-2 py-1 rounded-lg text-[#0D6E6E] hover:bg-[#E6F4F4]">Departments</button>
                           <button onClick={() => setConfirm({ action: () => toggleProgActive.mutate({ id: p.id, is_active: !p.is_active }), title: p.is_active ? "Deactivate Programme" : "Activate Programme", message: `${p.is_active ? "Deactivate" : "Activate"} ${p.name}? Existing students/courses referencing it are not affected.` })}
                             className={`text-xs font-semibold px-2 py-1 rounded-lg ${p.is_active ? "text-red-600 hover:bg-red-50" : "text-green-700 hover:bg-green-50"}`}>{p.is_active ? "Deactivate" : "Activate"}</button>
                         </div>
@@ -304,6 +345,36 @@ export default function AdminPage() {
             )}
           </div>
         </>
+      )}
+
+      {/* ── Programme <-> Department associations modal ─────────────────── */}
+      {assocFor && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 max-h-[80vh] overflow-y-auto">
+            <h3 className="text-xl font-bold mb-1">{assocFor.type === "program" ? "Associated Departments" : "Associated Programmes"}</h3>
+            <p className="text-sm text-gray-600 mb-4">{assocFor.name}</p>
+            {assocQuery.isLoading ? (
+              <div className="flex justify-center py-8"><Loader2 className="animate-spin text-gray-600" /></div>
+            ) : (
+              <div className="space-y-1.5">
+                {(assocFor.type === "program" ? departments : programmes).map((item) => {
+                  const linked = linkedIds.has(item.id);
+                  const programId = assocFor.type === "program" ? assocFor.id : item.id;
+                  const departmentId = assocFor.type === "program" ? item.id : assocFor.id;
+                  return (
+                    <label key={item.id} className="flex items-center gap-2.5 px-3 py-2 rounded-lg hover:bg-gray-50 cursor-pointer">
+                      <input type="checkbox" checked={linked} disabled={toggleAssoc.isPending}
+                        onChange={() => toggleAssoc.mutate({ programId, departmentId, linked })}
+                        className="w-4 h-4 accent-[#0D6E6E]" />
+                      <span className="text-sm text-gray-800">{item.name}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+            <button onClick={() => setAssocFor(null)} className="w-full mt-5 py-2.5 border border-gray-200 rounded-xl text-base font-medium hover:bg-gray-50">Close</button>
+          </div>
+        </div>
       )}
 
       {/* ── Colleges tab ────────────────────────────────────────────────── */}
@@ -457,17 +528,14 @@ export default function AdminPage() {
                   {["UG", "PG", "PhD"].map((l) => <option key={l} value={l}>{l}</option>)}
                 </select>
               </div>
-              <div><label className="block text-base font-semibold text-gray-700 mb-1">Department *</label>
-                <select value={progForm.department_id} onChange={(e) => setProgForm((f) => ({ ...f, department_id: e.target.value }))} className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
-                  <option value="">Select…</option>
-                  {departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-                </select>
-              </div>
               <div><label className="block text-base font-semibold text-gray-700 mb-1">Duration (years)</label><input type="number" min={1} max={7} value={progForm.duration_years} onChange={(e) => setProgForm((f) => ({ ...f, duration_years: e.target.value }))} className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" /></div>
+              {!editProg && (
+                <p className="text-xs text-gray-500">Departments can be associated with this Programme afterward, from the Programmes list.</p>
+              )}
             </div>
             <div className="flex gap-3 mt-5">
               <button onClick={closeProgForm} className="flex-1 py-2.5 border border-gray-200 rounded-xl text-base font-medium hover:bg-gray-50">Cancel</button>
-              <button onClick={() => { if (!progForm.name || !progForm.code || !progForm.department_id) { toast.error("Name, Code and Department are required."); return; } saveProg.mutate(); }} disabled={saveProg.isPending} className="flex-1 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-base font-bold hover:bg-[#178F8F] disabled:opacity-60">{saveProg.isPending ? "Saving…" : editProg ? "Save Changes" : "Create"}</button>
+              <button onClick={() => { if (!progForm.name || !progForm.code) { toast.error("Name and Code are required."); return; } saveProg.mutate(); }} disabled={saveProg.isPending} className="flex-1 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-base font-bold hover:bg-[#178F8F] disabled:opacity-60">{saveProg.isPending ? "Saving…" : editProg ? "Save Changes" : "Create"}</button>
             </div>
           </div>
         </div>

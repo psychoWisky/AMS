@@ -34,6 +34,10 @@ from app.db.base import get_db
 from app.core.dependencies import get_current_user, require_roles
 from app.models.user import User, UserRole, Program, Department
 from app.models.course import Course, CourseOffering, OfferingFaculty, CourseAvailability
+# Programme<->Department many-to-many redesign — single shared student-scope
+# resolver (app/core/student_scope.py), re-exported under this file's
+# existing private name so every call site below is unchanged.
+from app.core.student_scope import resolve_student_scope as _resolve_student_scope
 
 router = APIRouter(prefix="/courses", tags=["Courses"])
 
@@ -449,28 +453,6 @@ async def remove_course_availability(
 
 
 # ── Offerings ─────────────────────────────────────────────────────────────────
-
-async def _resolve_student_scope(user: User, db: AsyncSession) -> Optional[dict]:
-    """Resolve a student's (program_level, department_id) from User -> Program -> Department.
-    Returns None if the student's academic program is not fully configured (fail closed).
-
-    BUSINESS_LOGIC.md Section O — previously also required `department.stream`
-    to be set, which is never populated anywhere in the system (AVFU has not
-    confirmed the stream taxonomy — see ams_departments.stream, added nullable-
-    only, no backfill). That made this fail-closed for every student
-    unconditionally, silently blocking all student course/offering visibility
-    system-wide. `stream` has no bearing on department-based scoping, so the
-    check is removed; only a genuinely missing department still fails closed."""
-    if not user.program_id:
-        return None
-    program = await db.get(Program, user.program_id)
-    if not program or not program.department_id:
-        return None
-    department = await db.get(Department, program.department_id)
-    if not department:
-        return None
-    return {"level": program.level, "department_id": program.department_id}
-
 
 def _offering_dict(o: CourseOffering, enrolled: int) -> dict:
     return {

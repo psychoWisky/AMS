@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { toast } from "sonner";
@@ -9,10 +9,14 @@ import {
 } from "lucide-react";
 
 interface Program { id: string; name: string; code: string; }
+interface DepartmentOpt { id: string; name: string; code: string; }
 interface Candidate {
   id: string; name: string; personal_email: string; mobile: string | null;
   entrance_exam_name: string | null; entrance_exam_marks: number | null;
   academic_year: string; program_id: string; program_name: string | null; program_code: string | null;
+  // Programme<->Department many-to-many redesign — a candidate's academic
+  // identity is Programme + Department together now.
+  department_id: string | null; department_name: string | null;
   attendance_status: "pending" | "present" | "absent";
   selection_status: "pending" | "selected" | "not_selected";
   credential_status: "not_generated" | "generated" | "sent" | "failed";
@@ -35,7 +39,7 @@ const CREDENTIAL_STYLE: Record<string, string> = {
   sent: "bg-green-100 text-green-700", failed: "bg-amber-100 text-amber-700",
 };
 
-const EMPTY_FORM = { name: "", personal_email: "", mobile: "", entrance_exam_name: "", entrance_exam_marks: "", academic_year: String(new Date().getFullYear()), program_id: "" };
+const EMPTY_FORM = { name: "", personal_email: "", mobile: "", entrance_exam_name: "", entrance_exam_marks: "", academic_year: String(new Date().getFullYear()), program_id: "", department_id: "" };
 
 export default function OrientationPage() {
   const qc = useQueryClient();
@@ -50,6 +54,27 @@ export default function OrientationPage() {
     queryKey: ["ams-programs"],
     queryFn: async () => (await api.get("/departments/programs")).data,
   });
+
+  // Programme<->Department many-to-many redesign — Department options are
+  // filtered to whatever is associated with the selected Programme in the
+  // Add/Edit modal (never the reverse — a Department can belong to several
+  // Programmes, so there is no "the" Programme for a Department to filter by).
+  const modalDeptQuery = useQuery<DepartmentOpt[]>({
+    queryKey: ["ams-departments-for-program", form.program_id],
+    queryFn: async () => (await api.get("/departments", { params: { program_id: form.program_id } })).data,
+    enabled: modalOpen && !!form.program_id,
+  });
+  const modalDepartments = modalDeptQuery.data ?? [];
+
+  // Clear an out-of-date Department selection once the filtered list for the
+  // newly-chosen Programme has actually loaded (guarded on isSuccess so this
+  // never fires against the query's transient empty default and wipes a
+  // valid pre-existing selection when opening Edit).
+  useEffect(() => {
+    if (modalDeptQuery.isSuccess && form.program_id && form.department_id && !modalDepartments.some((d) => d.id === form.department_id)) {
+      setForm((f) => ({ ...f, department_id: "" }));
+    }
+  }, [modalDeptQuery.isSuccess, modalDepartments, form.program_id, form.department_id]);
 
   const { data: candidates = [], isLoading } = useQuery<Candidate[]>({
     queryKey: ["ams-orientation-candidates", academicYear, programId],
@@ -68,7 +93,7 @@ export default function OrientationPage() {
         name: form.name, personal_email: form.personal_email, mobile: form.mobile || null,
         entrance_exam_name: form.entrance_exam_name || null,
         entrance_exam_marks: form.entrance_exam_marks ? Number(form.entrance_exam_marks) : null,
-        academic_year: form.academic_year, program_id: form.program_id,
+        academic_year: form.academic_year, program_id: form.program_id, department_id: form.department_id,
       };
       return editing ? api.put(`/orientation/candidates/${editing.id}`, body) : api.post("/orientation/candidates", body);
     },
@@ -115,7 +140,7 @@ export default function OrientationPage() {
     setForm({
       name: c.name, personal_email: c.personal_email, mobile: c.mobile ?? "",
       entrance_exam_name: c.entrance_exam_name ?? "", entrance_exam_marks: c.entrance_exam_marks?.toString() ?? "",
-      academic_year: c.academic_year, program_id: c.program_id,
+      academic_year: c.academic_year, program_id: c.program_id, department_id: c.department_id ?? "",
     });
     setModalOpen(true);
   }
@@ -165,7 +190,7 @@ export default function OrientationPage() {
           <table className="w-full text-sm min-w-[1100px]">
             <thead className="bg-gray-50 border-b border-gray-200 text-xs uppercase tracking-wide text-gray-500">
               <tr>
-                {["Name", "Email / Mobile", "Programme", "Entrance", "Attendance", "Selection", "Roll No.", "Credentials", "Actions"].map((h) => (
+                {["Name", "Email / Mobile", "Programme", "Department", "Entrance", "Attendance", "Selection", "Roll No.", "Credentials", "Actions"].map((h) => (
                   <th key={h} className="text-left px-4 py-3 font-semibold whitespace-nowrap">{h}</th>
                 ))}
               </tr>
@@ -179,6 +204,7 @@ export default function OrientationPage() {
                     <p className="text-gray-400 text-xs">{c.mobile ?? "—"}</p>
                   </td>
                   <td className="px-4 py-3 whitespace-nowrap">{c.program_code ?? "—"}</td>
+                  <td className="px-4 py-3 whitespace-nowrap">{c.department_name ?? "—"}</td>
                   <td className="px-4 py-3 whitespace-nowrap">
                     {c.entrance_exam_name ? `${c.entrance_exam_name} (${c.entrance_exam_marks ?? "—"})` : "—"}
                   </td>
@@ -295,10 +321,22 @@ export default function OrientationPage() {
                   </select>
                 </div>
               </div>
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">Department</label>
+                <select value={form.department_id} onChange={(e) => setForm((f) => ({ ...f, department_id: e.target.value }))}
+                  disabled={!form.program_id}
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E] disabled:bg-gray-50">
+                  <option value="">{form.program_id ? "Select…" : "Select a Programme first"}</option>
+                  {modalDepartments.map((d) => <option key={d.id} value={d.id}>{d.name} ({d.code})</option>)}
+                </select>
+                {form.program_id && modalDepartments.length === 0 && (
+                  <p className="text-xs text-amber-600 mt-1">No Departments are associated with this Programme yet.</p>
+                )}
+              </div>
             </div>
             <button
               onClick={() => saveCandidate.mutate()}
-              disabled={saveCandidate.isPending || !form.name || !form.personal_email || !form.academic_year || !form.program_id}
+              disabled={saveCandidate.isPending || !form.name || !form.personal_email || !form.academic_year || !form.program_id || !form.department_id}
               className="w-full mt-5 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-base font-bold hover:bg-[#178F8F] disabled:opacity-50">
               {saveCandidate.isPending ? "Saving…" : editing ? "Save Changes" : "Add Candidate"}
             </button>

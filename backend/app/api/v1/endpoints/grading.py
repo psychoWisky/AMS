@@ -11,11 +11,14 @@ from pydantic import BaseModel
 
 from app.db.base import get_db
 from app.core.dependencies import get_current_user, require_roles
-from app.models.user import User, UserRole, Program
+from app.models.user import User, UserRole
 from app.models.grading import GradeSheet, GradeEntry, ApprovalStage, DigitalSignature, compute_grade
 from app.models.course import CourseOffering, OfferingFaculty
 from app.models.enrollment import StudentEnrollment
 from app.models.research import AdvisoryCommittee, CommitteeMember
+# Programme<->Department many-to-many redesign — single shared implementation
+# in app/core/student_scope.py.
+from app.core.student_scope import resolve_student_department_id
 
 router = APIRouter(prefix="/grading", tags=["Grading"])
 
@@ -59,9 +62,11 @@ async def _authorize_student_academic_view(student_id: UUID, user: User, db: Asy
     """Who may view a student's academic-progress data (GPA, etc.).
     Mirrors the role-priority style of research.py's _authorize_committee_view /
     enrollment.py's _authorize_offering_management: admins unrestricted, HOD via
-    the student's Program.department_id, student self-only, and faculty/research
-    supervisor only via an established relationship (shared course assignment or
-    advisory committee membership) — never a bare role check."""
+    the student's OWN department_id (Programme<->Department many-to-many
+    redesign — never inferred via Program.department_id anymore), student
+    self-only, and faculty/research supervisor only via an established
+    relationship (shared course assignment or advisory committee membership)
+    — never a bare role check."""
     if user.role in _ADMIN_ROLES:
         return
     if user.role == UserRole.STUDENT:
@@ -69,11 +74,9 @@ async def _authorize_student_academic_view(student_id: UUID, user: User, db: Asy
             return
         raise HTTPException(403, "You can only view your own academic progress.")
     if user.role == UserRole.HOD:
-        student = await db.get(User, student_id)
-        if student and student.program_id and user.department_id:
-            program = await db.get(Program, student.program_id)
-            if program and program.department_id == user.department_id:
-                return
+        dept_id = await resolve_student_department_id(student_id, db)
+        if dept_id and user.department_id and dept_id == user.department_id:
+            return
         raise HTTPException(403, "You can only view students within your own department.")
     if user.role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
         course_link = await db.execute(

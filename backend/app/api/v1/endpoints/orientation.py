@@ -25,8 +25,10 @@ from app.db.base import get_db
 from app.core.dependencies import get_current_user, require_roles
 from app.core.security import hash_password, generate_temp_password
 from app.core.email import send_email
-from app.models.user import User, UserRole, Program
+from app.models.user import User, UserRole, Program, Department
 from app.models.orientation import OrientationCandidate
+# Programme<->Department many-to-many redesign — shared pair validation.
+from app.api.v1.endpoints.departments import validate_program_department_pair
 
 router = APIRouter(prefix="/orientation", tags=["Orientation"])
 
@@ -85,6 +87,14 @@ class CandidateIn(BaseModel):
     entrance_exam_marks: Optional[float] = None
     academic_year: str
     program_id: UUID
+    # Programme<->Department many-to-many redesign — required for new/updated
+    # candidates going forward (a student's academic identity is Programme +
+    # Department together now), validated against ams_program_departments
+    # below. The underlying column stays nullable at the DB level only to
+    # accommodate the one pre-existing candidate row from before this field
+    # existed — never guessed/backfilled for that row (see migration
+    # 0009_program_department_m2m).
+    department_id: UUID
 
 
 def _candidate_dict(c: OrientationCandidate) -> dict:
@@ -99,6 +109,8 @@ def _candidate_dict(c: OrientationCandidate) -> dict:
         "program_id": str(c.program_id),
         "program_name": c.program.name if c.program else None,
         "program_code": c.program.code if c.program else None,
+        "department_id": str(c.department_id) if c.department_id else None,
+        "department_name": c.department.name if c.department else None,
         "attendance_status": c.attendance_status,
         "selection_status": c.selection_status,
         "credential_status": c.credential_status,
@@ -115,6 +127,9 @@ async def create_candidate(
     program = await db.get(Program, body.program_id)
     if not program:
         raise HTTPException(404, "Programme not found.")
+    if not await db.get(Department, body.department_id):
+        raise HTTPException(404, "Department not found.")
+    await validate_program_department_pair(body.program_id, body.department_id, db)
 
     existing = await db.execute(select(OrientationCandidate).where(
         OrientationCandidate.personal_email == body.personal_email.lower(),
@@ -127,7 +142,8 @@ async def create_candidate(
     c = OrientationCandidate(
         name=body.name, personal_email=body.personal_email.lower(), mobile=body.mobile,
         entrance_exam_name=body.entrance_exam_name, entrance_exam_marks=body.entrance_exam_marks,
-        academic_year=body.academic_year, program_id=body.program_id, created_by=user.id,
+        academic_year=body.academic_year, program_id=body.program_id, department_id=body.department_id,
+        created_by=user.id,
     )
     db.add(c); await db.commit(); await db.refresh(c)
     return {"id": str(c.id), "message": "Candidate added."}
@@ -139,7 +155,7 @@ async def list_candidates(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_roles(*_INCHARGE_ROLES)),
 ):
-    q = select(OrientationCandidate).options(selectinload(OrientationCandidate.program))
+    q = select(OrientationCandidate).options(selectinload(OrientationCandidate.program), selectinload(OrientationCandidate.department))
     if academic_year: q = q.where(OrientationCandidate.academic_year == academic_year)
     if program_id: q = q.where(OrientationCandidate.program_id == program_id)
     result = await db.execute(q.order_by(OrientationCandidate.created_at))
@@ -157,9 +173,12 @@ async def update_candidate(
         raise HTTPException(400, "Cannot edit a candidate that has already been selected or rejected.")
     program = await db.get(Program, body.program_id)
     if not program: raise HTTPException(404, "Programme not found.")
+    if not await db.get(Department, body.department_id):
+        raise HTTPException(404, "Department not found.")
+    await validate_program_department_pair(body.program_id, body.department_id, db)
     c.name = body.name; c.personal_email = body.personal_email.lower(); c.mobile = body.mobile
     c.entrance_exam_name = body.entrance_exam_name; c.entrance_exam_marks = body.entrance_exam_marks
-    c.academic_year = body.academic_year; c.program_id = body.program_id
+    c.academic_year = body.academic_year; c.program_id = body.program_id; c.department_id = body.department_id
     await db.commit()
     return {"message": "Candidate updated."}
 
@@ -256,6 +275,13 @@ async def decide_selection(
                     role=UserRole.STUDENT,
                     student_roll=roll_no,
                     program_id=c.program_id,
+                    # Programme<->Department many-to-many redesign — both
+                    # fields copied directly onto the new student; department
+                    # is NEVER inferred from the Programme (a Programme can
+                    # now have several Departments). c.department_id is None
+                    # only for the one legacy candidate row that predates this
+                    # field (see migration 0009) — not silently defaulted here.
+                    department_id=c.department_id,
                     admission_year=int(c.academic_year) if c.academic_year.isdigit() else None,
                     is_active=True, is_verified=True,
                     must_change_password=True,

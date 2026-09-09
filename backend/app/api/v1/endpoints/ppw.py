@@ -293,8 +293,12 @@ def _hod_status(p: Ppw, cycle: Optional[PpwApprovalCycle]) -> dict:
 
 
 def _student_header(student: User) -> dict:
+    # Programme<->Department many-to-many redesign — Department is read
+    # directly from User.department_id (student.department), never via
+    # Program.department_id anymore (a Programme can now have many
+    # Departments, so that inference is no longer valid).
     program = student.program if student else None
-    department = program.department if program else None
+    department = student.department if student else None
     return {
         "student_name": student.full_name,
         "student_roll": student.student_roll,
@@ -352,7 +356,11 @@ def _ppw_dict(p: Ppw) -> dict:
 
 
 _PPW_LOAD_OPTIONS = (
-    selectinload(Ppw.student).selectinload(User.program).selectinload(Program.department),
+    selectinload(Ppw.student).selectinload(User.program),
+    # Programme<->Department many-to-many redesign — student.department is
+    # loaded directly (User.department_id), not via student.program.department
+    # (Program no longer has a single Department to eager-load through).
+    selectinload(Ppw.student).selectinload(User.department),
     selectinload(Ppw.courses).selectinload(PpwCourse.course).selectinload(Course.department),
 )
 
@@ -460,7 +468,10 @@ async def list_pending_approvals(
             .join(PpwApprovalCycle, PpwApprovalCycle.id == PpwApprovalStage.cycle_id)
             .join(Ppw, Ppw.id == PpwApprovalCycle.ppw_id)
             .join(CommitteeMember, CommitteeMember.id == PpwApprovalStage.committee_member_id)
-            .options(selectinload(Ppw.student).selectinload(User.program).selectinload(Program.department))
+            .options(
+                selectinload(Ppw.student).selectinload(User.program),
+                selectinload(Ppw.student).selectinload(User.department),
+            )
             .where(
                 PpwApprovalCycle.status == "active",
                 PpwApprovalStage.status == "pending",
@@ -472,7 +483,9 @@ async def list_pending_approvals(
                 continue  # not yet this stage's turn (e.g. a committee-member stage before MA has approved)
             student = p.student
             program = student.program if student else None
-            department = program.department if program else None
+            # Programme<->Department many-to-many redesign — read directly
+            # from the student's own department, not via Program.
+            department = student.department if student else None
             rows.append({
                 "ppw_id": str(p.id), "student_name": student.full_name if student else None,
                 "student_roll": student.student_roll if student else None,
@@ -490,20 +503,26 @@ async def list_pending_approvals(
             .join(PpwApprovalCycle, PpwApprovalCycle.id == PpwApprovalStage.cycle_id)
             .join(Ppw, Ppw.id == PpwApprovalCycle.ppw_id)
             .join(User, User.id == Ppw.student_id)
-            .join(Program, Program.id == User.program_id)
-            .options(selectinload(Ppw.student).selectinload(User.program).selectinload(Program.department))
+            .options(
+                selectinload(Ppw.student).selectinload(User.program),
+                selectinload(Ppw.student).selectinload(User.department),
+            )
             .where(
                 PpwApprovalCycle.status == "active",
                 PpwApprovalStage.status == "pending",
                 PpwApprovalStage.stage_type == "hod",
                 Ppw.status == "hod_pending",
-                Program.department_id == user.department_id,
+                # Programme<->Department many-to-many redesign — the student's
+                # OWN department_id is now the authoritative field (never
+                # inferred via their Programme's department anymore, since a
+                # Programme can have many Departments).
+                User.department_id == user.department_id,
             )
         )
         for stage, cycle, p in result.all():
             student = p.student
             program = student.program if student else None
-            department = program.department if program else None
+            department = student.department if student else None
             rows.append({
                 "ppw_id": str(p.id), "student_name": student.full_name if student else None,
                 "student_roll": student.student_roll if student else None,

@@ -15,6 +15,11 @@ from app.core.dependencies import get_current_user, require_roles, is_profile_co
 from app.core.config import settings
 from app.core.email import send_email
 from app.models.user import User, UserRole, RefreshToken, Designation
+# Programme<->Department many-to-many redesign — shared validation, whenever
+# both fields are supplied together they must form a real association.
+# Neither field becomes mandatory by importing this (Faculty/HOD keep working
+# with Department-only or neither, exactly as today).
+from app.api.v1.endpoints.departments import validate_program_department_pair
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
@@ -239,6 +244,7 @@ async def create_user(
     existing = await db.execute(select(User).where(User.email == body.email.lower()))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Email already registered.")
+    await validate_program_department_pair(body.program_id, body.department_id, db)
     user = User(
         email=body.email.lower(),
         hashed_password=hash_password(body.password),
@@ -294,6 +300,23 @@ async def update_user(
             status_code=400,
             detail="Cannot set role to HOD: this user has no department assigned. Assign a department first.",
         )
+
+    # Programme<->Department many-to-many redesign — validate the EFFECTIVE
+    # pair (after this patch is applied), not just whatever the request body
+    # happens to include. Editing only Programme, or only Department, must
+    # still be checked against whichever value the OTHER field already has —
+    # e.g. changing Programme away from one that matches the student's
+    # existing Department must be rejected, not silently saved.
+    #
+    # Only run this check when the request actually touches one of the two
+    # fields — otherwise an update that doesn't mention program_id/
+    # department_id at all (e.g. {"mobile": "..."}) would re-validate
+    # whatever pair the target ALREADY has, and reject the request even for
+    # unrelated fields on a user whose pre-existing pair is already
+    # inconsistent (pre-commit review finding A1).
+    if body.program_id is not None or body.department_id is not None:
+        effective_program_id = body.program_id if body.program_id is not None else target.program_id
+        await validate_program_department_pair(effective_program_id, effective_department_id, db)
 
     for field, value in body.model_dump(exclude_none=True).items():
         setattr(target, field, value)

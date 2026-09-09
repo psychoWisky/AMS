@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from app.db.base import get_db
 from app.core.dependencies import get_current_user, require_roles
-from app.models.user import User, UserRole, Department, Program, College, Designation, Role
+from app.models.user import User, UserRole, Department, Program, ProgramDepartment, College, Designation, Role
 
 router = APIRouter(prefix="/departments", tags=["Departments"])
 admin_router = APIRouter(prefix="/admin", tags=["Admin — Master Data"])
@@ -39,16 +39,24 @@ class DeptUpdate(BaseModel):
     stream: Optional[str] = None
     is_active: Optional[bool] = None
 
+# Programme<->Department many-to-many redesign — a Programme is created
+# independently now (no single Department at creation time; a Programme can
+# have several, or none yet). `department_id` deliberately removed from both
+# schemas below — Program.department_id itself is a dormant legacy column
+# (see models/user.py), never read or written by application code anymore;
+# associations are managed via the dedicated endpoints further down.
 class ProgramIn(BaseModel):
     name: str; code: str; level: str = "UG"
-    department_id: UUID; duration_years: int = 4
+    duration_years: int = 4
 
 class ProgramUpdate(BaseModel):
     name: Optional[str] = None
     level: Optional[str] = None
-    department_id: Optional[UUID] = None
     duration_years: Optional[int] = None
     is_active: Optional[bool] = None
+
+class ProgramDepartmentIn(BaseModel):
+    department_id: UUID
 
 class CollegeIn(BaseModel):
     name: str; code: str
@@ -77,11 +85,23 @@ class RoleUpdate(BaseModel):
 @router.get("")
 async def list_departments(
     stream: Optional[str] = None, include_inactive: bool = False,
+    program_id: Optional[UUID] = None,
     db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user),
 ):
+    """Existing stream/include_inactive filters unchanged. `program_id`
+    (Programme<->Department many-to-many redesign) restricts the result to
+    Departments actually associated with that Programme via
+    ams_program_departments — this is what drives the "Programme -> filtered
+    Department" selector direction (Orientation, Users page) everywhere else
+    in AMS. Omitting it preserves the exact prior unfiltered-by-programme
+    behavior for existing consumers."""
     q = select(Department)
     if not include_inactive: q = q.where(Department.is_active == True)
     if stream: q = q.where(Department.stream == stream)
+    if program_id:
+        q = q.where(Department.id.in_(
+            select(ProgramDepartment.department_id).where(ProgramDepartment.program_id == program_id)
+        ))
     result = await db.execute(q.order_by(Department.name))
     return [{"id": str(d.id), "name": d.name, "code": d.code, "stream": d.stream, "is_active": d.is_active} for d in result.scalars().all()]
 
@@ -111,11 +131,16 @@ async def update_department(
 
 @router.get("/programs")
 async def list_programs(include_inactive: bool = False, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    """Programme<->Department many-to-many redesign — no longer returns a
+    single `department_id` (Program.department_id is a dormant legacy column,
+    never authoritative for a Programme's Departments anymore; a Programme's
+    associated Departments are fetched via GET /departments?program_id=... or
+    GET /departments/programs/{id}/departments)."""
     q = select(Program)
     if not include_inactive: q = q.where(Program.is_active == True)
     result = await db.execute(q.order_by(Program.name))
     return [{"id": str(p.id), "name": p.name, "code": p.code, "level": p.level,
-             "department_id": str(p.department_id), "duration_years": p.duration_years, "is_active": p.is_active}
+             "duration_years": p.duration_years, "is_active": p.is_active}
             for p in result.scalars().all()]
 
 
@@ -140,6 +165,110 @@ async def update_program(
         setattr(p, k, v)
     await db.commit()
     return {"message": "Program updated."}
+
+
+# ── Programme <-> Department associations (many-to-many redesign) ──────────────
+# The same ams_program_departments row is manageable from either side — from a
+# Programme ("Associated Departments: CSE, Mechanical, ...") or from a
+# Department ("Associated Programmes: B.Tech, M.Tech, ..."). Removing an
+# association only removes the join row — it never deletes the Programme,
+# Department, or any User/Student/Course/history that references either.
+
+async def validate_program_department_pair(
+    program_id: Optional[UUID], department_id: Optional[UUID], db: AsyncSession,
+) -> None:
+    """The one new validation rule this redesign introduces: whenever BOTH a
+    Programme and a Department are supplied together, that exact pair must
+    exist in ams_program_departments. Neither field is made mandatory by this
+    check — if either is None, it is skipped entirely (Programme stays
+    non-mandatory for Faculty/HOD, and a Department may be set alone, as
+    today). Raises the project's normal HTTPException(400, ...) on an invalid
+    pair, for callers to surface via their existing error-response handling."""
+    if not program_id or not department_id:
+        return
+    result = await db.execute(
+        select(ProgramDepartment.id).where(
+            ProgramDepartment.program_id == program_id,
+            ProgramDepartment.department_id == department_id,
+        ).limit(1)
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(400, "This Department is not associated with the selected Programme.")
+
+
+@router.get("/programs/{program_id}/departments")
+async def list_program_departments(
+    program_id: UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user),
+):
+    if not await db.get(Program, program_id):
+        raise HTTPException(404, "Program not found.")
+    result = await db.execute(
+        select(ProgramDepartment, Department)
+        .join(Department, Department.id == ProgramDepartment.department_id)
+        .where(ProgramDepartment.program_id == program_id)
+        .order_by(Department.name)
+    )
+    return [{"association_id": str(link.id), "department_id": str(d.id), "department_name": d.name, "department_code": d.code}
+            for link, d in result.all()]
+
+
+@router.post("/programs/{program_id}/departments", status_code=201)
+async def add_program_department(
+    program_id: UUID, body: ProgramDepartmentIn, db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(*_MASTER_DATA_ROLES)),
+):
+    if not await db.get(Program, program_id):
+        raise HTTPException(404, "Program not found.")
+    if not await db.get(Department, body.department_id):
+        raise HTTPException(404, "Department not found.")
+    existing = await db.execute(
+        select(ProgramDepartment).where(
+            ProgramDepartment.program_id == program_id, ProgramDepartment.department_id == body.department_id,
+        )
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(409, "This Department is already associated with this Programme.")
+    link = ProgramDepartment(program_id=program_id, department_id=body.department_id)
+    db.add(link)
+    await db.commit()
+    return {"id": str(link.id), "message": "Department associated with Programme."}
+
+
+@router.delete("/programs/{program_id}/departments/{department_id}", status_code=204)
+async def remove_program_department(
+    program_id: UUID, department_id: UUID, db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(*_MASTER_DATA_ROLES)),
+):
+    """Removes ONLY the association row — the Programme and Department
+    themselves, and everything referencing either, are untouched. Idempotent:
+    a no-op 204 if the association doesn't exist."""
+    result = await db.execute(
+        select(ProgramDepartment).where(
+            ProgramDepartment.program_id == program_id, ProgramDepartment.department_id == department_id,
+        )
+    )
+    link = result.scalar_one_or_none()
+    if link:
+        await db.delete(link)
+        await db.commit()
+
+
+@router.get("/{department_id}/programs")
+async def list_department_programs(
+    department_id: UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user),
+):
+    """Reverse direction of GET /programs/{id}/departments — lets the
+    Department-side admin panel manage the same association rows."""
+    if not await db.get(Department, department_id):
+        raise HTTPException(404, "Department not found.")
+    result = await db.execute(
+        select(ProgramDepartment, Program)
+        .join(Program, Program.id == ProgramDepartment.program_id)
+        .where(ProgramDepartment.department_id == department_id)
+        .order_by(Program.name)
+    )
+    return [{"association_id": str(link.id), "program_id": str(p.id), "program_name": p.name, "program_code": p.code, "program_level": p.level}
+            for link, p in result.all()]
 
 
 # ── Colleges (BUSINESS_LOGIC.md Section N.5) ───────────────────────────────────
