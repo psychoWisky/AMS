@@ -97,8 +97,12 @@ class CandidateIn(BaseModel):
     # existed — never guessed/backfilled for those rows (see migration
     # 0009_program_department_m2m).
     department_id: UUID
-    entrance_exam_name: Optional[str] = None
-    entrance_exam_marks: Optional[float] = None
+    # entrance_exam_name / entrance_exam_marks REMOVED from the active
+    # request schema (this task's confirmed requirement) — the Orientation
+    # workflow no longer collects these. The underlying OrientationCandidate
+    # columns are NOT dropped (still nullable, still hold historical data for
+    # any pre-existing rows) — this is a payload-only cleanup, not a schema
+    # change. New/updated candidates simply never set them going forward.
 
     @field_validator("first_name")
     @classmethod
@@ -141,8 +145,6 @@ def _candidate_dict(c: OrientationCandidate) -> dict:
         "personal_email": c.personal_email,
         "mobile": c.mobile,
         "avfu_email": c.avfu_email,
-        "entrance_exam_name": c.entrance_exam_name,
-        "entrance_exam_marks": c.entrance_exam_marks,
         "academic_year": c.academic_year,
         "college_id": str(c.college_id) if c.college_id else None,
         "college_name": c.college.name if c.college else None,
@@ -204,7 +206,6 @@ async def create_candidate(
     c = OrientationCandidate(
         first_name=body.first_name, middle_name=body.middle_name, last_name=body.last_name,
         personal_email=body.personal_email.lower(), mobile=body.mobile, avfu_email=body.avfu_email,
-        entrance_exam_name=body.entrance_exam_name, entrance_exam_marks=body.entrance_exam_marks,
         academic_year=body.academic_year, college_id=body.college_id,
         program_id=body.program_id, department_id=body.department_id,
         created_by=user.id,
@@ -254,7 +255,6 @@ async def update_candidate(
 
     c.first_name = body.first_name; c.middle_name = body.middle_name; c.last_name = body.last_name
     c.personal_email = body.personal_email.lower(); c.mobile = body.mobile; c.avfu_email = body.avfu_email
-    c.entrance_exam_name = body.entrance_exam_name; c.entrance_exam_marks = body.entrance_exam_marks
     c.academic_year = body.academic_year; c.college_id = body.college_id
     c.program_id = body.program_id; c.department_id = body.department_id
     try:

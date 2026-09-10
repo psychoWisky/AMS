@@ -19,7 +19,6 @@ interface Candidate {
   // AVFU Email (distinct from personal_email) — issued by IT ahead of
   // Orientation; becomes the created student's AMS login email.
   avfu_email: string | null;
-  entrance_exam_name: string | null; entrance_exam_marks: number | null;
   academic_year: string;
   college_id: string | null; college_name: string | null;
   program_id: string; program_name: string | null; program_code: string | null;
@@ -51,7 +50,6 @@ const CREDENTIAL_STYLE: Record<string, string> = {
 const EMPTY_FORM = {
   first_name: "", middle_name: "", last_name: "",
   personal_email: "", mobile: "", avfu_email: "",
-  entrance_exam_name: "", entrance_exam_marks: "",
   academic_year: String(new Date().getFullYear()),
   college_id: "", program_id: "", department_id: "",
 };
@@ -125,8 +123,6 @@ export default function OrientationPage() {
       const body = {
         first_name: form.first_name, middle_name: form.middle_name || null, last_name: form.last_name,
         personal_email: form.personal_email, mobile: form.mobile, avfu_email: form.avfu_email,
-        entrance_exam_name: form.entrance_exam_name || null,
-        entrance_exam_marks: form.entrance_exam_marks ? Number(form.entrance_exam_marks) : null,
         academic_year: form.academic_year, college_id: form.college_id,
         program_id: form.program_id, department_id: form.department_id,
       };
@@ -230,7 +226,6 @@ export default function OrientationPage() {
     setForm({
       first_name: c.first_name ?? "", middle_name: c.middle_name ?? "", last_name: c.last_name ?? "",
       personal_email: c.personal_email, mobile: c.mobile ?? "", avfu_email: c.avfu_email ?? "",
-      entrance_exam_name: c.entrance_exam_name ?? "", entrance_exam_marks: c.entrance_exam_marks?.toString() ?? "",
       academic_year: c.academic_year, college_id: c.college_id ?? "",
       program_id: c.program_id, department_id: c.department_id ?? "",
     });
@@ -299,7 +294,7 @@ export default function OrientationPage() {
           <table className="w-full text-sm min-w-[1100px]">
             <thead className="bg-gray-50 border-b border-gray-200 text-xs uppercase tracking-wide text-gray-500">
               <tr>
-                {["Name", "Email / Mobile", "Programme", "Department", "Entrance", "Attendance", "Selection", "Roll No.", "Credentials", "Actions"].map((h) => (
+                {["Name", "Email / Mobile", "University / AVFU Email", "Programme", "Department", "Attendance", "Selection", "Roll No.", "Credentials", "Actions"].map((h) => (
                   <th key={h} className="text-left px-4 py-3 font-semibold whitespace-nowrap">{h}</th>
                 ))}
               </tr>
@@ -311,16 +306,13 @@ export default function OrientationPage() {
                   <td className="px-4 py-3">
                     <p className="text-gray-700">{c.personal_email}</p>
                     <p className="text-gray-400 text-xs">{c.mobile ?? "—"}</p>
-                    {c.avfu_email && <p className="text-teal-600 text-xs mt-0.5" title="AVFU Email">{c.avfu_email}</p>}
                   </td>
+                  <td className="px-4 py-3 whitespace-nowrap">{c.avfu_email ?? "—"}</td>
                   <td className="px-4 py-3 whitespace-nowrap">
                     {c.program_code ?? "—"}
                     {c.college_name && <p className="text-gray-400 text-xs font-normal">{c.college_name}</p>}
                   </td>
                   <td className="px-4 py-3 whitespace-nowrap">{c.department_name ?? "—"}</td>
-                  <td className="px-4 py-3 whitespace-nowrap">
-                    {c.entrance_exam_name ? `${c.entrance_exam_name} (${c.entrance_exam_marks ?? "—"})` : "—"}
-                  </td>
                   <td className="px-4 py-3">
                     <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-semibold ${ATTENDANCE_STYLE[c.attendance_status]}`}>
                       {ATTENDANCE_LABEL[c.attendance_status]}
@@ -425,18 +417,6 @@ export default function OrientationPage() {
                   placeholder="student@avfu.ac.in"
                   className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
                 <p className="text-xs text-gray-400 mt-1">Issued by IT for this shortlisted student — becomes their AMS login email on selection.</p>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-1">Entrance Exam</label>
-                  <input value={form.entrance_exam_name} onChange={(e) => setForm((f) => ({ ...f, entrance_exam_name: e.target.value }))}
-                    className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
-                </div>
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-1">Marks</label>
-                  <input type="number" value={form.entrance_exam_marks} onChange={(e) => setForm((f) => ({ ...f, entrance_exam_marks: e.target.value }))}
-                    className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
-                </div>
               </div>
               <div>
                 <label className="block text-sm font-semibold text-gray-700 mb-1">Academic Year *</label>
