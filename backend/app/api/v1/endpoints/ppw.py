@@ -38,10 +38,9 @@ from app.models.ppw import (
     Ppw, PpwCourse, PPW_CLASSIFICATIONS, PPW_CLASSIFICATION_LABELS, PPW_REQUIRED_CREDITS,
     PpwApprovalCycle, PpwApprovalStage, PpwSignature, PPW_COMMITTEE_STAGE_ROLES,
 )
-# Course-availability task — reuse the SAME visibility rule and student-scope
-# resolver as GET /courses, rather than duplicating the ownership-OR-
-# availability logic a second time (explicit instruction).
-from app.api.v1.endpoints.courses import _resolve_student_scope, _course_visibility_condition
+# Reuse the same student-scope resolver as GET /courses rather than
+# duplicating it a second time.
+from app.api.v1.endpoints.courses import _resolve_student_scope
 # Reuse the existing student->department resolver rather than duplicating it a
 # third time (research.py, grading.py already each have their own copy of this
 # exact one-liner join) — read-only import, research.py is not modified.
@@ -383,24 +382,26 @@ async def _get_owned_ppw(ppw_id: UUID, user: User, db: AsyncSession, require_dra
 async def list_available_courses(
     db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.STUDENT)),
 ):
-    """Course-availability task — SUPERSEDES the Phase 1 "all active courses"
-    behavior (previously flagged as an over-broad assumption). Now scoped to
-    exactly: courses OWNED by the student's own department, PLUS courses
-    explicitly made AVAILABLE to it via CourseAvailability — the identical
-    rule GET /courses uses, via the shared `_course_visibility_condition`
-    helper (courses.py), so this can never silently drift from it. The
-    student's own department is always resolved server-side via
-    `_resolve_student_scope`, exactly as GET /courses already does — never
-    client-supplied. Classification is still chosen by the student when
-    adding a course to a PPW section — Course.category is unrelated (see
-    ppw.py model docstring) and is unmodified by this change."""
+    """Student-department is NO LONGER used to restrict which courses a
+    student may add to their PPW (course-visibility change — a student may
+    view/enroll in courses from ALL departments now, and PPW must reflect the
+    same catalogue rather than silently staying department-locked once a
+    student has legitimately enrolled in a course from another department;
+    otherwise a student who enrolled in a Department B course via Enrollment
+    could never add it to their own PPW). Still requires the student's
+    Programme/Department to be configured at all (`_resolve_student_scope`
+    fails closed to `[]` otherwise, matching GET /courses's own convention),
+    and still only ever shows `status == "active"` courses — this widens WHO
+    (which department) a course may belong to, not WHAT (course status) is
+    shown. This does not touch PPW's approval/state-machine logic at all —
+    only which courses populate the student's own selection list."""
     scope = await _resolve_student_scope(user, db)
     if not scope:
         return []
     q = (
         select(Course)
         .options(selectinload(Course.department))
-        .where(Course.status == "active", _course_visibility_condition(scope["department_id"]))
+        .where(Course.status == "active")
     )
     result = await db.execute(q.order_by(Course.course_number))
     return [{

@@ -374,7 +374,7 @@ function PpwEditor({ ppw }: { ppw: Ppw }) {
         <h2 className="font-bold text-gray-800 mb-4">PPW Preview</h2>
         <div className="border border-gray-300 rounded-xl p-8 max-w-3xl mx-auto text-sm leading-relaxed">
           <div className="text-center mb-4">
-            <p className="font-bold text-base">Assam Agricultural University</p>
+            <p className="font-bold text-base">Assam Veterinary and Fishery University</p>
             <p>Faculty : Faculty of Veterinary Science</p>
             <p>College : {ppw.header.college_name ?? "—"}</p>
           </div>

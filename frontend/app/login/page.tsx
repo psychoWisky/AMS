@@ -59,15 +59,6 @@ export default function LoginPage() {
             {loading ? <><Loader2 size={18} className="animate-spin" /> Signing in…</> : "Sign In"}
           </button>
         </form>
-
-        <div className="mt-6 p-4 bg-gray-50 rounded-xl text-sm text-gray-600">
-          <p className="font-semibold mb-2">Demo Credentials</p>
-          <div className="space-y-1 font-mono text-sm">
-            <p>superadmin@avfu.ac.in / Admin@123</p>
-            <p>faculty1@avfu.ac.in / Admin@123</p>
-            <p>student1@avfu.ac.in / Test@123</p>
-          </div>
-        </div>
       </div>
     </div>
   );

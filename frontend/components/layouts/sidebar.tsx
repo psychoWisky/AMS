@@ -22,7 +22,11 @@ const NAV = [
   // this page is instructor-assigned "my courses" and does not apply to HOD.
   { label: "Teacher Courses", icon: BookOpen,        href: "/teacher-courses", roles: ["super_admin","academic_admin","faculty","registrar"] },
   { label: "Faculties",       icon: UserCog,         href: "/faculties",    roles: ["hod"] },
-  { label: "Enrollment",      icon: ClipboardList,   href: "/enrollment",   roles: ["super_admin","academic_admin","hod","faculty","student","registrar"] },
+  // "student" deliberately excluded here — Course Registration is now the
+  // single student-facing course selection/enrollment workflow; this page
+  // remains staff-only "Enrollment Management" (review/approve per-offering
+  // requests) for every other role, unchanged.
+  { label: "Enrollment",      icon: ClipboardList,   href: "/enrollment",   roles: ["super_admin","academic_admin","hod","faculty","registrar"] },
   { label: "Course Registration",icon: ClipboardCheck,href: "/course-registration", roles: ["student"] },
   { label: "Course Request",  icon: ClipboardList,   href: "/course-request", roles: ["super_admin","academic_admin","hod","faculty","research_supervisor"] },
   { label: "Academic Progress",icon: GraduationCap,  href: "/academic-progress", roles: ["super_admin","academic_admin","hod","faculty","student","registrar","research_supervisor"] },

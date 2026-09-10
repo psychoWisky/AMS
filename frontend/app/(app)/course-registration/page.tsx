@@ -10,10 +10,11 @@ import { CREDIT_TYPE_LABELS } from "@/lib/utils";
 
 interface Calendar { id: string; name: string; academic_year: string; }
 interface Semester { id: string; calendar_id: string; name: string; }
+interface DepartmentOpt { id: string; name: string; code: string; }
 interface Offering {
   id: string; course_number: string; course_title: string; credit_structure: string;
   category: string | null; credit_type: string | null; is_research: boolean;
-  semester_name: string | null; department_name: string | null; faculty_names: string[];
+  semester_name: string | null; department_id: string | null; department_name: string | null; faculty_names: string[];
   status: string; enrolled_count: number; max_enrollment: number;
 }
 interface EnrollmentItem {
@@ -44,6 +45,10 @@ export default function CourseRegistrationPage() {
   const qc = useQueryClient();
   const [calendarId, setCalendarId] = useState("");
   const [semesterId, setSemesterId] = useState("");
+  // Course-visibility change — a student's own department no longer limits
+  // this catalogue; this is purely an optional narrowing filter across ALL
+  // departments' courses. "" = All Departments (the default).
+  const [departmentFilter, setDepartmentFilter] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [confirmSubmit, setConfirmSubmit] = useState(false);
 
@@ -57,9 +62,21 @@ export default function CourseRegistrationPage() {
     enabled: !!calendarId,
   });
 
+  // Department filter master data — the existing Department master-data
+  // endpoint, not a new concept.
+  const { data: departments = [] } = useQuery<DepartmentOpt[]>({
+    queryKey: ["ams-departments"],
+    queryFn: async () => (await api.get("/departments")).data,
+  });
+
   const { data: offerings = [], isLoading: offeringsLoading } = useQuery<Offering[]>({
-    queryKey: ["ams-eligible-offerings", calendarId, semesterId],
-    queryFn: async () => (await api.get("/courses/offerings/all", { params: { calendar_id: calendarId, semester_id: semesterId } })).data,
+    queryKey: ["ams-eligible-offerings", calendarId, semesterId, departmentFilter],
+    queryFn: async () => (await api.get("/courses/offerings/all", {
+      params: {
+        calendar_id: calendarId, semester_id: semesterId,
+        ...(departmentFilter ? { department_id: departmentFilter } : {}),
+      },
+    })).data,
     enabled: !!calendarId && !!semesterId,
   });
 
@@ -108,6 +125,14 @@ export default function CourseRegistrationPage() {
           <option value="">Select Semester…</option>
           {semesters.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
         </select>
+        {/* Department filter (this task's confirmed requirement) — a
+            student's OWN department no longer restricts this catalogue; this
+            is purely an optional narrowing filter across ALL departments. */}
+        <select value={departmentFilter} onChange={(e) => { setDepartmentFilter(e.target.value); setSelected(new Set()); }}
+          className="border border-gray-200 rounded-xl px-3 py-2.5 text-base focus:outline-none">
+          <option value="">All Departments</option>
+          {departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+        </select>
       </div>
 
       {currentRegistration && (
@@ -143,12 +168,16 @@ export default function CourseRegistrationPage() {
           ) : offerings.length === 0 ? (
             <div className="text-center py-16 text-gray-600">
               <ClipboardCheck size={40} className="mx-auto mb-3 opacity-30" />
-              <p>No eligible courses found for this semester. If this seems wrong, your academic program may not be configured — contact administration.</p>
+              <p>
+                {departmentFilter
+                  ? "No eligible courses found for this department in this semester."
+                  : "No eligible courses found for this semester. If this seems wrong, your academic program may not be configured — contact administration."}
+              </p>
             </div>
           ) : (
             <table className="w-full text-sm">
               <thead className="bg-gray-50 border-b border-gray-200">
-                <tr>{["", "Course Number", "Course Title", "Credit", "Credit Type", "Course Teachers"].map((h) => (
+                <tr>{["", "Course Number", "Course Title", "Department", "Credit", "Credit Type", "Course Teachers"].map((h) => (
                   <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700">{h}</th>
                 ))}</tr>
               </thead>
@@ -158,6 +187,7 @@ export default function CourseRegistrationPage() {
                     <td className="px-4 py-3">{selected.has(o.id) ? <CheckSquare size={18} className="text-[#0D6E6E]" /> : <Square size={18} className="text-gray-400" />}</td>
                     <td className="px-4 py-3 font-mono font-bold text-[#0D6E6E] whitespace-nowrap">{o.course_number}</td>
                     <td className="px-4 py-3">{o.course_title}</td>
+                    <td className="px-4 py-3 text-gray-600 whitespace-nowrap">{o.department_name ?? "—"}</td>
                     <td className="px-4 py-3 font-mono">{o.credit_structure}</td>
                     <td className="px-4 py-3 text-gray-600">{o.credit_type ? CREDIT_TYPE_LABELS[o.credit_type] : "—"}</td>
                     <td className="px-4 py-3 text-gray-600">{o.faculty_names.join(", ") || "—"}</td>

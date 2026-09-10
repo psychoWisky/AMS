@@ -4,11 +4,12 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { useRole, useUser } from "@/stores/auth.store";
 import { toast } from "sonner";
-import { ClipboardList, CheckCircle2, XCircle, Loader2, RefreshCw } from "lucide-react";
+import Link from "next/link";
+import { ClipboardList, CheckCircle2, XCircle, Loader2, RefreshCw, ArrowRight } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 
 interface MyEnrollment { id: string; offering_id: string; course_number: string; course_title: string; credit_structure: string; section: string | null; status: string; enrolled_at: string; remarks: string | null; }
-interface Offering { id: string; course_number: string; course_title: string; credit_structure: string; section: string | null; max_enrollment: number; enrolled_count: number; status: string; faculty_names: string[]; }
+interface Offering { id: string; course_number: string; course_title: string; credit_structure: string; section: string | null; max_enrollment: number; enrolled_count: number; status: string; faculty_names: string[]; department_id: string | null; department_name: string | null; }
 interface EnrollmentRow { id: string; student_id: string; student_name: string; student_roll: string; status: string; enrolled_at: string; remarks: string | null; }
 
 const STATUS_COLOR: Record<string, string> = { pending: "bg-amber-100 text-amber-700", approved: "bg-green-100 text-green-700", rejected: "bg-red-100 text-red-700", withdrawn: "bg-gray-100 text-gray-600" };
@@ -22,18 +23,17 @@ export default function EnrollmentPage() {
   const [statusFilter, setStatusFilter] = useState("pending");
   const [confirm, setConfirm] = useState<{ action: () => void; title: string; message: string; confirmLabel: string; confirmClassName?: string } | null>(null);
 
+  // Read-only history only for a student now — course selection/enrollment
+  // itself moved entirely to Course Registration (single student-facing
+  // workflow, this task's confirmed requirement). The backend `POST
+  // /enrollment` self-enroll endpoint and this `GET /enrollment/my` read are
+  // both left fully intact — only the student-facing self-enroll UI here is
+  // removed, and this row still reflects courses enrolled via EITHER path
+  // (legacy self-enroll or Course Registration), since both write the same
+  // `ams_student_enrollments` table.
   const { data: myEnrollments = [], isLoading: myLoading } = useQuery<MyEnrollment[]>({
     queryKey: ["my-enrollments"],
     queryFn: async () => (await api.get("/enrollment/my")).data,
-    enabled: isStudent,
-  });
-
-  const { data: offerings = [] } = useQuery<Offering[]>({
-    queryKey: ["ams-offerings-published"],
-    queryFn: async () => {
-      const data = await api.get("/courses/offerings/all");
-      return data.data.filter((o: Offering) => o.status === "published");
-    },
     enabled: isStudent,
   });
 
@@ -47,12 +47,6 @@ export default function EnrollmentPage() {
     queryKey: ["offering-enrollments", selectedOffering, statusFilter],
     queryFn: async () => (await api.get(`/enrollment/offering/${selectedOffering}?status=${statusFilter}`)).data,
     enabled: isFacultyOrAdmin && !!selectedOffering,
-  });
-
-  const enroll = useMutation({
-    mutationFn: (offering_id: string) => api.post("/enrollment", { offering_id }),
-    onSuccess: () => { toast.success("Enrollment request submitted!"); qc.invalidateQueries({ queryKey: ["my-enrollments"] }); },
-    onError: (e: unknown) => toast.error((e as {response?:{data?:{detail?:string}}})?.response?.data?.detail ?? "Failed."),
   });
 
   const process = useMutation({
@@ -69,72 +63,45 @@ export default function EnrollmentPage() {
     onSuccess: () => { toast.success("Bulk approved!"); qc.invalidateQueries({ queryKey: ["offering-enrollments", selectedOffering, statusFilter] }); },
   });
 
-  // Student view
+  // Student view — read-only history only. Course selection/enrollment
+  // itself now happens exclusively on Course Registration (this task's
+  // confirmed requirement) — see the pointer below.
   if (isStudent) {
     return (
-      <div className="p-6 max-w-5xl mx-auto">
+      <div className="p-6 max-w-3xl mx-auto">
         <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2 mb-2"><ClipboardList size={24} className="text-[#0D6E6E]" />My Enrollment</h1>
-        <p className="text-gray-700 text-sm mb-6">View your enrolled courses and apply for new ones</p>
+        <p className="text-gray-700 text-sm mb-6">A read-only history of your enrolled courses.</p>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Available courses */}
-          <div className="bg-white rounded-2xl border border-gray-200 p-5">
-            <h2 className="font-bold text-gray-800 mb-4">Available Courses</h2>
-            {offerings.length === 0 ? (
-              <p className="text-sm text-gray-600 text-center py-8">
-                No eligible courses found. If this seems wrong, your academic program may not be configured — contact administration.
-              </p>
-            ) : (
-              <div className="space-y-2">
-                {offerings.map((o) => {
-                  const already = myEnrollments.some((e) => e.offering_id === o.id);
-                  return (
-                    <div key={o.id} className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl">
-                      <div className="flex-1">
-                        <p className="text-base font-bold text-[#0D6E6E]">{o.course_number} <span className="text-gray-800 font-semibold">{o.course_title}</span></p>
-                        <p className="text-sm text-gray-700">{o.credit_structure} credits · {o.enrolled_count}/{o.max_enrollment} enrolled</p>
-                      </div>
-                      <button disabled={already || enroll.isPending}
-                        onClick={() => !already && setConfirm({
-                          action: () => enroll.mutate(o.id),
-                          title: "Confirm Enrollment",
-                          message: `Are you sure you want to enroll in ${o.course_number} — ${o.course_title}?`,
-                          confirmLabel: "Yes, Enroll",
-                          confirmClassName: "bg-[#0D6E6E] hover:bg-[#178F8F] text-white",
-                        })}
-                        className="px-3 py-1.5 text-sm font-semibold rounded-lg bg-[#0D6E6E] text-white hover:bg-[#178F8F] disabled:opacity-50">
-                        {already ? "Enrolled" : "Enroll"}
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
+        <Link href="/course-registration"
+          className="flex items-center justify-between gap-4 bg-teal-50 border border-teal-200 rounded-2xl p-4 mb-6 hover:bg-teal-100 transition-colors">
+          <p className="text-sm text-teal-800">
+            To browse courses across all Departments and register for new ones, use <span className="font-semibold">Course Registration</span>.
+          </p>
+          <span className="shrink-0 flex items-center gap-1.5 px-4 py-2 bg-[#0D6E6E] text-white rounded-xl text-sm font-semibold">
+            Go to Course Registration <ArrowRight size={14} />
+          </span>
+        </Link>
 
-          {/* My enrollments */}
-          <div className="bg-white rounded-2xl border border-gray-200 p-5">
-            <h2 className="font-bold text-gray-800 mb-4">My Enrollments</h2>
-            {myLoading ? <div className="flex justify-center py-8"><Loader2 className="animate-spin text-gray-600" /></div> : myEnrollments.length === 0 ? (
-              <p className="text-sm text-gray-600 text-center py-8">No enrollments yet.</p>
-            ) : (
-              <div className="space-y-2">
-                {myEnrollments.map((e) => (
-                  <div key={e.id} className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl">
-                    <div className="flex-1">
-                      <p className="text-base font-bold text-gray-800">{e.course_number} {e.course_title}</p>
-                      <p className="text-sm text-gray-700">{e.credit_structure} credits</p>
-                      {e.remarks && <p className="text-sm text-amber-600 mt-1">{e.remarks}</p>}
-                    </div>
-                    <span className={`px-2 py-0.5 rounded-full text-sm font-semibold ${STATUS_COLOR[e.status] ?? "bg-gray-100"}`}>{e.status}</span>
+        <div className="bg-white rounded-2xl border border-gray-200 p-5">
+          <h2 className="font-bold text-gray-800 mb-4">My Enrollments</h2>
+          {myLoading ? <div className="flex justify-center py-8"><Loader2 className="animate-spin text-gray-600" /></div> : myEnrollments.length === 0 ? (
+            <p className="text-sm text-gray-600 text-center py-8">No enrollments yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {myEnrollments.map((e) => (
+                <div key={e.id} className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl">
+                  <div className="flex-1">
+                    <p className="text-base font-bold text-gray-800">{e.course_number} {e.course_title}</p>
+                    <p className="text-sm text-gray-700">{e.credit_structure} credits</p>
+                    {e.remarks && <p className="text-sm text-amber-600 mt-1">{e.remarks}</p>}
                   </div>
-                ))}
-              </div>
-            )}
-          </div>
+                  <span className={`px-2 py-0.5 rounded-full text-sm font-semibold ${STATUS_COLOR[e.status] ?? "bg-gray-100"}`}>{e.status}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
-      {confirm && <ConfirmDialog title={confirm.title} message={confirm.message} confirmLabel={confirm.confirmLabel} confirmClassName={confirm.confirmClassName} onConfirm={() => { confirm.action(); setConfirm(null); }} onCancel={() => setConfirm(null)} />}
-    </div>
+      </div>
     );
   }
 

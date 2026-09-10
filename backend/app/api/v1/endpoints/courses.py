@@ -493,14 +493,23 @@ async def list_all_offerings(
     if calendar_id: q = q.where(CourseOffering.calendar_id == calendar_id)
 
     if user.role == UserRole.STUDENT:
-        # Eligibility is derived server-side; client-supplied department_id/level are ignored.
+        # Course-visibility change: a student's own department no longer
+        # restricts the catalogue — they may view/enroll in published
+        # offerings from ANY department now. `level` is still derived
+        # server-side (never client-supplied — see the program_level filter
+        # below), but `department_id` is now honored as an OPTIONAL narrowing
+        # filter exactly like every other role already gets: omitted -> all
+        # departments; supplied -> only that department's offerings. This is
+        # authorization-neutral — it only changes what is LISTED, never what
+        # a student is allowed to enroll in (see enrollment.py's `enroll`/
+        # `register_courses`, which independently re-check eligibility
+        # server-side and never trust this list).
         scope = await _resolve_student_scope(user, db)
         if not scope:
             return []
-        q = q.where(
-            CourseOffering.status == "published",
-            CourseOffering.department_id == scope["department_id"],
-        )
+        q = q.where(CourseOffering.status == "published")
+        if department_id:
+            q = q.where(CourseOffering.department_id == department_id)
     elif mine:
         # "My courses" — scoping mirrors _authorize_offering_management's role priority
         # (enrollment.py) applied as a list filter instead of a single-offering guard.

@@ -242,8 +242,12 @@ async def enroll(
     scope = await _resolve_student_scope(user, db)
     if not scope:
         raise HTTPException(403, "Your academic program is not configured; contact administration.")
+    # Course-visibility change: department is no longer part of eligibility —
+    # a student may enroll in any department's offering, subject to every
+    # OTHER existing rule (program level, published status, capacity,
+    # duplicate prevention — all unchanged below).
     course = await db.get(Course, offering.course_id)
-    if not course or course.program_level != scope["level"] or offering.department_id != scope["department_id"]:
+    if not course or course.program_level != scope["level"]:
         raise HTTPException(403, "This course offering is not available to your program.")
 
     # Check capacity
@@ -294,8 +298,10 @@ async def register_courses(
         offering = await db.get(CourseOffering, oid)
         if not offering or offering.status != "published" or offering.semester_id != body.semester_id:
             raise HTTPException(400, "One or more selected offerings are not available for this semester.")
+        # Course-visibility change: department is no longer part of
+        # eligibility here either — mirrors the single-offering `enroll()`.
         course = await db.get(Course, offering.course_id)
-        if not course or course.program_level != scope["level"] or offering.department_id != scope["department_id"]:
+        if not course or course.program_level != scope["level"]:
             raise HTTPException(403, "One or more selected offerings are not available to your program.")
         count_result = await db.execute(
             select(func.count()).select_from(StudentEnrollment).where(
