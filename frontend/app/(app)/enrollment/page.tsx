@@ -112,7 +112,7 @@ export default function EnrollmentPage() {
       <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2 mb-2"><ClipboardList size={24} className="text-[#0D6E6E]" />Enrollment Management</h1>
       <p className="text-gray-700 text-sm mb-6">Review and approve student enrollment requests</p>
 
-      <div className="flex gap-3 mb-5">
+      <div className="flex flex-wrap gap-3 mb-5">
         <select value={selectedOffering} onChange={(e) => setSelectedOffering(e.target.value)}
           className="flex-1 border border-gray-200 rounded-xl px-3 py-2.5 text-base focus:outline-none">
           <option value="">Select a course offering…</option>
@@ -137,7 +137,7 @@ export default function EnrollmentPage() {
       </div>
 
       {selectedOffering ? (
-        <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+        <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
           {enrollments.length === 0 ? (
             <div className="text-center py-16 text-gray-600"><ClipboardList size={40} className="mx-auto mb-3 opacity-30" /><p>No {statusFilter} enrollments.</p></div>
           ) : (

@@ -113,7 +113,8 @@ function StudentCommitteeView() {
             {!credit || credit.courses.length === 0 ? (
               <p className="text-sm text-gray-600 text-center py-6">No courses recorded yet.</p>
             ) : (
-              <table className="w-full text-sm">
+              <div className="w-full overflow-x-auto">
+              <table className="w-full text-sm min-w-[700px]">
                 <thead className="bg-gray-50 border-b border-gray-200">
                   <tr>{["Course Number", "Course Title", "Course Credit", "Credit Type", "Session", "Status"].map((h) => (
                     <th key={h} className="text-left px-3 py-2 font-semibold text-gray-700">{h}</th>
@@ -132,6 +133,7 @@ function StudentCommitteeView() {
                   ))}
                 </tbody>
               </table>
+              </div>
             )}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4 pt-4 border-t border-gray-100 text-sm">
               <div><p className="text-gray-500">Total Credit Taken</p><p className="text-lg font-bold text-[#0D6E6E]">{credit?.credit_summary.total_credit_taken ?? "—"}</p></div>
@@ -316,7 +318,7 @@ function StaffCommitteeView() {
       </div>
 
       {/* Committee table */}
-      <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+      <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
         {committees.length === 0 ? (
           <div className="text-center py-16 text-gray-600"><FlaskConical size={40} className="mx-auto mb-3 opacity-30" /><p>No advisory committees found.</p></div>
         ) : (
@@ -463,7 +465,7 @@ function StaffCommitteeView() {
                         </button>
                       )}
                     </div>
-                    <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+                    <div className="bg-white border border-gray-200 rounded-xl overflow-hidden overflow-x-auto">
                       {selected.members.length === 0 ? (
                         <p className="text-sm text-gray-600 text-center py-6">No members yet.</p>
                       ) : (

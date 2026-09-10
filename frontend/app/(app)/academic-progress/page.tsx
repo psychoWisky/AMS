@@ -143,7 +143,7 @@ export default function AcademicProgressPage() {
           {/* Courses */}
           <div>
             <h2 className="text-base font-bold text-gray-900 mb-2">Academic Courses</h2>
-            <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+            <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
               {progress.courses.length === 0 ? (
                 <p className="text-sm text-gray-600 text-center py-8">No enrollments found for the selected period.</p>
               ) : (

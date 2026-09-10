@@ -80,7 +80,7 @@ export default function FacultiesPage() {
           className="w-full pl-9 pr-4 py-2.5 border border-gray-200 rounded-xl text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
       </div>
 
-      <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+      <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
         {isLoading ? (
           <div className="flex items-center justify-center py-16 text-gray-600"><Loader2 className="animate-spin mr-2" />Loading…</div>
         ) : filtered.length === 0 ? (

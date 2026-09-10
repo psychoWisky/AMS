@@ -290,7 +290,7 @@ export default function AdminPage() {
           <div className="flex justify-end mb-3">
             <button onClick={() => setShowDeptForm(true)} className="flex items-center gap-2 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-xl font-semibold text-sm hover:bg-[#178F8F]"><Plus size={15} /> Add Department</button>
           </div>
-          <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+          <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
             {deptLoading ? <div className="flex justify-center py-12"><Loader2 className="animate-spin text-gray-600" /></div> : (
               <table className="w-full text-sm">
                 <thead className="bg-gray-50 border-b border-gray-200"><tr>{["Name", "Code", "Stream", "Status", "Action"].map((h) => <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700">{h}</th>)}</tr></thead>
@@ -325,7 +325,7 @@ export default function AdminPage() {
           <div className="flex justify-end mb-3">
             <button onClick={() => setShowProgForm(true)} className="flex items-center gap-2 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-xl font-semibold text-sm hover:bg-[#178F8F]"><Plus size={15} /> Add Programme</button>
           </div>
-          <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+          <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
             {progLoading ? <div className="flex justify-center py-12"><Loader2 className="animate-spin text-gray-600" /></div> : (
               <table className="w-full text-sm">
                 <thead className="bg-gray-50 border-b border-gray-200"><tr>{["Name", "Code", "Level", "Duration", "Status", "Action"].map((h) => <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700">{h}</th>)}</tr></thead>
@@ -391,7 +391,7 @@ export default function AdminPage() {
           <div className="flex justify-end mb-3">
             <button onClick={() => setShowCollegeForm(true)} className="flex items-center gap-2 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-xl font-semibold text-sm hover:bg-[#178F8F]"><Plus size={15} /> Add College</button>
           </div>
-          <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+          <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
             {collegeLoading ? <div className="flex justify-center py-12"><Loader2 className="animate-spin text-gray-600" /></div> : colleges.length === 0 ? (
               <div className="text-center py-16 text-gray-600"><School size={40} className="mx-auto mb-3 opacity-30" /><p>No colleges added yet.</p></div>
             ) : (
@@ -430,7 +430,7 @@ export default function AdminPage() {
           <div className="flex justify-end mb-3">
             <button onClick={() => setShowDesigForm(true)} className="flex items-center gap-2 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-xl font-semibold text-sm hover:bg-[#178F8F]"><Plus size={15} /> Add Designation</button>
           </div>
-          <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+          <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
             {desigLoading ? <div className="flex justify-center py-12"><Loader2 className="animate-spin text-gray-600" /></div> : designations.length === 0 ? (
               <div className="text-center py-16 text-gray-600"><BadgeCheck size={40} className="mx-auto mb-3 opacity-30" /><p>No designations added yet.</p></div>
             ) : (
@@ -467,7 +467,7 @@ export default function AdminPage() {
           <div className="flex justify-end mb-3">
             <button onClick={() => setShowRoleForm(true)} className="flex items-center gap-2 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-xl font-semibold text-sm hover:bg-[#178F8F]"><Plus size={15} /> Add Role</button>
           </div>
-          <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+          <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
             {rolesLoading ? <div className="flex justify-center py-12"><Loader2 className="animate-spin text-gray-600" /></div> : (
               <table className="w-full text-sm">
                 <thead className="bg-gray-50 border-b border-gray-200"><tr>{["Name", "Code", "Type", "Status", "Users", "Action"].map((h) => <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700">{h}</th>)}</tr></thead>

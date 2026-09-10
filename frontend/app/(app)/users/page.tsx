@@ -233,7 +233,7 @@ export default function UsersPage() {
       )}
 
       {/* Users table */}
-      <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+      <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
         {isLoading ? <div className="flex justify-center py-16"><Loader2 className="animate-spin text-gray-600" /></div> : filtered.length === 0 ? (
           <div className="text-center py-16 text-gray-600"><Users size={40} className="mx-auto mb-3 opacity-30" /><p>No users found.</p></div>
         ) : (

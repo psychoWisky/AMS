@@ -291,7 +291,7 @@ export default function AdmitCardPage() {
           </select>
         </div>
 
-        <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+        <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
           {adminLoading ? (
             <div className="flex justify-center py-16"><Loader2 className="animate-spin text-gray-600" /></div>
           ) : filteredCards.length === 0 ? (

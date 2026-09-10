@@ -268,7 +268,7 @@ function PpwEditor({ ppw }: { ppw: Ppw }) {
         <p className="text-sm text-gray-500 mb-4">Classification of courses</p>
         <div className="space-y-6">
           {orderedClassifications.map((c) => (
-            <div key={c.classification} className="border border-gray-200 rounded-xl overflow-hidden">
+            <div key={c.classification} className="border border-gray-200 rounded-xl overflow-hidden overflow-x-auto">
               <div className="flex items-center justify-between bg-gray-50 px-4 py-3 border-b border-gray-200">
                 <div>
                   <h3 className="font-bold text-gray-800">{c.label}</h3>

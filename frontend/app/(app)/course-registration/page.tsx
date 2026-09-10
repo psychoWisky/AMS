@@ -110,11 +110,11 @@ export default function CourseRegistrationPage() {
   }
 
   return (
-    <div className="p-6 max-w-5xl mx-auto">
+    <div className="p-6 max-w-6xl mx-auto">
       <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2 mb-2"><ClipboardCheck size={24} className="text-[#0D6E6E]" />Course Registration</h1>
       <p className="text-gray-700 text-sm mb-6">Select and submit your courses for approval by your Course Teacher, Major Advisor, and HOD.</p>
 
-      <div className="flex gap-3 mb-5">
+      <div className="flex flex-wrap gap-3 mb-5">
         <select value={calendarId} onChange={(e) => { setCalendarId(e.target.value); setSemesterId(""); setSelected(new Set()); }}
           className="border border-gray-200 rounded-xl px-3 py-2.5 text-base focus:outline-none">
           <option value="">Select Academic Year…</option>
@@ -162,7 +162,7 @@ export default function CourseRegistrationPage() {
       )}
 
       {!currentRegistration && semesterId && (
-        <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+        <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
           {offeringsLoading || regsLoading ? (
             <div className="flex items-center justify-center py-16 text-gray-600"><Loader2 className="animate-spin mr-2" />Loading…</div>
           ) : offerings.length === 0 ? (
@@ -175,7 +175,7 @@ export default function CourseRegistrationPage() {
               </p>
             </div>
           ) : (
-            <table className="w-full text-sm">
+            <table className="w-full text-sm min-w-[900px]">
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>{["", "Course Number", "Course Title", "Department", "Credit", "Credit Type", "Course Teachers"].map((h) => (
                   <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700">{h}</th>

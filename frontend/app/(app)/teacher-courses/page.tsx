@@ -96,7 +96,7 @@ export default function TeacherCoursesPage() {
       </div>
 
       {/* Course table */}
-      <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+      <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
         {isLoading ? (
           <div className="flex items-center justify-center py-16 text-gray-600"><Loader2 className="animate-spin mr-2" />Loading…</div>
         ) : offerings.length === 0 ? (
@@ -156,7 +156,7 @@ export default function TeacherCoursesPage() {
               {/* Section 2: Course Instructors */}
               <div>
                 <h4 className="text-base font-bold text-gray-900 mb-2">Course Instructors</h4>
-                <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+                <div className="bg-white border border-gray-200 rounded-xl overflow-hidden overflow-x-auto">
                   {selected.faculty.length === 0 ? (
                     <p className="text-sm text-gray-600 text-center py-6">No instructors assigned yet.</p>
                   ) : (
@@ -198,7 +198,7 @@ export default function TeacherCoursesPage() {
                       className="w-full pl-8 pr-3 py-1.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
                   </div>
                 </div>
-                <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+                <div className="bg-white border border-gray-200 rounded-xl overflow-hidden overflow-x-auto">
                   {rosterLoading ? (
                     <div className="flex justify-center py-8"><Loader2 className="animate-spin text-gray-600" /></div>
                   ) : filteredRoster.length === 0 ? (

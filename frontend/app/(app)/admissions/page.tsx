@@ -144,7 +144,7 @@ export default function AdmissionsPage() {
       </div>
 
       {/* Table */}
-      <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+      <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
         {isLoading ? (
           <div className="flex justify-center py-20 text-gray-400">Loading…</div>
         ) : filtered.length === 0 ? (

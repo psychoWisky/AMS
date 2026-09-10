@@ -196,7 +196,7 @@ export default function CourseRequestPage() {
             </select>
           </div>
 
-          <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+          <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
             {!offeringId ? (
               <div className="text-center py-12 text-gray-500">Select a course to see student registrations.</div>
             ) : studentsLoading ? (
