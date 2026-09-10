@@ -10,6 +10,11 @@ passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 python-multipart==0.0.20
 python-dotenv==1.0.1
+# Orientation bulk upload (Section 28 extension) — reads/writes .xlsx for the
+# candidate bulk-upload endpoint and its downloadable template. Pure-Python,
+# no native/compiled extensions — deliberately not pandas (far heavier, and
+# nothing else in this codebase needs a dataframe library).
+openpyxl==3.1.5
 Pillow==11.0.0
 reportlab==4.2.5
 qrcode==8.0

@@ -1,19 +1,28 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { useUser } from "@/stores/auth.store";
 import {
-  ClipboardCheck, Plus, X, Check, Ban, KeyRound, RotateCw,
+  ClipboardCheck, Plus, X, Check, Ban, KeyRound, RotateCw, Upload, Download,
 } from "lucide-react";
 
 interface Program { id: string; name: string; code: string; }
 interface DepartmentOpt { id: string; name: string; code: string; }
+interface CollegeOpt { id: string; name: string; code: string; }
 interface Candidate {
-  id: string; name: string; personal_email: string; mobile: string | null;
+  id: string; name: string;
+  first_name: string | null; middle_name: string | null; last_name: string | null;
+  personal_email: string; mobile: string | null;
+  // AVFU Email (distinct from personal_email) — issued by IT ahead of
+  // Orientation; becomes the created student's AMS login email.
+  avfu_email: string | null;
   entrance_exam_name: string | null; entrance_exam_marks: number | null;
-  academic_year: string; program_id: string; program_name: string | null; program_code: string | null;
+  academic_year: string;
+  college_id: string | null; college_name: string | null;
+  program_id: string; program_name: string | null; program_code: string | null;
   // Programme<->Department many-to-many redesign — a candidate's academic
   // identity is Programme + Department together now.
   department_id: string | null; department_name: string | null;
@@ -39,20 +48,44 @@ const CREDENTIAL_STYLE: Record<string, string> = {
   sent: "bg-green-100 text-green-700", failed: "bg-amber-100 text-amber-700",
 };
 
-const EMPTY_FORM = { name: "", personal_email: "", mobile: "", entrance_exam_name: "", entrance_exam_marks: "", academic_year: String(new Date().getFullYear()), program_id: "", department_id: "" };
+const EMPTY_FORM = {
+  first_name: "", middle_name: "", last_name: "",
+  personal_email: "", mobile: "", avfu_email: "",
+  entrance_exam_name: "", entrance_exam_marks: "",
+  academic_year: String(new Date().getFullYear()),
+  college_id: "", program_id: "", department_id: "",
+};
+
+interface BulkUploadError { row: number; errors: string[]; }
+interface BulkUploadResult { success: boolean; imported_count: number; filename?: string; errors?: BulkUploadError[]; }
 
 export default function OrientationPage() {
   const qc = useQueryClient();
+  const user = useUser();
+  // Bulk upload (this task's confirmed requirement) — Super Admin only,
+  // enforced independently by the backend; this is only a UI convenience.
+  const isSuperAdmin = user?.role === "super_admin";
   const [academicYear, setAcademicYear] = useState(String(new Date().getFullYear()));
   const [programId, setProgramId] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<Candidate | null>(null);
   const [form, setForm] = useState(EMPTY_FORM);
   const [confirmAction, setConfirmAction] = useState<{ type: "select" | "reject"; candidate: Candidate } | null>(null);
+  const [bulkModalOpen, setBulkModalOpen] = useState(false);
+  const [bulkFile, setBulkFile] = useState<File | null>(null);
+  const [bulkResult, setBulkResult] = useState<BulkUploadResult | null>(null);
+  const bulkFileInputRef = useRef<HTMLInputElement>(null);
 
   const { data: programs = [] } = useQuery<Program[]>({
     queryKey: ["ams-programs"],
     queryFn: async () => (await api.get("/departments/programs")).data,
+  });
+
+  // College (this task's confirmed requirement) — reuses the existing
+  // ams_colleges master-data endpoint, not a new concept.
+  const { data: colleges = [] } = useQuery<CollegeOpt[]>({
+    queryKey: ["ams-colleges"],
+    queryFn: async () => (await api.get("/admin/colleges")).data,
   });
 
   // Programme<->Department many-to-many redesign — Department options are
@@ -90,10 +123,12 @@ export default function OrientationPage() {
   const saveCandidate = useMutation({
     mutationFn: () => {
       const body = {
-        name: form.name, personal_email: form.personal_email, mobile: form.mobile || null,
+        first_name: form.first_name, middle_name: form.middle_name || null, last_name: form.last_name,
+        personal_email: form.personal_email, mobile: form.mobile, avfu_email: form.avfu_email,
         entrance_exam_name: form.entrance_exam_name || null,
         entrance_exam_marks: form.entrance_exam_marks ? Number(form.entrance_exam_marks) : null,
-        academic_year: form.academic_year, program_id: form.program_id, department_id: form.department_id,
+        academic_year: form.academic_year, college_id: form.college_id,
+        program_id: form.program_id, department_id: form.department_id,
       };
       return editing ? api.put(`/orientation/candidates/${editing.id}`, body) : api.post("/orientation/candidates", body);
     },
@@ -134,13 +169,70 @@ export default function OrientationPage() {
     onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed to resend credentials."),
   });
 
+  // Bulk upload (this task's confirmed requirement) — downloads the backend-
+  // generated .xlsx template (same pattern as the PPW document blob download
+  // above) so the frontend never has to construct Excel files itself.
+  const downloadTemplate = useMutation({
+    mutationFn: async () => {
+      const res = await api.get("/orientation/candidates/bulk-upload/template", { responseType: "blob" });
+      const blobUrl = window.URL.createObjectURL(res.data);
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      link.download = "orientation_candidates_template.xlsx";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(blobUrl);
+    },
+    onError: () => toast.error("Failed to download template."),
+  });
+
+  const bulkUpload = useMutation({
+    mutationFn: async () => {
+      if (!bulkFile) throw new Error("No file selected.");
+      const fd = new FormData();
+      fd.append("file", bulkFile);
+      return api.post<BulkUploadResult>("/orientation/candidates/bulk-upload", fd);
+    },
+    onSuccess: (res) => {
+      if (res.data.success) {
+        toast.success(`Successfully imported ${res.data.imported_count} candidates.`);
+        invalidate();
+        closeBulkModal();
+      } else {
+        setBulkResult(res.data);
+      }
+    },
+    onError: (e: unknown) => {
+      // Validation failures come back as a normal error response (400/409)
+      // carrying the SAME structured { success, imported_count, errors }
+      // shape as a successful call — surface it in the same result panel
+      // rather than only a generic toast.
+      const data = (e as { response?: { data?: BulkUploadResult } })?.response?.data;
+      if (data && typeof data.success === "boolean") {
+        setBulkResult(data);
+      } else {
+        toast.error("Upload failed. No candidates were imported.");
+      }
+    },
+  });
+
+  function closeBulkModal() {
+    setBulkModalOpen(false);
+    setBulkFile(null);
+    setBulkResult(null);
+    if (bulkFileInputRef.current) bulkFileInputRef.current.value = "";
+  }
+
   function openAdd() { setEditing(null); setForm({ ...EMPTY_FORM, academic_year: academicYear, program_id: programId }); setModalOpen(true); }
   function openEdit(c: Candidate) {
     setEditing(c);
     setForm({
-      name: c.name, personal_email: c.personal_email, mobile: c.mobile ?? "",
+      first_name: c.first_name ?? "", middle_name: c.middle_name ?? "", last_name: c.last_name ?? "",
+      personal_email: c.personal_email, mobile: c.mobile ?? "", avfu_email: c.avfu_email ?? "",
       entrance_exam_name: c.entrance_exam_name ?? "", entrance_exam_marks: c.entrance_exam_marks?.toString() ?? "",
-      academic_year: c.academic_year, program_id: c.program_id, department_id: c.department_id ?? "",
+      academic_year: c.academic_year, college_id: c.college_id ?? "",
+      program_id: c.program_id, department_id: c.department_id ?? "",
     });
     setModalOpen(true);
   }
@@ -155,9 +247,26 @@ export default function OrientationPage() {
           </h1>
           <p className="text-gray-700 text-base mt-1">Mark attendance, select candidates, and issue AMS student accounts</p>
         </div>
-        <button onClick={openAdd} className="flex items-center gap-2 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-base font-bold hover:bg-[#178F8F]">
-          <Plus size={16} /> Add Candidate
-        </button>
+        <div className="flex items-center gap-2">
+          {/* Bulk upload (this task's confirmed requirement) — Super Admin
+              only; the backend independently enforces this regardless of
+              what the frontend shows. */}
+          {isSuperAdmin && (
+            <>
+              <button onClick={() => downloadTemplate.mutate()} disabled={downloadTemplate.isPending}
+                className="flex items-center gap-2 px-4 py-2.5 border border-gray-300 text-gray-700 rounded-xl text-base font-bold hover:bg-gray-50 disabled:opacity-50">
+                <Download size={16} /> Download Template
+              </button>
+              <button onClick={() => setBulkModalOpen(true)}
+                className="flex items-center gap-2 px-4 py-2.5 border border-[#0D6E6E] text-[#0D6E6E] rounded-xl text-base font-bold hover:bg-teal-50">
+                <Upload size={16} /> Bulk Upload
+              </button>
+            </>
+          )}
+          <button onClick={openAdd} className="flex items-center gap-2 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-base font-bold hover:bg-[#178F8F]">
+            <Plus size={16} /> Add Candidate
+          </button>
+        </div>
       </div>
 
       {/* Filters */}
@@ -202,8 +311,12 @@ export default function OrientationPage() {
                   <td className="px-4 py-3">
                     <p className="text-gray-700">{c.personal_email}</p>
                     <p className="text-gray-400 text-xs">{c.mobile ?? "—"}</p>
+                    {c.avfu_email && <p className="text-teal-600 text-xs mt-0.5" title="AVFU Email">{c.avfu_email}</p>}
                   </td>
-                  <td className="px-4 py-3 whitespace-nowrap">{c.program_code ?? "—"}</td>
+                  <td className="px-4 py-3 whitespace-nowrap">
+                    {c.program_code ?? "—"}
+                    {c.college_name && <p className="text-gray-400 text-xs font-normal">{c.college_name}</p>}
+                  </td>
                   <td className="px-4 py-3 whitespace-nowrap">{c.department_name ?? "—"}</td>
                   <td className="px-4 py-3 whitespace-nowrap">
                     {c.entrance_exam_name ? `${c.entrance_exam_name} (${c.entrance_exam_marks ?? "—"})` : "—"}
@@ -279,20 +392,39 @@ export default function OrientationPage() {
               <button onClick={closeModal}><X size={20} className="text-gray-400 hover:text-gray-700" /></button>
             </div>
             <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-1">First Name *</label>
+                  <input value={form.first_name} onChange={(e) => setForm((f) => ({ ...f, first_name: e.target.value }))}
+                    className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-1">Middle Name</label>
+                  <input value={form.middle_name} onChange={(e) => setForm((f) => ({ ...f, middle_name: e.target.value }))}
+                    className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+                </div>
+              </div>
               <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-1">Full Name</label>
-                <input value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                <label className="block text-sm font-semibold text-gray-700 mb-1">Last Name *</label>
+                <input value={form.last_name} onChange={(e) => setForm((f) => ({ ...f, last_name: e.target.value }))}
                   className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
               </div>
               <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-1">Personal Email</label>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">Personal Email *</label>
                 <input type="email" value={form.personal_email} onChange={(e) => setForm((f) => ({ ...f, personal_email: e.target.value }))}
                   className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
               </div>
               <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-1">Mobile</label>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">Mobile *</label>
                 <input value={form.mobile} onChange={(e) => setForm((f) => ({ ...f, mobile: e.target.value }))}
                   className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">AVFU Email *</label>
+                <input type="email" value={form.avfu_email} onChange={(e) => setForm((f) => ({ ...f, avfu_email: e.target.value }))}
+                  placeholder="student@avfu.ac.in"
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+                <p className="text-xs text-gray-400 mt-1">Issued by IT for this shortlisted student — becomes their AMS login email on selection.</p>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
@@ -306,23 +438,29 @@ export default function OrientationPage() {
                     className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-1">Academic Year</label>
-                  <input value={form.academic_year} onChange={(e) => setForm((f) => ({ ...f, academic_year: e.target.value }))}
-                    className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
-                </div>
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-1">Programme</label>
-                  <select value={form.program_id} onChange={(e) => setForm((f) => ({ ...f, program_id: e.target.value }))}
-                    className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
-                    <option value="">Select…</option>
-                    {programs.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.code})</option>)}
-                  </select>
-                </div>
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">Academic Year *</label>
+                <input value={form.academic_year} onChange={(e) => setForm((f) => ({ ...f, academic_year: e.target.value }))}
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
               </div>
               <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-1">Department</label>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">College *</label>
+                <select value={form.college_id} onChange={(e) => setForm((f) => ({ ...f, college_id: e.target.value }))}
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
+                  <option value="">Select…</option>
+                  {colleges.map((c) => <option key={c.id} value={c.id}>{c.name} ({c.code})</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">Programme *</label>
+                <select value={form.program_id} onChange={(e) => setForm((f) => ({ ...f, program_id: e.target.value }))}
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
+                  <option value="">Select…</option>
+                  {programs.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.code})</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">Department *</label>
                 <select value={form.department_id} onChange={(e) => setForm((f) => ({ ...f, department_id: e.target.value }))}
                   disabled={!form.program_id}
                   className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E] disabled:bg-gray-50">
@@ -336,10 +474,60 @@ export default function OrientationPage() {
             </div>
             <button
               onClick={() => saveCandidate.mutate()}
-              disabled={saveCandidate.isPending || !form.name || !form.personal_email || !form.academic_year || !form.program_id || !form.department_id}
+              disabled={saveCandidate.isPending || !form.first_name || !form.last_name || !form.personal_email || !form.mobile || !form.avfu_email || !form.academic_year || !form.college_id || !form.program_id || !form.department_id}
               className="w-full mt-5 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-base font-bold hover:bg-[#178F8F] disabled:opacity-50">
               {saveCandidate.isPending ? "Saving…" : editing ? "Save Changes" : "Add Candidate"}
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Upload Modal (this task's confirmed requirement, Super Admin only) */}
+      {bulkModalOpen && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-gray-900">Bulk Upload Candidates</h3>
+              <button onClick={closeBulkModal}><X size={20} className="text-gray-400 hover:text-gray-700" /></button>
+            </div>
+            <p className="text-sm text-gray-600 mb-3">
+              Upload an <span className="font-semibold">.xlsx</span> or <span className="font-semibold">.csv</span> file
+              with columns: First Name, Middle Name (optional), Last Name, Personal Email, Mobile, AVFU Email,
+              Academic Year, College, Programme, Department. College/Programme/Department are matched by their
+              exact existing name. Use <span className="font-semibold">Download Template</span> to get the exact format.
+            </p>
+            <div>
+              <input ref={bulkFileInputRef} type="file" accept=".xlsx,.csv"
+                onChange={(e) => { setBulkFile(e.target.files?.[0] ?? null); setBulkResult(null); }}
+                className="w-full text-sm border border-gray-300 rounded-xl px-3 py-2 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-gray-100 file:text-gray-700 file:font-semibold" />
+              {bulkFile && <p className="text-xs text-gray-500 mt-1">Selected: {bulkFile.name}</p>}
+            </div>
+
+            {bulkResult && !bulkResult.success && (
+              <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-xl">
+                <p className="text-sm font-bold text-red-700 mb-2">Upload failed. No candidates were imported.</p>
+                <div className="max-h-56 overflow-y-auto space-y-2 pr-1">
+                  {(bulkResult.errors ?? []).map((e, i) => (
+                    <div key={i} className="text-sm">
+                      <p className="font-semibold text-gray-800">{e.row > 0 ? `Row ${e.row}` : "Upload"}</p>
+                      <ul className="list-disc list-inside text-red-700">
+                        {e.errors.map((msg, j) => <li key={j}>{msg}</li>)}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div className="flex gap-3 mt-5">
+              <button onClick={closeBulkModal}
+                className="flex-1 py-2.5 border border-gray-300 text-gray-700 rounded-xl text-base font-bold hover:bg-gray-50">
+                Cancel
+              </button>
+              <button onClick={() => bulkUpload.mutate()} disabled={!bulkFile || bulkUpload.isPending}
+                className="flex-1 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-base font-bold hover:bg-[#178F8F] disabled:opacity-50">
+                {bulkUpload.isPending ? "Uploading…" : "Upload"}
+              </button>
+            </div>
           </div>
         </div>
       )}

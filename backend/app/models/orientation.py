@@ -21,9 +21,33 @@ class OrientationCandidate(Base):
     __tablename__ = "ams_orientation_candidates"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
-    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    # LEGACY — kept exactly as-is for candidates created before the
+    # first/middle/last split below existed. Never written by new code; never
+    # backfilled for old rows. Relaxed to nullable (migration 0010) so new
+    # candidates can leave it unset entirely.
+    name: Mapped[str | None] = mapped_column(String(200))
+    # First/Middle/Last split (this task's confirmed business requirement) —
+    # First and Last are required at the API layer for new/updated
+    # candidates; Middle is always optional. Nullable at the DB level only to
+    # accommodate the pre-existing candidates that predate this field set
+    # (see migration 0010_orientation_candidate_fields) — never guessed for
+    # those rows. A row uses EITHER `name` (legacy) OR these three columns
+    # (new), decided by _candidate_full_name() in the endpoint layer.
+    first_name: Mapped[str | None] = mapped_column(String(100))
+    middle_name: Mapped[str | None] = mapped_column(String(100))
+    last_name: Mapped[str | None] = mapped_column(String(100))
     personal_email: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Required at the API layer for new/updated candidates (was optional
+    # before this task); nullable at the DB level for the same
+    # pre-existing-row reason as above.
     mobile: Mapped[str | None] = mapped_column(String(20))
+    # Distinct from personal_email — the AVFU-issued address the IT team
+    # creates for each shortlisted student ahead of Orientation. Required at
+    # the API layer for new/updated candidates; this is what becomes the
+    # created student's ams_users.email (AMS login), NEVER personal_email.
+    # Globally unique (nullable-safe — multiple NULLs are allowed) so two
+    # candidates can never collide once both have one on file.
+    avfu_email: Mapped[str | None] = mapped_column(String(255), unique=True)
     entrance_exam_name: Mapped[str | None] = mapped_column(String(200))
     entrance_exam_marks: Mapped[float | None] = mapped_column(Float)
 
@@ -39,6 +63,14 @@ class OrientationCandidate(Base):
     # (e.g. many students in B.Tech+CSE), so uniqueness stays scoped to one
     # person's own repeat application, unchanged.
     department_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_departments.id"))
+    # College (this task's confirmed business requirement) — reuses the
+    # EXISTING flat ams_colleges master-data table (app/models/user.py's
+    # College model) rather than inventing a new concept; that table already
+    # has no confirmed relationship to Department/Program, so this FK is a
+    # plain, independent reference, not part of the Programme<->Department
+    # M:N redesign. Required at the API layer for new/updated candidates;
+    # nullable at the DB level for the same pre-existing-row reason as above.
+    college_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_colleges.id"))
 
     # pending / present / absent
     attendance_status: Mapped[str] = mapped_column(String(20), default="pending")
@@ -60,8 +92,9 @@ class OrientationCandidate(Base):
 
     program: Mapped["Program"] = relationship("Program", foreign_keys=[program_id])  # type: ignore[name-defined]
     department: Mapped["Department | None"] = relationship("Department", foreign_keys=[department_id])  # type: ignore[name-defined]
+    college: Mapped["College | None"] = relationship("College", foreign_keys=[college_id])  # type: ignore[name-defined]
     student: Mapped["User | None"] = relationship("User", foreign_keys=[student_user_id])  # type: ignore[name-defined]
     creator: Mapped["User | None"] = relationship("User", foreign_keys=[created_by])  # type: ignore[name-defined]
 
 
-from app.models.user import User, Program, Department  # noqa: E402
+from app.models.user import User, Program, Department, College  # noqa: E402
