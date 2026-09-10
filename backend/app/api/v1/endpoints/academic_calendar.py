@@ -12,6 +12,9 @@ from app.db.base import get_db
 from app.core.dependencies import get_current_user, require_roles
 from app.models.user import User, UserRole
 from app.models.academic import AcademicCalendar, Semester
+from app.models.course import CourseOffering
+from app.models.enrollment import CourseRegistration
+from app.models.admit_card import AdmitCard
 
 router = APIRouter(prefix="/academic", tags=["Academic Calendar"])
 
@@ -97,6 +100,52 @@ async def update_calendar(
     for k, v in body.model_dump(exclude_none=True).items():
         setattr(cal, k, v)
     await db.commit(); return {"message": "Updated."}
+
+
+@router.delete("/calendars/{cal_id}", status_code=204)
+async def delete_calendar(
+    cal_id: UUID, db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+):
+    """Delete an Academic Year (Calendar) — only while it is still DRAFT
+    (this task's confirmed requirement). Enforced here regardless of what the
+    frontend shows/hides. Semesters belonging to this calendar cascade away
+    automatically (ON DELETE CASCADE, pre-existing schema behavior — a
+    Semester is a structural child of its own Calendar, not independent
+    transactional data). Anything that could represent real transactional
+    activity — course offerings, course registrations, or admit cards, either
+    linked directly to the calendar or to one of its semesters — is checked
+    explicitly first and blocks the delete with a clear error, mirroring
+    courses.py's delete_course pattern. Nothing else references
+    ams_academic_calendars (confirmed by inspecting every FK in the schema) —
+    Orientation/Admission/PPW records key off a plain academic_year string,
+    never this calendar row, so they can never be affected by this."""
+    cal = await db.get(AcademicCalendar, cal_id)
+    if not cal: raise HTTPException(404, "Calendar not found.")
+    if cal.status != "draft":
+        raise HTTPException(400, "Only a DRAFT academic year can be deleted.")
+
+    semester_ids = (await db.execute(select(Semester.id).where(Semester.calendar_id == cal_id))).scalars().all()
+
+    offering_exists = await db.execute(select(CourseOffering.id).where(
+        (CourseOffering.calendar_id == cal_id) | (CourseOffering.semester_id.in_(semester_ids))
+    ).limit(1))
+    if offering_exists.scalar_one_or_none():
+        raise HTTPException(400, "This academic year has course offerings and cannot be deleted. Remove them first.")
+
+    registration_exists = await db.execute(select(CourseRegistration.id).where(
+        (CourseRegistration.calendar_id == cal_id) | (CourseRegistration.semester_id.in_(semester_ids))
+    ).limit(1))
+    if registration_exists.scalar_one_or_none():
+        raise HTTPException(400, "This academic year has course registrations and cannot be deleted. Remove them first.")
+
+    if semester_ids:
+        admit_card_exists = await db.execute(select(AdmitCard.id).where(AdmitCard.semester_id.in_(semester_ids)).limit(1))
+        if admit_card_exists.scalar_one_or_none():
+            raise HTTPException(400, "This academic year has admit cards issued against it and cannot be deleted. Remove them first.")
+
+    await db.delete(cal)
+    await db.commit()
 
 
 # ── Semesters ─────────────────────────────────────────────────────────────────

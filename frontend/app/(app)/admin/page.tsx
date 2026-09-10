@@ -62,7 +62,15 @@ export default function AdminPage() {
   const { data: programmes = [], isLoading: progLoading } = useQuery<ProgramRow[]>({
     queryKey: ["ams-admin-programmes"],
     queryFn: async () => (await api.get("/departments/programs", { params: { include_inactive: true } })).data,
-    enabled: tab === "programmes",
+    // Root cause of the intermittent empty "Associated Programmes" modal:
+    // that modal is opened from a Department row (Departments tab), and
+    // renders `programmes` as its checklist — but this query was previously
+    // only `enabled` on the Programmes tab, so on a first visit straight to
+    // Departments it had never been fetched (defaulting to []), making the
+    // modal render an empty list even though `assocQuery` itself succeeded
+    // (0 associations is not the same as "no data to render"). Mirrors the
+    // `departments` query's existing enabled condition just below/above.
+    enabled: tab === "programmes" || tab === "departments",
   });
 
   const saveProg = useMutation({
@@ -353,7 +361,7 @@ export default function AdminPage() {
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 max-h-[80vh] overflow-y-auto">
             <h3 className="text-xl font-bold mb-1">{assocFor.type === "program" ? "Associated Departments" : "Associated Programmes"}</h3>
             <p className="text-sm text-gray-600 mb-4">{assocFor.name}</p>
-            {assocQuery.isLoading ? (
+            {(assocQuery.isLoading || (assocFor.type === "program" ? deptLoading : progLoading)) ? (
               <div className="flex justify-center py-8"><Loader2 className="animate-spin text-gray-600" /></div>
             ) : (
               <div className="space-y-1.5">

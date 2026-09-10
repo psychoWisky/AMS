@@ -5,7 +5,8 @@ import { api } from "@/services/api";
 import { useRole } from "@/stores/auth.store";
 import { toast } from "sonner";
 import { formatDate, ADMIN_ROLES } from "@/lib/utils";
-import { CalendarDays, Plus, ChevronDown, ChevronRight, Clock, BookOpen, Loader2 } from "lucide-react";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { CalendarDays, Plus, ChevronDown, ChevronRight, Clock, BookOpen, Loader2, Trash2 } from "lucide-react";
 
 interface Calendar { id: string; name: string; academic_year: string; start_date: string; end_date: string; status: string; }
 interface Semester { id: string; calendar_id: string; name: string; sem_type: string; start_date: string; end_date: string; status: string; registration_start: string | null; exam_start: string | null; result_declaration: string | null; }
@@ -27,6 +28,7 @@ export default function CalendarPage() {
   const [showSemCreate, setShowSemCreate] = useState<string | null>(null);
   const [form, setForm] = useState({ name: "", academic_year: "", start_date: "", end_date: "" });
   const [semForm, setSemForm] = useState({ name: "", sem_type: "odd", start_date: "", end_date: "", registration_start: "", exam_start: "", exam_end: "", result_declaration: "" });
+  const [deleteTarget, setDeleteTarget] = useState<Calendar | null>(null);
 
   const { data: calendars = [], isLoading } = useQuery<Calendar[]>({
     queryKey: ["ams-calendars"],
@@ -63,6 +65,23 @@ export default function CalendarPage() {
     mutationFn: ({ id, type, status }: { id: string; type: "cal" | "sem"; status: string }) =>
       type === "cal" ? api.patch(`/academic/calendars/${id}/status?status=${status}`) : api.patch(`/academic/semesters/${id}/status?status=${status}`),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["ams-calendars"] }); qc.invalidateQueries({ queryKey: ["ams-semesters", expanded] }); },
+  });
+
+  // Delete Academic Year (this task's confirmed requirement) — only ever
+  // offered in the UI for a DRAFT year; the backend independently enforces
+  // this regardless of what the frontend shows.
+  const deleteCal = useMutation({
+    mutationFn: (id: string) => api.delete(`/academic/calendars/${id}`),
+    onSuccess: () => {
+      toast.success("Academic year deleted.");
+      qc.invalidateQueries({ queryKey: ["ams-calendars"] });
+      setDeleteTarget(null);
+    },
+    onError: (err: unknown) => {
+      const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+      toast.error(typeof detail === "string" ? detail : "Failed to delete academic year.");
+      setDeleteTarget(null);
+    },
   });
 
   if (isLoading) return <div className="flex items-center justify-center py-24 text-gray-600"><Loader2 className="animate-spin mr-2" />Loading…</div>;
@@ -133,6 +152,16 @@ export default function CalendarPage() {
                   className="text-sm border border-gray-200 rounded-lg px-2 py-1 focus:outline-none">
                   {["draft","active","closed"].map((s) => <option key={s} value={s}>{s}</option>)}
                 </select>
+              )}
+              {/* Delete (this task's confirmed requirement) — only ever shown
+                  for a DRAFT year; the backend independently rejects any
+                  attempt on a non-DRAFT one regardless of this check. */}
+              {isAdmin && cal.status === "draft" && (
+                <button onClick={(e) => { e.stopPropagation(); setDeleteTarget(cal); }}
+                  title="Delete draft academic year"
+                  className="p-1.5 text-red-600 hover:bg-red-50 rounded-lg">
+                  <Trash2 size={16} />
+                </button>
               )}
             </div>
 
@@ -206,6 +235,17 @@ export default function CalendarPage() {
           </div>
         ))}
       </div>
+
+      {/* Delete confirmation (this task's confirmed requirement) */}
+      {deleteTarget && (
+        <ConfirmDialog
+          title="Delete Academic Year"
+          message={`Delete the draft academic year "${deleteTarget.name}"? This cannot be undone.`}
+          confirmLabel={deleteCal.isPending ? "Deleting…" : "Yes, Delete"}
+          onCancel={() => setDeleteTarget(null)}
+          onConfirm={() => deleteCal.mutate(deleteTarget.id)}
+        />
+      )}
     </div>
   );
 }
