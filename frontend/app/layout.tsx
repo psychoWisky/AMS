@@ -7,7 +7,7 @@ const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
   title: "AVFU AMS – Academic Management System",
-  description: "Academic Management System for Arunachal Veterinary Faculty University",
+  description: "Academic Management System for Assam Veterinary & Fishery University",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
