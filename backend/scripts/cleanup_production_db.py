@@ -4,20 +4,24 @@ AMS ONE-TIME PRODUCTION DATABASE CLEANUP SCRIPT
 
 Purpose
 -------
-The AMS production database was created from a DEVELOPMENT DATABASE DUMP, so
-it currently contains dummy/test data end-to-end. This script resets it to a
-clean production baseline so the AVFU Super Admin can start entering real
-data, while preserving:
+The AMS production database was created from a DEVELOPMENT DATABASE DUMP. A
+first cleanup pass has already run successfully on production (users reduced
+to 1, transactional/application data cleared). This SECOND-PASS update goes
+further per an updated business requirement: it now also removes the
+remaining development MASTER data (Colleges, Departments, Programmes, the
+Programme<->Department M:N table) and HARD-DELETES the 4 non-required
+`ams_roles` rows, rather than merely deactivating them. It still preserves:
 
   * the existing `superadmin@avfu.ac.in` account (same ID, same password
     hash, same role, same active flag — never deleted/recreated)
-  * all required master/reference data (Colleges, Departments, Programmes,
-    Courses, Course Availability config, Designations)
-  * the Programme <-> Department many-to-many structure
-    (`ams_program_departments`) — untouched
-  * the `ams_roles` master-data table's ROWS (none deleted) and the
-    `ams_user_role` Postgres enum's VALUES (none dropped) — see "Roles" below
-    for what IS changed (a data-only `is_active` flip, not a schema/enum change)
+  * `ams_designations` — untouched (no FK involvement at all, see "FK
+    findings" below; nothing in this task's requirement or the schema forces
+    a change here)
+  * `ams_courses` ROWS — untouched (kept as curriculum master data); only
+    their now-dangling `department_id` FK is nulled (see "FK findings")
+  * the `ams_user_role` Postgres enum's VALUES (none dropped) — all 8 remain
+    valid at the DB level; only `ams_roles` ROWS for the 4 unwanted codes are
+    deleted (see "Roles" below)
   * Alembic migration history and the database schema — untouched
 
 This is a MANUAL, ONE-TIME operational script. It is:
@@ -31,40 +35,85 @@ reasoning behind every decision are written up in the accompanying review
 report delivered alongside this script — read that BEFORE running this file
 against any real database.
 
+FK findings (inspected directly against app/models/ and the live schema,
+not assumed) that shape this second-pass deletion order
+--------------------------------------------------------
+Tables now being fully cleared — ams_colleges, ams_departments, ams_programs,
+ams_program_departments — are referenced by:
+  * ams_program_departments.program_id/department_id  -> ON DELETE CASCADE
+    (from both Program and Department) — deleting Program/Department alone
+    would already cascade this table away; it is still deleted FIRST and
+    explicitly, per the requested order, which is always FK-safe (child
+    before parent).
+  * ams_programs.department_id (legacy, unused by app code)     -> NO ACTION
+  * ams_users.department_id / ams_users.program_id              -> NO ACTION
+  * ams_courses.department_id                                    -> NO ACTION
+  * ams_course_availability.department_id                        -> NO ACTION,
+    and this column is NOT NULL at the schema level (unlike the others)
+  * ams_orientation_candidates.{college,program,department}_id  -> NO ACTION
+  * ams_admission_applications.program_id                        -> NO ACTION
+  * ams_course_offerings.department_id                           -> NO ACTION
+Every one of the last two rows' tables (orientation_candidates, admission_
+applications, course_offerings) is already emptied by this script's existing
+transactional-data cleanup (unconditionally, regardless of which pass this
+is — see "existing production state" below), so by the time the new
+master-data deletion runs, only three things can still legitimately hold a
+reference and must be handled explicitly:
+  1. `ams_courses.department_id` — nullable, so it is set to NULL for ALL
+     rows (not just ones created by removed users — every course's
+     department is being deleted). Course ROWS are never touched/deleted.
+  2. `ams_course_availability.department_id` — NOT NULL, so a row here
+     CANNOT be preserved once its department is deleted (nulling is not an
+     option the schema allows). The minimum safe action is deleting these
+     rows outright. Locally this table currently has 0 rows; the statement
+     is still included, unconditionally, for production-safety in case any
+     exist there.
+  3. `ams_users.department_id` / `ams_users.program_id` — nullable, set to
+     NULL for ALL remaining users (in practice just the Super Admin — was
+     confirmed locally to have `department_id` set from seed data). This
+     touches ONLY these two fields; the account's id/password hash/role/
+     is_active are completely unaffected (verified by `verify_after`).
+`ams_designations` has NO foreign key columns at all (flat master data,
+confirmed by inspecting `app/models/user.py::Designation`) and no other
+table references it — it is entirely unaffected by any of this and is left
+alone, per the explicit instruction to preserve it unless the schema proves
+otherwise (it does not).
+
 Roles
 -----
-AMS does NOT store authorization roles as rows that can be "reduced to four".
-`User.role` is backed by a native PostgreSQL enum type (`ams_user_role`) with
-8 members (SUPER_ADMIN, ACADEMIC_ADMIN, HOD, FACULTY, STUDENT, REGISTRAR,
-EXAMINER, RESEARCH_SUPERVISOR) defined by `app.models.user.UserRole`. Enum
-values are NEVER dropped by this script — that would require rebuilding the
-type, an explicitly-forbidden schema change, and it would also permanently
-prevent those roles from being reintroduced later ("more roles may be added
-later" — the task's own requirement).
+AMS does NOT store authorization roles as rows that can be "reduced to four"
+at the schema level. `User.role` is backed by a native PostgreSQL enum type
+(`ams_user_role`) with 8 members (SUPER_ADMIN, ACADEMIC_ADMIN, HOD, FACULTY,
+STUDENT, REGISTRAR, EXAMINER, RESEARCH_SUPERVISOR) defined by
+`app.models.user.UserRole`. Enum VALUES are NEVER dropped by this script —
+that would require rebuilding the type, an explicitly-forbidden schema
+change, and the task explicitly says the enum may keep all 8 historical
+values.
 
 Separately, `ams_roles` is a master-data table that feeds ONLY the Admin
 "Role Management" screen (`GET/POST/PATCH/DELETE /admin/roles`) — it has NO
-foreign key from `User.role` and does not gate what a real user's role can
-be; `require_roles()` and every authorization check in the codebase read
-`User.role` (the enum) directly, never this table. Its `is_active` column is
-a genuine, pre-existing application feature (the Admin UI already has an
-active/inactive toggle wired to `PATCH /admin/roles/{id}`) — this script
-uses that exact same mechanism, purely as a data update, to set:
-    is_active = True  for SUPER_ADMIN, STUDENT, HOD, FACULTY
-    is_active = False for ACADEMIC_ADMIN, REGISTRAR, EXAMINER, RESEARCH_SUPERVISOR
-No row is deleted, `is_system` is untouched, and every one of these 4 roles
-can be flipped back to active later (through the same Admin UI, no script
-needed) the moment AMS development actually needs them again.
+foreign key from `User.role` (confirmed by inspection — nothing anywhere
+references `ams_roles.id`) and does not gate what a real user's role can be;
+`require_roles()` and every authorization check in the codebase read
+`User.role` (the enum) directly, never this table. Per this task's updated,
+explicit instruction, the script now HARD-DELETES the 4 rows for
+ACADEMIC_ADMIN/REGISTRAR/EXAMINER/RESEARCH_SUPERVISOR (not merely setting
+`is_active=False` as the first-pass script did) and leaves the 4 required
+rows (SUPER_ADMIN/STUDENT/HOD/FACULTY) completely untouched, including their
+`is_system` flag. Because nothing references `ams_roles.id`, this delete is
+unconditionally FK-safe. This is a genuine, harder-to-reverse change than the
+first pass's toggle — re-adding one of the 4 deleted role rows later (if
+"more roles are added" as the task anticipates) is a normal `POST
+/admin/roles`-equivalent insert, not a schema change, so this remains
+non-destructive to the schema/enum even though it is destructive to that
+specific master-data row.
 
-IMPORTANT KNOWN LIMITATION (reported, not silently worked around): the
-"Add User" role dropdown in `frontend/lib/utils.ts` (`ROLES`/`ADMIN_ROLES`)
-is a HARDCODED list, completely independent of `ams_roles.is_active`. This
-script's `ams_roles` update makes the 4 unwanted roles disappear from the
-Admin "Role Management" screen, but it will NOT remove them from the "Add
-User" dropdown — that is frontend application source code, which no one has
-approved changing as part of this database cleanup task. This is called out
-explicitly in the review report; fixing it (if desired) is a separate,
-small, explicitly-approved frontend change, not something this script does.
+IMPORTANT KNOWN LIMITATION (carried over from the first pass, still true):
+the "Add User" role dropdown in `frontend/lib/utils.ts` (`ROLES`/
+`ADMIN_ROLES`) is a HARDCODED list, completely independent of `ams_roles`.
+Deleting these 4 rows removes them from the Admin "Role Management" screen
+but does not touch that dropdown — unrelated frontend source code, not
+approved for change here.
 
 Usage
 -----
@@ -77,6 +126,7 @@ Add `--preserve-admission-applications` to keep `ams_admission_applications`
 rows instead of deleting them (the default is now to DELETE them — the whole
 database, including this table, came from a development dump, so its one
 existing row is dummy/development applicant data, not real production data).
+Unchanged from the first-pass script — not part of this update.
 
 Environment variables (read via the application's own `app.core.config`):
     DATABASE_URL   — required, same variable the application already uses.
@@ -138,15 +188,15 @@ REQUIRED_SUPERADMIN_EMAIL = "superadmin@avfu.ac.in"
 REQUIRED_SUPERADMIN_ROLE = "SUPER_ADMIN"
 
 # The four roles required at this stage of AMS development (task's explicit
-# requirement). Enforced two ways by this script:
-#   1. Reported here for the printed plan/verification (enum + master data
-#      are never destructively changed to "only support" these four — see
-#      module docstring, "Roles").
-#   2. `ams_roles.is_active` is flipped for exactly these codes vs. the four
-#      below in `ROLES_TO_DEACTIVATE` — a reversible, application-supported
-#      data change, not a schema/enum change.
+# requirement). Enforced by this script:
+#   1. Reported here for the printed plan/verification (the ams_user_role
+#      enum itself is never touched — see module docstring, "Roles").
+#   2. The 4 `ams_roles` ROWS below in `ROLES_TO_DELETE` are HARD-DELETED
+#      (not merely deactivated — updated instruction, second pass). Nothing
+#      references `ams_roles.id` (confirmed by inspection), so this is
+#      unconditionally FK-safe. `is_system` is never written for any row.
 REQUIRED_ROLES_TO_SUPPORT = ("SUPER_ADMIN", "STUDENT", "HOD", "FACULTY")
-ROLES_TO_DEACTIVATE = ("ACADEMIC_ADMIN", "REGISTRAR", "EXAMINER", "RESEARCH_SUPERVISOR")
+ROLES_TO_DELETE = ("ACADEMIC_ADMIN", "REGISTRAR", "EXAMINER", "RESEARCH_SUPERVISOR")
 
 CONFIRMATION_PHRASE = "DELETE PRODUCTION DATA"
 
@@ -158,15 +208,15 @@ _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 # FK graph (see the review report for the full derivation).
 TABLE_CLASSIFICATION: list[tuple[str, str, str]] = [
     # (table, classification, reason)
-    ("ams_users", "PRESERVE SELECTIVELY", "Keep only superadmin@avfu.ac.in; remove every other (dummy/dev) user."),
-    ("ams_roles", "PRESERVE (data update)", "No row deleted; is_active flipped for 4 non-required system roles — reversible via the app's own toggle."),
-    ("ams_colleges", "PRESERVE", "Institutional master data; nothing here reads as test data."),
-    ("ams_departments", "PRESERVE", "Institutional master data."),
-    ("ams_designations", "PRESERVE", "Institutional master data."),
-    ("ams_programs", "PRESERVE", "Institutional master data."),
-    ("ams_program_departments", "PRESERVE", "Programme<->Department M:N — explicitly must not be touched."),
-    ("ams_courses", "PRESERVE SELECTIVELY", "Curriculum master data kept; created_by nulled if it pointed at a removed user."),
-    ("ams_course_availability", "PRESERVE", "Cross-department course visibility config; references only Course/Department (both preserved)."),
+    ("ams_users", "PRESERVE SELECTIVELY", "Keep only superadmin@avfu.ac.in; remove every other (dummy/dev) user; department_id/program_id nulled."),
+    ("ams_roles", "DELETE 4 ROWS", "Hard-delete ACADEMIC_ADMIN/REGISTRAR/EXAMINER/RESEARCH_SUPERVISOR rows (second-pass instruction); the 4 required rows are untouched, including is_system."),
+    ("ams_colleges", "DELETE ALL DATA", "Second-pass instruction: dev-dump master data now cleared entirely; nothing references college_id once orientation_candidates is empty."),
+    ("ams_departments", "DELETE ALL DATA", "Same; department_id FKs from courses/course_availability/users are cleared first (see module docstring FK findings)."),
+    ("ams_designations", "PRESERVE", "Flat master data, no FK columns at all — unaffected by this cleanup, confirmed by inspection."),
+    ("ams_programs", "DELETE ALL DATA", "Same as colleges/departments; must be deleted before departments (its own legacy department_id FK)."),
+    ("ams_program_departments", "DELETE ALL DATA", "Second-pass instruction — deleted explicitly first (child-before-parent), though CASCADE from programs/departments would also remove it."),
+    ("ams_courses", "PRESERVE SELECTIVELY", "Rows kept (curriculum master data, not in the delete list); created_by nulled for removed users, department_id nulled for ALL rows (its department is being deleted)."),
+    ("ams_course_availability", "DELETE ALL DATA", "department_id is NOT NULL at the schema level — a row cannot survive its department being deleted, so nulling is not possible; deleting is the minimum safe action. 0 rows locally."),
     ("ams_audit_logs", "DELETE ALL DATA", "Entire DB came from a dev dump, so all audit history is dev/test activity; table/schema kept."),
     ("ams_admission_applications", "DELETE ALL DATA (default)", "Dev-dump data by definition; pass --preserve-admission-applications to keep instead."),
     ("ams_orientation_candidates", "DELETE ALL DATA", "Dummy/dev Orientation candidates — explicit business requirement to clear."),
@@ -315,17 +365,37 @@ async def build_plan(conn, preserve_admission_applications: bool) -> Plan | None
     # ALL refresh tokens are cleared now, including the Super Admin's own.
     expected["ams_refresh_tokens"] = counts["ams_refresh_tokens"]
 
+    # Second-pass master-data deletion (all rows, unconditional).
+    expected["ams_colleges"] = counts["ams_colleges"]
+    expected["ams_departments"] = counts["ams_departments"]
+    expected["ams_programs"] = counts["ams_programs"]
+    expected["ams_program_departments"] = counts["ams_program_departments"]
+    expected["ams_course_availability"] = counts["ams_course_availability"]
+
+    role_rows_to_delete = (await conn.execute(
+        text("SELECT COUNT(*) FROM ams_roles WHERE code = ANY(:codes)"), {"codes": list(ROLES_TO_DELETE)},
+    )).scalar_one()
+    expected["ams_roles"] = role_rows_to_delete
+
     notif_n = (await conn.execute(
         text("SELECT COUNT(*) FROM ams_notifications WHERE user_id = ANY(:ids)"), {"ids": other_ids},
     )).scalar_one() if other_ids else 0
     courses_touched = (await conn.execute(
         text("SELECT COUNT(*) FROM ams_courses WHERE created_by = ANY(:ids)"), {"ids": other_ids},
     )).scalar_one() if other_ids else 0
+    courses_dept_touched = (await conn.execute(
+        text("SELECT COUNT(*) FROM ams_courses WHERE department_id IS NOT NULL"),
+    )).scalar_one()
+    users_dept_prog_touched = (await conn.execute(
+        text("SELECT COUNT(*) FROM ams_users WHERE department_id IS NOT NULL OR program_id IS NOT NULL"),
+    )).scalar_one()
     admission_touched = (await conn.execute(
         text("SELECT COUNT(*) FROM ams_admission_applications WHERE reviewed_by = ANY(:ids)"), {"ids": other_ids},
     )).scalar_one() if other_ids else 0
     expected["ams_notifications"] = notif_n
     expected["_ams_courses_created_by_nulled"] = courses_touched
+    expected["_ams_courses_department_id_nulled"] = courses_dept_touched
+    expected["_ams_users_department_program_nulled"] = users_dept_prog_touched
     expected["_ams_admission_applications_reviewed_by_nulled"] = admission_touched if preserve_admission_applications else 0
 
     plan = Plan(superadmin_id=str(sa.id), other_user_ids=other_ids, counts_before=counts, expected_deletes=expected)
@@ -349,9 +419,20 @@ def print_plan(env_info: dict, plan: Plan, preserve_admission_applications: bool
     print()
     print(f"Super Admin to keep    : {REQUIRED_SUPERADMIN_EMAIL}  (id={plan.superadmin_id})")
     print(f"Users to remove        : {len(plan.other_user_ids)}  (ALL other users — this is a full dev-dump reset)")
-    print(f"Roles kept ACTIVE (ams_roles master data): {', '.join(REQUIRED_ROLES_TO_SUPPORT)}")
-    print(f"Roles set INACTIVE (ams_roles master data, rows NOT deleted): {', '.join(ROLES_TO_DEACTIVATE)}")
-    print("(ams_user_role Postgres enum is untouched — all 8 values remain valid at the DB level.)")
+    print()
+    print("Roles to KEEP:")
+    for code in REQUIRED_ROLES_TO_SUPPORT:
+        print(f"  {code}")
+    print()
+    print("Roles to DELETE:")
+    for code in ROLES_TO_DELETE:
+        print(f"  {code}")
+    print(f"(ams_roles rows to delete now: {plan.expected_deletes.get('ams_roles', 0)} of {len(ROLES_TO_DELETE)} expected codes found; "
+          "is_system is never modified; the ams_user_role Postgres enum is untouched — all 8 values remain valid at the DB level.)")
+    print()
+    print("Master data to DELETE:")
+    for t in ("ams_colleges", "ams_departments", "ams_programs", "ams_program_departments"):
+        print(f"  {t}")
     print()
     print("Rows expected to be deleted per table:")
     always_show = {
@@ -360,7 +441,9 @@ def print_plan(env_info: dict, plan: Plan, preserve_admission_applications: bool
         "ams_course_registrations", "ams_admit_cards", "ams_course_offerings",
         "ams_semesters", "ams_academic_calendars", "ams_users",
         "ams_notifications", "ams_refresh_tokens", "ams_audit_logs",
-        "ams_admission_applications",
+        "ams_admission_applications", "ams_colleges", "ams_departments",
+        "ams_programs", "ams_program_departments", "ams_course_availability",
+        "ams_roles",
     }
     for t, cls, reason in TABLE_CLASSIFICATION:
         if t in plan.expected_deletes:
@@ -369,7 +452,10 @@ def print_plan(env_info: dict, plan: Plan, preserve_admission_applications: bool
                 print(f"  {t:32s} currently={plan.counts_before.get(t, '?'):>4}   to delete={n:>4}")
     print()
     print(f"  ams_courses: created_by will be set to NULL on {plan.expected_deletes.get('_ams_courses_created_by_nulled', 0)} row(s) "
-          "(rows themselves preserved).")
+          f"(removed-user rows); department_id will be set to NULL on {plan.expected_deletes.get('_ams_courses_department_id_nulled', 0)} row(s) "
+          "(ALL rows with a department set — that department is being deleted). Course rows themselves are never deleted.")
+    print(f"  ams_users: department_id/program_id will be set to NULL on {plan.expected_deletes.get('_ams_users_department_program_nulled', 0)} "
+          "remaining row(s) (their department/programme is being deleted; id/password hash/role/is_active are untouched).")
     if preserve_admission_applications:
         print(f"  ams_admission_applications: rows PRESERVED (--preserve-admission-applications passed); "
               f"reviewed_by will be set to NULL on {plan.expected_deletes.get('_ams_admission_applications_reviewed_by_nulled', 0)} row(s).")
@@ -379,6 +465,14 @@ def print_plan(env_info: dict, plan: Plan, preserve_admission_applications: bool
     print()
     print("Tables left completely untouched (PRESERVE, no data or schema change at all): "
           + ", ".join(t for t, cls, _ in TABLE_CLASSIFICATION if cls == "PRESERVE"))
+    print()
+    print("Expected final counts:")
+    print("  Expected final users:                      1")
+    print("  Expected final roles:                      4")
+    print("  Expected final colleges:                   0")
+    print("  Expected final departments:                0")
+    print("  Expected final programmes:                 0")
+    print("  Expected final programme-department links: 0")
     print("=" * 78)
 
 
@@ -443,20 +537,55 @@ async def run_cleanup(conn, plan: Plan, preserve_admission_applications: bool) -
     # is dev/test activity. Table/schema untouched, rows cleared.
     await conn.execute(text("DELETE FROM ams_audit_logs"))
 
-    # 17. Finally, the users themselves.
-    await conn.execute(text("DELETE FROM ams_users WHERE id = ANY(:ids)"), {"ids": ids})
+    # ── Second pass: master data (Colleges/Departments/Programmes/M:N) ──────
+    # By this point every table that could hold a NO-ACTION reference to
+    # Programme/Department/College is already empty (orientation_candidates,
+    # admission_applications [unless --preserve-admission-applications],
+    # course_offerings — all cleared above). Three references remain and are
+    # handled explicitly here, per the FK findings in the module docstring:
 
-    # 18. ams_roles — DATA update only (is_active flip), no row deleted, no
-    # is_system change, no schema/enum change. Reversible via the app's own
-    # existing role-management toggle.
-    await conn.execute(
-        text("UPDATE ams_roles SET is_active = true WHERE code = ANY(:codes)"),
-        {"codes": list(REQUIRED_ROLES_TO_SUPPORT)},
-    )
-    await conn.execute(
-        text("UPDATE ams_roles SET is_active = false WHERE code = ANY(:codes)"),
-        {"codes": list(ROLES_TO_DEACTIVATE)},
-    )
+    # 17a. ams_courses.department_id — nullable; cleared for ALL rows (every
+    # course's department is being deleted). Course rows themselves are never
+    # touched/deleted — this is the "minimum safe change" for this table.
+    await conn.execute(text("UPDATE ams_courses SET department_id = NULL"))
+
+    # 17b. ams_course_availability — department_id is NOT NULL at the schema
+    # level, so a row cannot survive its department being deleted; nulling is
+    # not an option here. Deleting is the minimum safe action (0 rows
+    # locally; included unconditionally for production-safety).
+    await conn.execute(text("DELETE FROM ams_course_availability"))
+
+    # 17c. ams_users.department_id / program_id — nullable; cleared for ALL
+    # remaining users (in practice just the Super Admin, confirmed locally to
+    # have department_id set from seed data). Only these two columns are
+    # touched — id/password hash/role/is_active are never written here.
+    await conn.execute(text("UPDATE ams_users SET department_id = NULL, program_id = NULL"))
+
+    # 18. Programme<->Department M:N — deleted explicitly first (child before
+    # parent), though ON DELETE CASCADE from both ams_programs and
+    # ams_departments would also remove it once they're deleted below.
+    await conn.execute(text("DELETE FROM ams_program_departments"))
+
+    # 19. Programmes — must precede departments (its own legacy department_id
+    # FK is ON DELETE NO ACTION).
+    await conn.execute(text("DELETE FROM ams_programs"))
+
+    # 20. Departments — every remaining NO ACTION reference (courses,
+    # course_availability, users, programs, program_departments) has been
+    # cleared above.
+    await conn.execute(text("DELETE FROM ams_departments"))
+
+    # 21. Colleges — orientation_candidates (its only referencer) is already
+    # empty from step 13 above.
+    await conn.execute(text("DELETE FROM ams_colleges"))
+
+    # 22. Unwanted role rows — hard delete (second-pass instruction, not a
+    # mere is_active flip). Nothing references ams_roles.id, so this is
+    # unconditionally FK-safe; is_system is never written for any row.
+    await conn.execute(text("DELETE FROM ams_roles WHERE code = ANY(:codes)"), {"codes": list(ROLES_TO_DELETE)})
+
+    # 23. Finally, the users themselves.
+    await conn.execute(text("DELETE FROM ams_users WHERE id = ANY(:ids)"), {"ids": ids})
 
 
 async def verify_after(conn, preserve_admission_applications: bool) -> list[str]:
@@ -486,6 +615,13 @@ async def verify_after(conn, preserve_admission_applications: bool) -> list[str]
         "ams_student_enrollments.student_id": "SELECT COUNT(*) FROM ams_student_enrollments a LEFT JOIN ams_users u ON u.id=a.student_id WHERE u.id IS NULL",
         "ams_admission_applications.reviewed_by": "SELECT COUNT(*) FROM ams_admission_applications a LEFT JOIN ams_users u ON u.id=a.reviewed_by WHERE a.reviewed_by IS NOT NULL AND u.id IS NULL",
         "ams_courses.created_by": "SELECT COUNT(*) FROM ams_courses a LEFT JOIN ams_users u ON u.id=a.created_by WHERE a.created_by IS NOT NULL AND u.id IS NULL",
+        # Second-pass master-data orphan checks — with ams_departments/
+        # ams_programs now at 0 rows, ANY remaining non-null reference would
+        # show up here as orphaned, which doubles as proof the NULL-out steps
+        # actually ran (not just "table is empty").
+        "ams_courses.department_id": "SELECT COUNT(*) FROM ams_courses a LEFT JOIN ams_departments d ON d.id=a.department_id WHERE a.department_id IS NOT NULL AND d.id IS NULL",
+        "ams_users.department_id": "SELECT COUNT(*) FROM ams_users a LEFT JOIN ams_departments d ON d.id=a.department_id WHERE a.department_id IS NOT NULL AND d.id IS NULL",
+        "ams_users.program_id": "SELECT COUNT(*) FROM ams_users a LEFT JOIN ams_programs p ON p.id=a.program_id WHERE a.program_id IS NOT NULL AND p.id IS NULL",
     }
     for label, sql in orphan_checks.items():
         n = (await conn.execute(text(sql))).scalar_one()
@@ -500,6 +636,9 @@ async def verify_after(conn, preserve_admission_applications: bool) -> list[str]
         "ams_approval_stages", "ams_student_enrollments", "ams_course_registrations",
         "ams_admit_cards", "ams_course_offerings", "ams_offering_faculty", "ams_semesters",
         "ams_academic_calendars", "ams_refresh_tokens", "ams_notifications", "ams_audit_logs",
+        # Second-pass master data — must now be fully empty.
+        "ams_colleges", "ams_departments", "ams_programs", "ams_program_departments",
+        "ams_course_availability",
     ]
     if not preserve_admission_applications:
         empty_tables.append("ams_admission_applications")
@@ -508,42 +647,40 @@ async def verify_after(conn, preserve_admission_applications: bool) -> list[str]
         if n:
             problems.append(f"Expected {t} to be empty after cleanup, found {n} row(s).")
 
-    # Roles master data: rows preserved (count unchanged, checked by caller via
-    # counts_before/after), correct active/inactive split, is_system untouched.
+    # Roles master data — second pass: exactly 4 rows must remain, exactly
+    # matching REQUIRED_ROLES_TO_SUPPORT, none of ROLES_TO_DELETE present,
+    # is_system untouched (still True) for every surviving row.
     role_rows = (await conn.execute(text("SELECT code, is_active, is_system FROM ams_roles"))).all()
-    role_state = {r.code: (r.is_active, r.is_system) for r in role_rows}
+    role_codes = {r.code for r in role_rows}
+    if len(role_rows) != len(REQUIRED_ROLES_TO_SUPPORT):
+        problems.append(f"Expected exactly {len(REQUIRED_ROLES_TO_SUPPORT)} ams_roles rows after cleanup, found {len(role_rows)}.")
     for code in REQUIRED_ROLES_TO_SUPPORT:
-        if code not in role_state:
+        if code not in role_codes:
             problems.append(f"ams_roles row for required role '{code}' is missing.")
-        elif role_state[code][0] is not True:
-            problems.append(f"ams_roles row for '{code}' should be active, is not.")
-    for code in ROLES_TO_DEACTIVATE:
-        if code not in role_state:
-            problems.append(f"ams_roles row for '{code}' is missing (should still exist, just inactive).")
-        elif role_state[code][0] is not False:
-            problems.append(f"ams_roles row for '{code}' should be inactive, is not.")
-    if any(not is_system for _, (_, is_system) in role_state.items()):
-        problems.append("An ams_roles system row unexpectedly has is_system=False after cleanup.")
+    for code in ROLES_TO_DELETE:
+        if code in role_codes:
+            problems.append(f"ams_roles row for '{code}' should have been deleted, but still exists.")
+    if any(not r.is_system for r in role_rows):
+        problems.append("A remaining ams_roles row unexpectedly has is_system=False after cleanup.")
 
     return problems
 
 
 async def print_master_data_summary(conn) -> None:
     for label, sql in [
-        ("Colleges", "SELECT COUNT(*) FROM ams_colleges"),
-        ("Departments", "SELECT COUNT(*) FROM ams_departments"),
-        ("Programmes", "SELECT COUNT(*) FROM ams_programs"),
-        ("Programme<->Department links", "SELECT COUNT(*) FROM ams_program_departments"),
-        ("Courses", "SELECT COUNT(*) FROM ams_courses"),
-        ("Designations", "SELECT COUNT(*) FROM ams_designations"),
-        ("Roles (master data rows, all preserved)", "SELECT COUNT(*) FROM ams_roles"),
+        ("Colleges (expected 0)", "SELECT COUNT(*) FROM ams_colleges"),
+        ("Departments (expected 0)", "SELECT COUNT(*) FROM ams_departments"),
+        ("Programmes (expected 0)", "SELECT COUNT(*) FROM ams_programs"),
+        ("Programme<->Department links (expected 0)", "SELECT COUNT(*) FROM ams_program_departments"),
+        ("Courses (preserved, rows kept)", "SELECT COUNT(*) FROM ams_courses"),
+        ("Course availability (expected 0)", "SELECT COUNT(*) FROM ams_course_availability"),
+        ("Designations (preserved, untouched)", "SELECT COUNT(*) FROM ams_designations"),
+        ("Roles (expected 4)", "SELECT COUNT(*) FROM ams_roles"),
     ]:
         n = (await conn.execute(text(sql))).scalar_one()
-        print(f"  {label:40s}: {n}")
-    active = (await conn.execute(text("SELECT code FROM ams_roles WHERE is_active ORDER BY code"))).scalars().all()
-    inactive = (await conn.execute(text("SELECT code FROM ams_roles WHERE NOT is_active ORDER BY code"))).scalars().all()
-    print(f"  {'Active roles':40s}: {', '.join(active)}")
-    print(f"  {'Inactive roles (rows kept)':40s}: {', '.join(inactive)}")
+        print(f"  {label:45s}: {n}")
+    remaining_roles = (await conn.execute(text("SELECT code FROM ams_roles ORDER BY code"))).scalars().all()
+    print(f"  {'Remaining role codes':45s}: {', '.join(remaining_roles)}")
 
 
 async def main_async(args: argparse.Namespace) -> int:
@@ -605,7 +742,7 @@ async def main_async(args: argparse.Namespace) -> int:
             print(f"Users remaining               : {counts_after['ams_users']}")
             print(f"Refresh tokens remaining      : {counts_after['ams_refresh_tokens']}")
             print(f"Orientation candidates        : {counts_after['ams_orientation_candidates']}")
-            print("Master data preserved:")
+            print("Master data final state:")
             await print_master_data_summary(conn)
             print()
             print("The Super Admin's browser session(s) were invalidated along with all other")
