@@ -188,7 +188,18 @@ export default function OrientationPage() {
       if (!bulkFile) throw new Error("No file selected.");
       const fd = new FormData();
       fd.append("file", bulkFile);
-      return api.post<BulkUploadResult>("/orientation/candidates/bulk-upload", fd);
+      // The shared `api` instance sets a default Content-Type: application/json
+      // header (services/api.ts). Axios only auto-generates the correct
+      // multipart/form-data boundary header when NO Content-Type is already
+      // present — since one already is (the JSON default), it is left as-is
+      // and the FormData body never gets serialized as multipart at all. The
+      // request then reaches FastAPI with no parseable `file` field, which
+      // rejects it with 422 before any endpoint/validation code ever runs.
+      // Explicitly unsetting it here for this one request lets axios compute
+      // the correct multipart Content-Type + boundary itself.
+      return api.post<BulkUploadResult>("/orientation/candidates/bulk-upload", fd, {
+        headers: { "Content-Type": undefined },
+      });
     },
     onSuccess: (res) => {
       if (res.data.success) {
