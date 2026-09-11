@@ -4,11 +4,12 @@ import { useRole } from "@/stores/auth.store";
 import { cn } from "@/lib/utils";
 import {
   LayoutDashboard, CalendarDays, BookOpen, Users, ClipboardList,
-  BarChart3, FlaskConical, Bell, Settings, ChevronLeft, ChevronRight, GraduationCap, LogOut, FileText, ClipboardCheck, IdCard, UserCog, ShieldCheck, FileSpreadsheet,
+  BarChart3, FlaskConical, Bell, Settings, ChevronLeft, ChevronRight, GraduationCap, LogOut, FileText, ClipboardCheck, IdCard, UserCog, ShieldCheck, FileSpreadsheet, KeyRound,
 } from "lucide-react";
 import { useAuthStore } from "@/stores/auth.store";
 import { api } from "@/services/api";
 import { useState } from "react";
+import { ChangePasswordModal } from "@/components/ui/change-password-modal";
 
 const NAV = [
   { label: "Dashboard",       icon: LayoutDashboard, href: "/dashboard",    roles: [] },
@@ -48,6 +49,10 @@ export function AMSSidebar({ collapsed, onToggle }: { collapsed: boolean; onTogg
   const role = useRole();
   const clearAuth = useAuthStore((s) => s.clearAuth);
   const router = useRouter();
+  // Issue 6: self-service password change available to EVERY role, not just
+  // students — surfaced here (near Logout) since it applies regardless of
+  // which nav items a given role sees.
+  const [showChangePw, setShowChangePw] = useState(false);
 
   const visible = NAV.filter((n) => n.roles.length === 0 || !role || n.roles.includes(role));
 
@@ -90,6 +95,11 @@ export function AMSSidebar({ collapsed, onToggle }: { collapsed: boolean; onTogg
 
       {/* Bottom */}
       <div className="px-2 pb-3 shrink-0 space-y-1">
+        <button onClick={() => setShowChangePw(true)} title={collapsed ? "Change Password" : undefined}
+          className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-gray-700 hover:bg-gray-50 hover:text-[#0D6E6E] transition-colors">
+          <KeyRound size={18} className="shrink-0" />
+          {!collapsed && <span className="text-base">Change Password</span>}
+        </button>
         <button onClick={logout} title={collapsed ? "Logout" : undefined}
           className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-gray-700 hover:bg-red-50 hover:text-red-600 transition-colors">
           <LogOut size={18} className="shrink-0" />
@@ -100,6 +110,7 @@ export function AMSSidebar({ collapsed, onToggle }: { collapsed: boolean; onTogg
           {collapsed ? <ChevronRight size={15} /> : <><ChevronLeft size={15} /><span className="text-base">Collapse</span></>}
         </button>
       </div>
+      {showChangePw && <ChangePasswordModal mode="self" onClose={() => setShowChangePw(false)} />}
     </aside>
   );
 }

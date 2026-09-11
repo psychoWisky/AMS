@@ -275,7 +275,7 @@ export default function CoursesPage() {
   const canManage = isAdmin; // ADMIN_ROLES already includes "hod" — see lib/utils.ts
 
   return (
-    <div className="p-6 max-w-6xl mx-auto">
+    <div className="p-6 w-full">
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2"><BookOpen size={24} className="text-[#0D6E6E]" />{tab === "courses" ? "Course Management" : tab === "offerings" ? "Offer Course" : "Available to Department"}</h1>

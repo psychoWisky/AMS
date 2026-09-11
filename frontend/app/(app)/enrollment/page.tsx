@@ -108,7 +108,7 @@ export default function EnrollmentPage() {
 
   // Faculty/Admin view
   return (
-    <div className="p-6 max-w-5xl mx-auto">
+    <div className="p-6 w-full">
       <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2 mb-2"><ClipboardList size={24} className="text-[#0D6E6E]" />Enrollment Management</h1>
       <p className="text-gray-700 text-sm mb-6">Review and approve student enrollment requests</p>
 

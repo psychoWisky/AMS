@@ -91,7 +91,7 @@ export default function AcademicProgressPage() {
   }, [allSemesters]);
 
   return (
-    <div className="p-6 max-w-6xl mx-auto">
+    <div className="p-6 w-full">
       <div className="mb-6">
         <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2"><GraduationCap size={24} className="text-[#0D6E6E]" />Student Academic Progress</h1>
         <p className="text-gray-700 text-base mt-1">Enrollment, credits, and results derived from existing academic records</p>

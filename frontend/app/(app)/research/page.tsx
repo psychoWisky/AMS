@@ -303,7 +303,7 @@ function StaffCommitteeView() {
   if (isLoading) return <div className="flex items-center justify-center py-24 text-gray-600"><Loader2 className="animate-spin mr-2" />Loading…</div>;
 
   return (
-    <div className="p-6 max-w-6xl mx-auto">
+    <div className="p-6 w-full">
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2"><FlaskConical size={24} className="text-[#0D6E6E]" />Advisory Committee</h1>

@@ -7,7 +7,8 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
-from pydantic import BaseModel, EmailStr, field_validator
+from sqlalchemy.orm import selectinload
+from pydantic import BaseModel, EmailStr, field_validator, model_validator
 
 from app.db.base import get_db
 from app.core.security import verify_password, hash_password, create_access_token, create_refresh_token, verify_token
@@ -47,6 +48,7 @@ class CreateUserRequest(BaseModel):
     email: EmailStr
     password: str
     first_name: str
+    middle_name: Optional[str] = None
     last_name: str
     role: UserRole
     designation: Optional[str] = None
@@ -57,7 +59,19 @@ class CreateUserRequest(BaseModel):
     student_roll: Optional[str] = None
     admission_year: Optional[int] = None
 
+# Widened (this task's confirmed requirement) to also cover the fields Super
+# Admin actually enters on the Add User form — first/middle/last name and
+# email — so Edit User can correct the same fields Create User captured.
+# Password is deliberately NOT here: password changes go through the
+# dedicated change-password/admin-reset endpoints, never this generic
+# field-patch endpoint. `email` is handled specially in update_user() (must
+# stay lowercase + unique), so it is excluded from the generic setattr loop
+# there even though it's listed here.
 class UpdateUserRequest(BaseModel):
+    email: Optional[EmailStr] = None
+    first_name: Optional[str] = None
+    middle_name: Optional[str] = None
+    last_name: Optional[str] = None
     role: Optional[UserRole] = None
     designation: Optional[str] = None
     mobile: Optional[str] = None
@@ -83,9 +97,40 @@ class UpdateMyProfileRequest(BaseModel):
     abc_id: Optional[str] = None
     address: Optional[str] = None
 
+# This task's confirmed requirement: the self-service change-password UI no
+# longer collects the current password — `get_current_user` (JWT session)
+# already authorizes the caller to change their own password, so a redundant
+# current-password check is not required for authorization. `confirm_password`
+# exists purely for API/UI-boundary validation (must match new_password) and
+# is deliberately never persisted anywhere.
 class ChangePasswordRequest(BaseModel):
-    current_password: str
     new_password: str
+    confirm_password: str
+
+    @model_validator(mode="after")
+    def check_passwords_match(self):
+        if len(self.new_password) < 8:
+            raise ValueError("New password must be at least 8 characters.")
+        if self.new_password != self.confirm_password:
+            raise ValueError("New password and confirm password do not match.")
+        return self
+
+
+# Super Admin / Academic Admin administrative reset of another user's
+# password (Issue 6). No old-password field — the admin does not know and is
+# never shown the target's existing password. `confirm_password` is
+# validated the same way as above and never stored.
+class AdminResetPasswordRequest(BaseModel):
+    new_password: str
+    confirm_password: str
+
+    @model_validator(mode="after")
+    def check_passwords_match(self):
+        if len(self.new_password) < 8:
+            raise ValueError("New password must be at least 8 characters.")
+        if self.new_password != self.confirm_password:
+            raise ValueError("New password and confirm password do not match.")
+        return self
 
 
 # HOD "Add Faculty" (BUSINESS_LOGIC.md Section N.2/N.3). Deliberately a
@@ -223,14 +268,37 @@ async def change_password(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if not user.hashed_password or not verify_password(body.current_password, user.hashed_password):
-        raise HTTPException(status_code=400, detail="Current password is incorrect.")
-    if len(body.new_password) < 8:
-        raise HTTPException(status_code=400, detail="New password must be at least 8 characters.")
+    # Authorization for this action comes from the caller's authenticated
+    # session (get_current_user / JWT) — this task's confirmed product
+    # decision is that the caller is not additionally required to re-prove
+    # knowledge of their current password. Match/length validation already
+    # happened in ChangePasswordRequest; confirm_password is never stored.
     user.hashed_password = hash_password(body.new_password)
     user.must_change_password = False
     await db.commit()
     return {"message": "Password changed."}
+
+
+@router.post("/users/{user_id}/reset-password")
+async def admin_reset_password(
+    user_id: UUID,
+    body: AdminResetPasswordRequest,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+):
+    """Administrative password reset (Issue 6): Super Admin / Academic Admin
+    sets a new password for another user without knowing or being shown the
+    existing one. Reuses the same require_roles gate as create_user/update_user
+    and the existing must_change_password convention (forces the target to
+    pick their own password on next login), rather than introducing a new
+    authorization mechanism."""
+    target = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found.")
+    target.hashed_password = hash_password(body.new_password)
+    target.must_change_password = True
+    await db.commit()
+    return {"message": "Password reset."}
 
 
 # ── Admin: create users ───────────────────────────────────────────────────────
@@ -249,6 +317,7 @@ async def create_user(
         email=body.email.lower(),
         hashed_password=hash_password(body.password),
         first_name=body.first_name,
+        middle_name=body.middle_name,
         last_name=body.last_name,
         role=body.role,
         designation=body.designation,
@@ -318,7 +387,20 @@ async def update_user(
         effective_program_id = body.program_id if body.program_id is not None else target.program_id
         await validate_program_department_pair(effective_program_id, effective_department_id, db)
 
-    for field, value in body.model_dump(exclude_none=True).items():
+    # email is handled explicitly (must stay lowercase + unique against other
+    # users) rather than through the generic setattr loop below, since the DB
+    # enforces a UNIQUE constraint on email and EmailStr does not lowercase.
+    if body.email is not None:
+        new_email = body.email.lower()
+        if new_email != target.email:
+            dupe = await db.execute(select(User).where(User.email == new_email, User.id != target.id))
+            if dupe.scalar_one_or_none():
+                raise HTTPException(status_code=409, detail="Email already registered.")
+            target.email = new_email
+
+    updates = body.model_dump(exclude_none=True)
+    updates.pop("email", None)
+    for field, value in updates.items():
         setattr(target, field, value)
 
     await db.commit()
@@ -332,7 +414,13 @@ async def list_users(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR, UserRole.HOD, UserRole.EXAMINER)),
 ):
-    q = select(User).where(User.is_active == True)
+    # .options(selectinload(User.department)) eager-loads the department in
+    # the same query (one extra batched SELECT, not one per row) so the
+    # Administration > Users "Department" column can display a name without
+    # N+1 queries. Scoped to this endpoint only — _user_dict() itself is not
+    # touched, so its other call sites (login/me, unaffected by this task)
+    # don't need to eager-load anything they don't already use.
+    q = select(User).where(User.is_active == True).options(selectinload(User.department))
     if role:
         q = q.where(User.role == role)
     # BUSINESS_LOGIC.md Section N.4 — HOD is always scoped to their own
@@ -345,7 +433,12 @@ async def list_users(
     elif department_id:
         q = q.where(User.department_id == department_id)
     result = await db.execute(q.order_by(User.first_name))
-    return [_user_dict(u) for u in result.scalars().all()]
+    users_out = []
+    for u in result.scalars().all():
+        d = _user_dict(u)
+        d["department_name"] = u.department.name if u.department else None
+        users_out.append(d)
+    return users_out
 
 
 # ── HOD: Add Faculty (BUSINESS_LOGIC.md Section N.2/N.3) ──────────────────────

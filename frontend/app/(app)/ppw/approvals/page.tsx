@@ -128,7 +128,7 @@ export default function PpwApprovalsPage() {
   });
 
   return (
-    <div className="p-6 max-w-6xl mx-auto space-y-6">
+    <div className="p-6 w-full space-y-6">
       <div>
         <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2"><ClipboardCheck size={24} className="text-[#0D6E6E]" />My PPW Approvals</h1>
         <p className="text-gray-600 text-base mt-1">Programme of Work submissions awaiting your approval.</p>

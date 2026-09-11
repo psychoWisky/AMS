@@ -104,7 +104,7 @@ export default function AdmissionsPage() {
   const counts = apps.reduce((acc, a) => { acc[a.status] = (acc[a.status] ?? 0) + 1; return acc; }, {} as Record<string, number>);
 
   return (
-    <div className="p-6 max-w-7xl mx-auto">
+    <div className="p-6 w-full">
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2">

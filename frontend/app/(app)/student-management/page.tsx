@@ -5,6 +5,7 @@ import { api } from "@/services/api";
 import { useUser, useSetUser } from "@/stores/auth.store";
 import { toast } from "sonner";
 import { IdCard, Loader2, KeyRound } from "lucide-react";
+import { ChangePasswordModal } from "@/components/ui/change-password-modal";
 
 // Student Self-Service profile editing (BUSINESS_LOGIC.md K.1). Only the
 // confirmed student-editable fields are collected here — Batch Year, Degree
@@ -30,7 +31,10 @@ function ProfileForm({ user }: { user: NonNullable<ReturnType<typeof useUser>> }
       abc_id: user.abc_id ?? "", address: user.address ?? "",
     };
   });
-  const [pwForm, setPwForm] = useState({ current_password: "", new_password: "" });
+  // Issue 5: password change moved to the shared ChangePasswordModal
+  // (New Password + Confirm New Password, eye-toggle on both, no
+  // current-password field — see change-password-modal.tsx).
+  const [showChangePw, setShowChangePw] = useState(false);
 
   const updateProfile = useMutation({
     mutationFn: () => api.patch("/auth/me", {
@@ -50,16 +54,6 @@ function ProfileForm({ user }: { user: NonNullable<ReturnType<typeof useUser>> }
       setEditing(false);
     },
     onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed to update profile."),
-  });
-
-  const changePassword = useMutation({
-    mutationFn: () => api.post("/auth/change-password", pwForm),
-    onSuccess: () => {
-      toast.success("Password changed.");
-      setPwForm({ current_password: "", new_password: "" });
-      setUser({ ...user, must_change_password: false });
-    },
-    onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed to change password."),
   });
 
   const field = (label: string, key: keyof typeof form, type = "text") => (
@@ -145,25 +139,20 @@ function ProfileForm({ user }: { user: NonNullable<ReturnType<typeof useUser>> }
         {user.must_change_password && (
           <p className="text-sm text-amber-700 mb-3">You are using a temporary password — please change it.</p>
         )}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3">
-          <div>
-            <label className="block text-base font-semibold text-gray-700 mb-1">Current Password</label>
-            <input type="password" value={pwForm.current_password}
-              onChange={(e) => setPwForm((f) => ({ ...f, current_password: e.target.value }))}
-              className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
-          </div>
-          <div>
-            <label className="block text-base font-semibold text-gray-700 mb-1">New Password</label>
-            <input type="password" value={pwForm.new_password}
-              onChange={(e) => setPwForm((f) => ({ ...f, new_password: e.target.value }))}
-              className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
-          </div>
-        </div>
-        <button onClick={() => changePassword.mutate()} disabled={changePassword.isPending || !pwForm.current_password || pwForm.new_password.length < 8}
-          className="mt-4 px-5 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-base font-bold hover:bg-[#178F8F] disabled:opacity-60">
-          {changePassword.isPending ? "Changing…" : "Change Password"}
+        <p className="text-sm text-gray-600 mt-2 mb-4">Set a new password for your account.</p>
+        <button onClick={() => setShowChangePw(true)}
+          className="px-5 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-base font-bold hover:bg-[#178F8F]">
+          Change Password
         </button>
       </div>
+
+      {showChangePw && (
+        <ChangePasswordModal
+          mode="self"
+          onClose={() => setShowChangePw(false)}
+          onSuccess={() => setUser({ ...user, must_change_password: false })}
+        />
+      )}
     </div>
   );
 }

@@ -110,7 +110,7 @@ export default function CourseRegistrationPage() {
   }
 
   return (
-    <div className="p-6 max-w-6xl mx-auto">
+    <div className="p-6 w-full">
       <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2 mb-2"><ClipboardCheck size={24} className="text-[#0D6E6E]" />Course Registration</h1>
       <p className="text-gray-700 text-sm mb-6">Select and submit your courses for approval by your Course Teacher, Major Advisor, and HOD.</p>
 

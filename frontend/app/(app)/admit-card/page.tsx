@@ -274,7 +274,7 @@ export default function AdmitCardPage() {
   // ── ADMIN VIEW ──────────────────────────────────────────────────────────────
   if (isAdmin) {
     return (
-      <div className="p-6 max-w-6xl mx-auto">
+      <div className="p-6 w-full">
         <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2 mb-2"><IdCard size={24} className="text-[#0D6E6E]" />Admit Card Management</h1>
         <p className="text-gray-700 text-base mt-1 mb-6">View and print all student admit cards</p>
 
