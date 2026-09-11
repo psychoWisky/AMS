@@ -42,17 +42,16 @@ PPW_CLASSIFICATION_LABELS = {
     "compulsory": "Compulsory Credit Courses",
 }
 
-# Target credits per classification (this task's confirmed PPW spec) — used
-# for informational display only in Phase 1; see ppw.py endpoint docstring
-# for why this is NOT a hard submission gate.
-PPW_REQUIRED_CREDITS = {
-    "major": 21,
-    "minor": 8,
-    "supporting": 6,
-    "research": 29,
-    "seminar": 2,
-    "compulsory": 5,
-}
+# PPW credit-summary correction (this task's confirmed business clarification):
+# there is NO fixed per-classification credit target. The values 21/8/6/29/2/5
+# that a previous phase hardcoded here as `PPW_REQUIRED_CREDITS` were actually
+# an EXAMPLE of what a particular student's already-selected courses happened
+# to sum to in each classification, not a requirement every PPW must meet.
+# The constant has been removed — ppw.py's `_ppw_dict` now derives each
+# classification's credit total (and the overall total) purely by summing the
+# real, live `Course.total_credits` of that PPW's actually-selected
+# `PpwCourse` rows. There is still no hard submission gate on these totals —
+# unchanged from before this correction, not newly relaxed.
 
 
 class Ppw(Base):

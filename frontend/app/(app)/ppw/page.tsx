@@ -10,9 +10,13 @@ interface PpwCourseRow {
   course_title: string | null; credit_structure: string | null; credits: number;
   department_name: string | null;
 }
+// PPW credit-summary correction (confirmed business clarification):
+// selected_credits is purely calculated from the student's actually-selected
+// courses in this classification — there is no fixed target/required value,
+// so no required_credits/remaining_credits field exists anymore.
 interface ClassificationSummary {
-  classification: string; label: string; required_credits: number;
-  selected_credits: number; remaining_credits: number; courses: PpwCourseRow[];
+  classification: string; label: string;
+  selected_credits: number; courses: PpwCourseRow[];
 }
 interface PpwHeader {
   student_name: string; student_roll: string | null; program_name: string | null;
@@ -35,6 +39,7 @@ interface Ppw {
   supporting_field: string | null; research_title: string | null;
   submitted_at: string | null;
   classifications: ClassificationSummary[];
+  total_credits: number;
   header: PpwHeader;
   committee: { committee_found: boolean; cycle_number: number | null; cycle_status: string | null; revert_remark: string | null; reverted_at: string | null; rows: CommitteeRow[] };
   hod_approval: HodApproval;
@@ -264,8 +269,14 @@ function PpwEditor({ ppw }: { ppw: Ppw }) {
 
       {/* Section 2 — Course Plan */}
       <section className="bg-white rounded-2xl border border-gray-200 p-5">
-        <h2 className="font-bold text-gray-800 mb-1">Courses to be completed to meet Post-Graduation / Ph.D Requirements</h2>
-        <p className="text-sm text-gray-500 mb-4">Classification of courses</p>
+        <div className="flex items-center justify-between mb-1">
+          <h2 className="font-bold text-gray-800">Courses to be completed to meet Post-Graduation / Ph.D Requirements</h2>
+          {/* PPW credit-summary correction: this total is calculated live from
+              the student's actually-selected courses (never a fixed target)
+              and updates automatically whenever a course is added/removed. */}
+          <p className="text-sm text-gray-700 font-semibold whitespace-nowrap ml-4">Total: <span className="text-[#0D6E6E]">{ppw.total_credits}</span> Credits</p>
+        </div>
+        <p className="text-sm text-gray-500 mb-4">Classification of courses — credit totals below reflect your currently selected courses</p>
         <div className="space-y-6">
           {orderedClassifications.map((c) => (
             <div key={c.classification} className="border border-gray-200 rounded-xl overflow-hidden overflow-x-auto">
@@ -273,10 +284,7 @@ function PpwEditor({ ppw }: { ppw: Ppw }) {
                 <div>
                   <h3 className="font-bold text-gray-800">{c.label}</h3>
                   <p className="text-sm text-gray-600">
-                    Selected: <span className="font-semibold">{c.selected_credits}</span> / Required: <span className="font-semibold">{c.required_credits}</span>
-                    {" "}— <span className={c.remaining_credits > 0 ? "text-amber-700" : c.remaining_credits < 0 ? "text-red-600" : "text-green-700"}>
-                      {c.remaining_credits > 0 ? `${c.remaining_credits} remaining` : c.remaining_credits < 0 ? `${-c.remaining_credits} over target` : "target met"}
-                    </span>
+                    <span className="font-semibold">{c.selected_credits}</span> Credits selected
                   </p>
                 </div>
                 {isDraft && (
@@ -403,7 +411,7 @@ function PpwEditor({ ppw }: { ppw: Ppw }) {
           <p className="font-bold mt-6 mb-2">Courses to be completed by the student to meet Post-Graduation / Ph.D Requirements</p>
           {orderedClassifications.map((c) => (
             <div key={c.classification} className="mb-3">
-              <p className="font-semibold">{c.label} — {c.required_credits} Credits (Selected: {c.selected_credits})</p>
+              <p className="font-semibold">{c.label} — {c.selected_credits} Credits</p>
               {c.courses.length > 0 && (
                 <table className="w-full text-xs border border-gray-200 mt-1">
                   <thead><tr className="bg-gray-50">{["SL NO", "Course Code", "Course Title", "Credit", "Department"].map((h) => <th key={h} className="border border-gray-200 px-2 py-1 text-left">{h}</th>)}</tr></thead>
@@ -422,6 +430,7 @@ function PpwEditor({ ppw }: { ppw: Ppw }) {
               )}
             </div>
           ))}
+          <p className="text-right font-bold">Total Credits (Selected): {ppw.total_credits}</p>
 
           <p className="font-bold mt-6 mb-2">Endorsement of Students Advisory Committee</p>
           <table className="w-full text-xs border border-gray-300">

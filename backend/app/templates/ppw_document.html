@@ -163,7 +163,7 @@
   <table class="course-table">
     <thead>
       <tr class="classification-row">
-        <td colspan="5">{{ c.letter }} &mdash; {{ c.label | upper }} &mdash; {{ c.required_credits }} Credits</td>
+        <td colspan="5">{{ c.letter }} &mdash; {{ c.label | upper }} &mdash; {{ c.selected_credits }} Credits</td>
       </tr>
       <tr>
         <th class="col-slno">SL NO</th>
@@ -190,6 +190,8 @@
     </tbody>
   </table>
   {% endfor %}
+
+  <p style="text-align:right; font-weight:700; margin: 6px 0 0 0;">Total Credits (Selected): {{ ppw.total_credits }}</p>
 
   <p class="section-heading">Endorsement of Students Advisory Committee</p>
   <table class="committee-table">

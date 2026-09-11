@@ -35,7 +35,7 @@ from app.models.course import Course
 from app.models.academic import AcademicCalendar, Semester
 from app.models.research import AdvisoryCommittee, CommitteeMember
 from app.models.ppw import (
-    Ppw, PpwCourse, PPW_CLASSIFICATIONS, PPW_CLASSIFICATION_LABELS, PPW_REQUIRED_CREDITS,
+    Ppw, PpwCourse, PPW_CLASSIFICATIONS, PPW_CLASSIFICATION_LABELS,
     PpwApprovalCycle, PpwApprovalStage, PpwSignature, PPW_COMMITTEE_STAGE_ROLES,
 )
 # Reuse the same student-scope resolver as GET /courses rather than
@@ -45,6 +45,9 @@ from app.api.v1.endpoints.courses import _resolve_student_scope
 # third time (research.py, grading.py already each have their own copy of this
 # exact one-liner join) — read-only import, research.py is not modified.
 from app.api.v1.endpoints.research import _student_department_id
+# PPW course-selection task — shared programme-level eligibility check
+# (see app/core/student_scope.py's docstring for why this lives there).
+from app.core.student_scope import course_level_matches
 
 router = APIRouter(prefix="/ppw", tags=["PPW"])
 logger = logging.getLogger(__name__)
@@ -325,16 +328,23 @@ def _ppw_dict(p: Ppw) -> dict:
             "credits": pc.course.total_credits if pc.course else 0,
             "department_name": pc.course.department.name if pc.course and pc.course.department else None,
         })
+    # PPW credit-summary correction (this task's confirmed business
+    # clarification): there is no fixed per-classification credit target.
+    # `selected_credits` (per classification, below) and `total_credits`
+    # (overall, below) are BOTH purely calculated from the actual credits of
+    # the courses the student has selected — summed live from
+    # `pc.course.total_credits` above, never from a hardcoded constant. They
+    # are informational/display values only; no submission gate compares them
+    # to anything (see submit_ppw's docstring, unchanged by this correction).
     classification_summary = []
+    total_credits = 0
     for c in PPW_CLASSIFICATIONS:
         selected = sum(item["credits"] for item in by_class.get(c, []))
-        required = PPW_REQUIRED_CREDITS[c]
+        total_credits += selected
         classification_summary.append({
             "classification": c,
             "label": PPW_CLASSIFICATION_LABELS[c],
-            "required_credits": required,
             "selected_credits": selected,
-            "remaining_credits": required - selected,  # informational only — see submit_ppw docstring
             "courses": by_class.get(c, []),
         })
 
@@ -350,6 +360,7 @@ def _ppw_dict(p: Ppw) -> dict:
         "created_at": p.created_at.isoformat(),
         "updated_at": p.updated_at.isoformat(),
         "classifications": classification_summary,
+        "total_credits": total_credits,
         "header": _student_header(p.student),
     }
 
@@ -394,14 +405,23 @@ async def list_available_courses(
     and still only ever shows `status == "active"` courses — this widens WHO
     (which department) a course may belong to, not WHAT (course status) is
     shown. This does not touch PPW's approval/state-machine logic at all —
-    only which courses populate the student's own selection list."""
+    only which courses populate the student's own selection list.
+
+    PPW course-selection task (confirmed requirement): all-department
+    visibility does NOT mean unrestricted academic-level visibility — a
+    course must match the student's own Programme level (UG/PG/PhD, exact
+    match, mirroring the identical check already used at enrollment time in
+    courses.py/enrollment.py — see `course_level_matches`). This filter is
+    applied here (list) AND independently re-validated in `add_ppw_course`
+    (selection) — this list is display-only and is never trusted as the
+    authorization boundary."""
     scope = await _resolve_student_scope(user, db)
     if not scope:
         return []
     q = (
         select(Course)
         .options(selectinload(Course.department))
-        .where(Course.status == "active")
+        .where(Course.status == "active", Course.program_level == scope["level"])
     )
     result = await db.execute(q.order_by(Course.course_number))
     return [{
@@ -409,6 +429,7 @@ async def list_available_courses(
         "credit_structure": c.credit_structure, "credits": c.total_credits,
         "department_id": str(c.department_id) if c.department_id else None,
         "department_name": c.department.name if c.department else None,
+        "program_level": c.program_level,
     } for c in result.scalars().all()]
 
 
@@ -568,6 +589,20 @@ async def add_ppw_course(
     if not course:
         raise HTTPException(404, "Course not found.")
 
+    # PPW course-selection task — the authoritative programme-level check.
+    # GET /ppw/available-courses already filters to the student's level, but
+    # that list is display-only; the API remains authoritative here against a
+    # direct POST with an arbitrary course_id. The student's own level is
+    # resolved server-side (_resolve_student_scope, from the authenticated
+    # user's own User row) and is never taken from the request body — there
+    # is no department_id/program_id/program_level field on PpwCourseIn to
+    # begin with, so none of those can be client-supplied for authorization.
+    scope = await _resolve_student_scope(user, db)
+    if not scope:
+        raise HTTPException(403, "Your academic program is not configured; contact administration.")
+    if not course_level_matches(course.program_level, scope["level"]):
+        raise HTTPException(403, "This course is not available to your programme level.")
+
     count_result = await db.execute(select(PpwCourse).where(PpwCourse.ppw_id == ppw_id, PpwCourse.classification == body.classification))
     next_sl_no = len(count_result.scalars().all()) + 1
 
@@ -602,14 +637,15 @@ async def submit_ppw(
     """HARD validation (submission-blocking): the 4 required text fields must
     be non-empty — these are explicitly confirmed "required fields" (Section 1).
 
-    NOT hard-validated: exact credit totals. No business rule found stating
-    whether a PPW must exactly meet/may exceed its target credits before
-    submission (this task's Section 5 explicitly forbids inventing that rule)
-    — selected-vs-required credits are informational only (see
-    `remaining_credits` in _ppw_dict). Flagged in the implementation report as
-    an open business-rule question, not decided here. Course selections
-    themselves are otherwise unvalidated beyond Phase 1's existing rules (no
-    new course-selection rule is introduced by this phase).
+    NOT hard-validated: credit totals. PPW credit-summary correction
+    (confirmed business clarification): there is no fixed per-classification
+    or overall credit target at all — `selected_credits`/`total_credits` in
+    `_ppw_dict` are purely calculated from the student's actually-selected
+    courses and are informational/display only; no submission gate compares
+    them to anything, and none should be added. Course selections themselves
+    are otherwise unvalidated beyond Phase 1's existing rules plus the
+    programme-level eligibility check in `add_ppw_course` (no new
+    course-selection rule is introduced by this correction).
 
     Phase 2 (this task): also seeds a brand-new PpwApprovalCycle + its stages
     (Major Advisor, one per actually-accepted applicable committee member,

@@ -41,8 +41,6 @@ from app.core.student_scope import resolve_student_scope as _resolve_student_sco
 
 router = APIRouter(prefix="/courses", tags=["Courses"])
 
-CREDIT_FORMATS = ["2+0","0+2","1+1","0+1","3+0","2+1","1+2","3+1","4+0","0+4","2+2","4+1"]
-
 # Confirmed HOD Course Management values (BUSINESS_LOGIC.md L.2).
 CATEGORY_VALUES = ("optional", "core", "compulsory", "research", "seminar", "deficiency", "bridge", "prerequisite", "mandatory_mba")
 CREDIT_TYPE_VALUES = ("credit", "non_credit")
@@ -63,6 +61,16 @@ class CourseIn(BaseModel):
 
     @model_validator(mode="after")
     def set_course_type(self):
+        # Course-credit task (confirmed requirement): Super Admin/HOD may enter
+        # any Theory/Practical credit values — the previous fixed whitelist
+        # (2+0, 0+2, 1+1, ...) is removed (see this file's git history / the
+        # investigation report). The only remaining numeric validation is
+        # "not negative" — total_credits/credit_structure are still derived
+        # unchanged (Course.total_credits property), never stored separately,
+        # so there is no separate value that could drift out of sync with
+        # credit_theory + credit_practical.
+        if self.credit_theory < 0 or self.credit_practical < 0:
+            raise ValueError("Credit values cannot be negative.")
         if self.credit_theory > 0 and self.credit_practical > 0:
             self.course_type = "both"
         elif self.credit_practical > 0:
@@ -172,11 +180,6 @@ def _course_visibility_condition(department_id: UUID):
 
 # ── Credit structure listing ──────────────────────────────────────────────────
 
-@router.get("/credit-formats")
-async def credit_formats():
-    return {"formats": CREDIT_FORMATS}
-
-
 @router.get("/category-values")
 async def category_values():
     return {"category": CATEGORY_VALUES, "credit_type": CREDIT_TYPE_VALUES}
@@ -189,8 +192,8 @@ async def category_values():
 # department's HOD manages the grant; the owning department's course record
 # and course-management authorization (_authorize_department_manage) are
 # never touched by any endpoint here or below. Registered BEFORE the dynamic
-# GET /{course_id} route (same convention as /credit-formats, /category-values
-# above) so "/search"/"available-to-me" are never swallowed by {course_id}.
+# GET /{course_id} route (same convention as /category-values above) so
+# "/search"/"available-to-me" are never swallowed by {course_id}.
 
 class AvailabilityIn(BaseModel):
     # Optional: if omitted, defaults to the caller's own department (HOD).

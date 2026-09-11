@@ -54,3 +54,19 @@ async def resolve_student_department_id(student_id: UUID, db: AsyncSession) -> O
     if not student:
         return None
     return student.department_id
+
+
+def course_level_matches(course_program_level: Optional[str], scope_level: Optional[str]) -> bool:
+    """Programme-level eligibility check (PPW course-selection task) — exact
+    string match, mirroring the identical `course.program_level ==
+    scope["level"]` comparison already used at enrollment time in
+    courses.py's `list_all_offerings` and enrollment.py's `enroll`/
+    `register_courses`. Canonical values are "UG"/"PG"/"PhD" (see
+    `Program.level`/`Course.program_level` column comments) — confirmed
+    distinct, never treated as interchangeable (a PG student may not select a
+    PhD course or vice versa). Extracted here as a small shared helper
+    (rather than a fourth inline duplicate) specifically for PPW's two course-
+    selection call sites (`GET /ppw/available-courses`, `POST
+    /ppw/{id}/courses`); courses.py/enrollment.py's existing, already-correct
+    inline checks are left exactly as they are."""
+    return bool(course_program_level) and course_program_level == scope_level

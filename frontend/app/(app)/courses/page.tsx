@@ -40,7 +40,6 @@ interface SearchCourseResult {
 
 const CATEGORY_OPTIONS = Object.keys(COURSE_CATEGORY_LABELS);
 const CREDIT_TYPE_OPTIONS = Object.keys(CREDIT_TYPE_LABELS);
-const CREDIT_FORMATS = ["2+0","0+2","1+1","0+1","3+0","2+1","1+2","3+1","4+0","0+4","2+2"];
 const LEVELS = ["UG","PG","PhD"];
 const STATUS_COLOR: Record<string, string> = { active: "bg-green-100 text-green-700", inactive: "bg-gray-100 text-gray-600", archived: "bg-red-100 text-red-700", draft: "bg-gray-100 text-gray-700", published: "bg-green-100 text-green-700", closed: "bg-red-100 text-red-700" };
 const MAX_OFFERING_FACULTY = 3;
@@ -420,18 +419,22 @@ export default function CoursesPage() {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-base font-semibold text-gray-700 mb-1">Theory Credit</label>
-                  <input type="number" min={0} max={6} value={form.credit_theory}
+                  <input type="number" min={0} value={form.credit_theory}
                     onChange={(e) => setForm((f) => ({ ...f, credit_theory: e.target.value }))}
                     className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
                 </div>
                 <div>
                   <label className="block text-base font-semibold text-gray-700 mb-1">Practical Credit</label>
-                  <input type="number" min={0} max={6} value={form.credit_practical}
+                  <input type="number" min={0} value={form.credit_practical}
                     onChange={(e) => setForm((f) => ({ ...f, credit_practical: e.target.value }))}
                     className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
                 </div>
               </div>
-              <p className="text-sm text-gray-600">Supported formats: {CREDIT_FORMATS.join(", ")} — current: <span className="font-bold text-[#0D6E6E]">{form.credit_theory}+{form.credit_practical}</span></p>
+              {/* Course-credit task (confirmed requirement): no fixed
+                  theory+practical whitelist — Super Admin/HOD may enter any
+                  non-negative values; this is a live total, not a list of
+                  "supported" combinations. */}
+              <p className="text-sm text-gray-600">Total Credit: <span className="font-bold text-[#0D6E6E]">{(parseInt(form.credit_theory) || 0) + (parseInt(form.credit_practical) || 0)}</span> ({form.credit_theory || 0}+{form.credit_practical || 0})</p>
               <div>
                 <label className="block text-base font-semibold text-gray-700 mb-1">Status</label>
                 <div className="flex gap-2">
