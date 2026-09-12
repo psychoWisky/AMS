@@ -29,6 +29,13 @@ interface Registration {
   id: string; semester_id: string; calendar_id: string; stage: string; status_label: string;
   is_editable: boolean; is_card_ready: boolean;
   revert_remark: string | null; submitted_at: string; card_submitted_at: string | null;
+  // Selected-Courses fix (this revision): `items` is now semester-scoped —
+  // it includes ALL of the student's active (pending/approved) enrollments
+  // for this semester, including legacy rows with no `registration_id`, not
+  // only rows linked to this specific registration. `selected_credits` is
+  // the backend-authoritative total over that same population — always
+  // prefer this over summing `items` client-side (see `usedCredits` below).
+  selected_credits: number; max_credits: number;
   items: EnrollmentItem[]; withdrawn_items: EnrollmentItem[];
 }
 
@@ -129,7 +136,13 @@ export default function CourseRegistrationPage() {
   const isLocked = currentRegistration ? !currentRegistration.is_editable : false;
 
   const activeItems = currentRegistration?.items ?? [];
-  const usedCredits = activeItems.reduce((sum, it) => sum + (it.credits || 0), 0);
+  // Selected-Courses/credit fix (this revision): prefer the backend's
+  // authoritative `selected_credits` (semester-scoped, includes legacy
+  // registration_id=NULL rows) over a client-side sum. Falling back to
+  // summing `activeItems` only when there is no registration yet at all
+  // (nothing selected, so both are equivalently 0) — never a second,
+  // independently-computed total that could drift from the backend's.
+  const usedCredits = currentRegistration?.selected_credits ?? activeItems.reduce((sum, it) => sum + (it.credits || 0), 0);
   const remainingCredits = MAX_SEMESTER_CREDITS - usedCredits;
   const registeredOfferingIds = new Set(activeItems.map((it) => it.offering_id));
   const availableOfferings = offerings.filter((o) => !registeredOfferingIds.has(o.id));

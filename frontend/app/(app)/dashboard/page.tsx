@@ -178,15 +178,25 @@ export default function DashboardPage() {
     return <StudentDashboard user={user} />;
   }
 
-  // Existing generic staff/admin dashboard — unchanged for every non-student role.
-  const cards = [
-    { label: "Academic Calendar", icon: CalendarDays, href: "/calendar", desc: "Semesters, exam dates, holidays", color: "bg-blue-50 text-blue-700" },
-    { label: "Courses", icon: BookOpen, href: "/courses", desc: "Course catalog & offerings", color: "bg-teal-50 text-teal-700" },
-    { label: "Enrollment", icon: ClipboardList, href: "/enrollment", desc: "Course enrollment management", color: "bg-purple-50 text-purple-700" },
-    { label: "Grading", icon: BarChart3, href: "/grading", desc: "Grade sheets & result approval", color: "bg-orange-50 text-orange-700" },
-    { label: "Research / PG", icon: GraduationCap, href: "/research", desc: "Advisory committees, PhD tracking", color: "bg-green-50 text-green-700" },
-    { label: "Notifications", icon: Bell, href: "/notifications", desc: `${notifications.length} unread`, color: "bg-red-50 text-red-700" },
+  // Generic staff/admin dashboard — unchanged for every non-student role
+  // EXCEPT Faculty, which now excludes the generic "Courses" and
+  // "Enrollment" cards (Student/Faculty module-cleanup task, this
+  // revision): neither is a confirmed Faculty module (BUSINESS_LOGIC.md
+  // M.1's 17-tile Faculty list has no "Courses" tile, and M.9 explicitly
+  // confirms "Course Request" — not this generic Enrollment view — as the
+  // intended Faculty workflow). Super Admin/Academic Admin/HOD/Registrar
+  // are entirely unaffected — both cards/routes/backends remain exactly as
+  // before for them.
+  const allCards = [
+    { key: "calendar", label: "Academic Calendar", icon: CalendarDays, href: "/calendar", desc: "Semesters, exam dates, holidays", color: "bg-blue-50 text-blue-700" },
+    { key: "courses", label: "Courses", icon: BookOpen, href: "/courses", desc: "Course catalog & offerings", color: "bg-teal-50 text-teal-700" },
+    { key: "enrollment", label: "Enrollment", icon: ClipboardList, href: "/enrollment", desc: "Course enrollment management", color: "bg-purple-50 text-purple-700" },
+    { key: "grading", label: "Grading", icon: BarChart3, href: "/grading", desc: "Grade sheets & result approval", color: "bg-orange-50 text-orange-700" },
+    { key: "advisory-committee", label: "Advisory Committee", icon: GraduationCap, href: "/research", desc: "Advisory committees, PhD tracking", color: "bg-green-50 text-green-700" },
+    { key: "notifications", label: "Notifications", icon: Bell, href: "/notifications", desc: `${notifications.length} unread`, color: "bg-red-50 text-red-700" },
   ];
+  const hiddenForFaculty = new Set(["courses", "enrollment"]);
+  const cards = role === "faculty" ? allCards.filter((c) => !hiddenForFaculty.has(c.key)) : allCards;
 
   return (
     <div className="p-6 max-w-6xl mx-auto">

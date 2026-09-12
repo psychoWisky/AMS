@@ -366,7 +366,61 @@ def _enroll_dict(e: StudentEnrollment, registration: Optional[CourseRegistration
     }
 
 
-def _registration_dict(r: CourseRegistration) -> dict:
+async def _semester_scoped_enrollments(student_id: UUID, semester_id: UUID, db: AsyncSession) -> list["StudentEnrollment"]:
+    """Course Registration display-bug fix (this revision) — the authoritative
+    source for "this student's selected courses for this semester," scoped by
+    the offering's own `semester_id`, exactly mirroring `_semester_active_credits`'s
+    existing scope (never a different/duplicated calculation). Deliberately
+    NOT scoped by `registration_id`: a legacy `StudentEnrollment` row created
+    before the `CourseRegistration` model existed (or via the older
+    single-offering `POST /enrollment`) has `registration_id IS NULL` but is
+    still a genuinely active, currently-approved/pending course for that
+    semester — it must appear in Selected Courses and count toward the
+    displayed credit total exactly like a registration-linked row does,
+    since the backend's own 20-credit enforcement already counts it (see
+    `_semester_active_credits`). Legacy rows are NEVER backfilled with a
+    `registration_id` here or anywhere else — this is a read-only query, no
+    data is written."""
+    result = await db.execute(
+        select(StudentEnrollment)
+        .join(CourseOffering, StudentEnrollment.offering_id == CourseOffering.id)
+        .where(
+            StudentEnrollment.student_id == student_id,
+            CourseOffering.semester_id == semester_id,
+        )
+        .options(
+            selectinload(StudentEnrollment.offering).selectinload(CourseOffering.course),
+            selectinload(StudentEnrollment.offering).selectinload(CourseOffering.faculty_assignments).selectinload(OfferingFaculty.faculty),
+            selectinload(StudentEnrollment.student),
+            selectinload(StudentEnrollment.withdrawal_requests),
+        )
+        .order_by(StudentEnrollment.enrolled_at)
+    )
+    # Dedup by StudentEnrollment.id (Section 7's explicit requirement) — the
+    # primary key itself, never course number/title (two distinct offerings
+    # can legitimately share similar course metadata). In practice this join
+    # cannot return the same row twice, but keying by `.id` makes that
+    # guarantee explicit and robust rather than incidental.
+    by_id: dict[UUID, StudentEnrollment] = {}
+    for e in result.scalars().all():
+        by_id[e.id] = e
+    return list(by_id.values())
+
+
+async def _registration_dict(r: CourseRegistration, db: AsyncSession) -> dict:
+    # Course Registration display-bug fix (this revision): Selected Courses
+    # and the credit total are now BOTH derived from the same semester-scoped
+    # population `_semester_active_credits` already uses for enforcement —
+    # not from `r.items` (registration-linked rows only). `r.student_id`/
+    # `r.semester_id` come from the already-authorized `CourseRegistration`
+    # row itself (never a client-supplied id), so this cannot be widened into
+    # another student's data by any request parameter.
+    all_items = await _semester_scoped_enrollments(r.student_id, r.semester_id, db)
+    active = sorted((e for e in all_items if e.status != "withdrawn"), key=lambda e: e.enrolled_at)
+    withdrawn = sorted((e for e in all_items if e.status == "withdrawn"), key=lambda e: e.enrolled_at)
+    selected_credits = sum(
+        e.offering.course.total_credits for e in active if e.offering and e.offering.course
+    )
     return {
         "id": str(r.id),
         "student_id": str(r.student_id),
@@ -383,8 +437,13 @@ def _registration_dict(r: CourseRegistration) -> dict:
         "reverted_at": r.reverted_at.isoformat() if r.reverted_at else None,
         "submitted_at": r.submitted_at.isoformat(),
         "card_submitted_at": r.card_submitted_at.isoformat() if r.card_submitted_at else None,
-        "items": [_enroll_dict(e, r) for e in r.items if e.status != "withdrawn"],
-        "withdrawn_items": [_enroll_dict(e, r) for e in r.items if e.status == "withdrawn"],
+        # Authoritative selected-credit total (Section 8) — same population as
+        # `items` below, so the two can never disagree. Still not cached
+        # anywhere: recomputed on every read from live StudentEnrollment rows.
+        "selected_credits": selected_credits,
+        "max_credits": _MAX_SEMESTER_CREDITS,
+        "items": [_enroll_dict(e, r) for e in active],
+        "withdrawn_items": [_enroll_dict(e, r) for e in withdrawn],
     }
 
 
@@ -809,7 +868,7 @@ async def list_registrations(
             if r.student_id in ma_student_ids or any(i.offering_id in teacher_offering_ids for i in r.items)
         ]
 
-    return [_registration_dict(r) for r in registrations]
+    return [await _registration_dict(r, db) for r in registrations]
 
 
 @router.get("/registrations/{registration_id}")
@@ -820,7 +879,7 @@ async def get_registration(registration_id: UUID, db: AsyncSession = Depends(get
     r = result.scalar_one_or_none()
     if not r: raise HTTPException(404, "Registration not found.")
     await _authorize_registration_view(r, user, db)
-    return _registration_dict(r)
+    return await _registration_dict(r, db)
 
 
 # ── Registration Card: student submission (the lock point) ──────────────────
@@ -901,6 +960,15 @@ async def _build_registration_card_context(r: CourseRegistration, db: AsyncSessi
     ma_id = await _get_major_advisor_id(r.student_id, db)
     major_advisor = await db.get(User, ma_id) if ma_id else None
 
+    # Deliberately scoped to `r.items` (registration-linked rows only), NOT
+    # the semester-scoped `_semester_scoped_enrollments` used by
+    # `_registration_dict`'s `items`/`selected_credits` fields — the official
+    # Registration Card PDF represents specifically what THIS registration
+    # batch contains; whether legacy, pre-Course-Registration enrollments
+    # should also appear on the printed card is a separate question this
+    # task did not ask to resolve, so the PDF's course table is left exactly
+    # as it was (unchanged scope) even though the on-screen Selected Courses
+    # list above it now shows the wider, corrected population.
     active_items = [e for e in r.items if e.status != "withdrawn"]
     groups: dict[str, list[dict]] = {}
     order: list[str] = []
@@ -939,7 +1007,7 @@ async def _build_registration_card_context(r: CourseRegistration, db: AsyncSessi
 
     from app.utils.pdf import get_logo_data_uri
     return {
-        "registration": _registration_dict(r),
+        "registration": await _registration_dict(r, db),
         "student": {
             "name": student.full_name if student else None,
             "roll_no": student.student_roll if student else None,

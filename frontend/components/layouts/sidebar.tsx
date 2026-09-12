@@ -17,7 +17,14 @@ const NAV = [
   // "faculty" deliberately excluded here (BUSINESS_LOGIC.md Section N — Faculty
   // has no need for a generic all-courses catalog; their course-relevant view
   // is "Teacher Courses" (their own assigned offerings) below.
-  { label: "Courses",         icon: BookOpen,        href: "/courses",      roles: ["super_admin","academic_admin","hod","student"] },
+  // "student" also excluded (Student/Faculty module-cleanup task, this
+  // revision) — the generic Course Catalogue is not a confirmed student
+  // module (absent from BUSINESS_LOGIC.md K.7); students see eligible
+  // offered courses via Course Registration and their own history via My
+  // Courses. The `GET /courses`/`GET /courses/offerings/all` backend
+  // endpoints and this route are UNCHANGED — Super Admin/Academic
+  // Admin/HOD still need them for Course Management exactly as before.
+  { label: "Courses",         icon: BookOpen,        href: "/courses",      roles: ["super_admin","academic_admin","hod"] },
   // "hod" deliberately excluded here (BUSINESS_LOGIC.md Section N.1) — HOD's
   // course-offering management already lives at Courses -> Offer Course;
   // this page is instructor-assigned "my courses" and does not apply to HOD.
@@ -26,8 +33,15 @@ const NAV = [
   // "student" deliberately excluded here — Course Registration is now the
   // single student-facing course selection/enrollment workflow; this page
   // remains staff-only "Enrollment Management" (review/approve per-offering
-  // requests) for every other role, unchanged.
-  { label: "Enrollment",      icon: ClipboardList,   href: "/enrollment",   roles: ["super_admin","academic_admin","hod","faculty","registrar"] },
+  // requests) for every other role.
+  // "faculty" also excluded (Student/Faculty module-cleanup task, this
+  // revision) — this legacy, non-registration-stage-aware view is fully
+  // superseded for Faculty by "Course Request" below (the confirmed module
+  // per BUSINESS_LOGIC.md M.9, already correctly scoped to the faculty's own
+  // assigned offerings). Kept for Super Admin/Academic Admin/HOD/Registrar,
+  // who may still legitimately use it as a cross-department administrative
+  // tool — the route/page/backend are unchanged.
+  { label: "Enrollment",      icon: ClipboardList,   href: "/enrollment",   roles: ["super_admin","academic_admin","hod","registrar"] },
   // My Courses task (this revision) — same route (`/enrollment`), a
   // separate nav entry so students see the confirmed "My Courses" label
   // (BUSINESS_LOGIC.md K.7) instead of the staff-facing "Enrollment" label;
@@ -38,7 +52,9 @@ const NAV = [
   { label: "Academic Progress",icon: GraduationCap,  href: "/academic-progress", roles: ["super_admin","academic_admin","hod","faculty","student","registrar","research_supervisor"] },
   { label: "Grading",         icon: BarChart3,       href: "/grading",      roles: ["super_admin","academic_admin","hod","faculty","registrar","examiner"] },
   { label: "Admit Card",      icon: FileText,        href: "/admit-card",   roles: ["super_admin","academic_admin","hod","registrar","examiner","student"] },
-  { label: "Research / PG",   icon: FlaskConical,    href: "/research",     roles: ["super_admin","academic_admin","hod","faculty","student","research_supervisor"] },
+  // Advisory Committee naming task (this revision) — visible label only;
+  // the route (/research), page component, and API endpoints are unchanged.
+  { label: "Advisory Committee", icon: FlaskConical,  href: "/research",     roles: ["super_admin","academic_admin","hod","faculty","student","research_supervisor"] },
   { label: "Admissions",      icon: ClipboardCheck,  href: "/admissions",   roles: ["super_admin","academic_admin","registrar"] },
   { label: "Orientation",     icon: ClipboardCheck,  href: "/orientation",  roles: ["super_admin","academic_admin"] },
   { label: "Student Management",icon: IdCard,        href: "/student-management", roles: ["student"] },

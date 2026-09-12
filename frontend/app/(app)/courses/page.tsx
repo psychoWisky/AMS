@@ -273,6 +273,18 @@ export default function CoursesPage() {
 
   const canManage = isAdmin; // ADMIN_ROLES already includes "hod" — see lib/utils.ts
 
+  // Student/Faculty module-cleanup task (this revision) — the generic Course
+  // Catalogue is not a confirmed Student module (the sidebar link is already
+  // removed); this page-level guard covers a Student navigating here
+  // directly by URL, mirroring the existing role-guard convention already
+  // used elsewhere in this codebase (see `course-request/page.tsx`'s
+  // `if (!isFacultyLike) return ...`). All hooks above still run
+  // unconditionally regardless of role — only the rendered output differs.
+  // Backend `GET /courses`/`GET /courses/offerings/all` are untouched.
+  if (role === "student") {
+    return <div className="p-6 max-w-3xl mx-auto text-gray-600">This page is not available for your role. Use Course Registration or My Courses instead.</div>;
+  }
+
   return (
     <div className="p-6 w-full">
       <div className="flex items-center justify-between mb-6">
