@@ -40,7 +40,7 @@ const STUDENT_TILES: DashboardTile[] = [
   { key: "registration", title: "Student Registration", description: "View your registration record", icon: IdCard, color: "bg-blue-50 text-blue-700", implemented: false },
   { key: "credit-details", title: "Student Credit Details", description: "Per-course credit ledger and summary", icon: Coins, color: "bg-teal-50 text-teal-700", implemented: true, href: "/academic-progress" },
   { key: "my-courses", title: "My Courses", description: "Courses selected/approved for your semester", icon: BookOpen, color: "bg-purple-50 text-purple-700", implemented: true, href: "/enrollment" },
-  { key: "course-registration", title: "Course Registration", description: "Select courses from semester offerings", icon: ClipboardList, color: "bg-orange-50 text-orange-700", implemented: true, href: "/enrollment" },
+  { key: "course-registration", title: "Course Registration", description: "Select courses from semester offerings", icon: ClipboardList, color: "bg-orange-50 text-orange-700", implemented: true, href: "/course-registration" },
   { key: "advisory-committee", title: "Advisory Committee", description: "Your committee members and roles", icon: FlaskConical, color: "bg-green-50 text-green-700", implemented: true, href: "/research" },
   { key: "admission-result", title: "Admission & Result", description: "Admission status and results", icon: ClipboardCheck, color: "bg-blue-50 text-blue-700", implemented: false },
   { key: "progress-report", title: "Progress Report", description: "Submit and track your progress report", icon: FileText, color: "bg-amber-50 text-amber-700", implemented: false },

@@ -10,10 +10,12 @@ import { ClipboardList, Loader2, CheckCircle2, XCircle, Eye, X } from "lucide-re
 interface Calendar { id: string; name: string; academic_year: string; }
 interface Semester { id: string; calendar_id: string; name: string; }
 interface Offering { id: string; course_number: string; course_title: string; semester_id: string; }
+interface WithdrawalRequestInfo { id: string; status: string; status_label: string; reason: string; decision_remark: string | null; }
 interface EnrollmentItem {
   id: string; student_id: string; student_name: string | null; student_roll: string | null;
   offering_id: string; course_number: string; course_title: string; registration_id: string | null;
   status: string; status_label: string; remarks: string | null; enrolled_at: string;
+  withdrawal_request: WithdrawalRequestInfo | null;
 }
 interface Registration {
   id: string; student_id: string; student_name: string | null; student_roll: string | null;
@@ -103,7 +105,7 @@ export default function CourseRequestPage() {
   const [offeringId, setOfferingId] = useState("");
   const [detailId, setDetailId] = useState<string | null>(null);
   const [remarkFor, setRemarkFor] = useState<{ kind: "item" | "ma" | "hod"; id: string } | null>(null);
-  const [confirm, setConfirm] = useState<{ action: () => void; title: string; message: string } | null>(null);
+  const [confirm, setConfirm] = useState<{ action: () => void; title: string; message: string; confirmLabel?: string; confirmClassName?: string } | null>(null);
 
   const { data: calendars = [] } = useQuery<Calendar[]>({
     queryKey: ["ams-calendars"],
@@ -167,6 +169,16 @@ export default function CourseRequestPage() {
     onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed."),
   });
 
+  // Withdrawal-request task (this revision) — reuses the same authorization
+  // (_authorize_offering_management) the item approve/revert actions above
+  // already use; no second, incompatible authorization mechanism.
+  const withdrawalDecision = useMutation({
+    mutationFn: ({ id, approved, remark }: { id: string; approved: boolean; remark?: string }) =>
+      api.patch(`/enrollment/withdrawal-requests/${id}`, { approved, remark }),
+    onSuccess: () => { toast.success("Withdrawal request decided."); invalidateAll(); },
+    onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed."),
+  });
+
   if (!isFacultyLike) {
     return <div className="p-6 max-w-3xl mx-auto text-gray-600">Course Request is available to Faculty, HOD, and Admin roles.</div>;
   }
@@ -216,7 +228,15 @@ export default function CourseRequestPage() {
                       <td className="px-4 py-3 text-gray-600">{i + 1}</td>
                       <td className="px-4 py-3 font-medium text-gray-900">{s.student_name ?? "—"}</td>
                       <td className="px-4 py-3 font-mono text-sm">{s.student_roll ?? "—"}</td>
-                      <td className="px-4 py-3"><span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${ITEM_STATUS_STYLE[s.status] ?? "bg-gray-100"}`}>{s.status_label}</span></td>
+                      <td className="px-4 py-3">
+                        <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${ITEM_STATUS_STYLE[s.status] ?? "bg-gray-100"}`}>{s.status_label}</span>
+                        {s.withdrawal_request?.status === "pending" && (
+                          <p className="text-xs text-amber-600 mt-1 max-w-[220px]">Withdrawal requested: &ldquo;{s.withdrawal_request.reason}&rdquo;</p>
+                        )}
+                        {s.withdrawal_request && s.withdrawal_request.status !== "pending" && (
+                          <p className="text-xs text-gray-500 mt-1">Withdrawal {s.withdrawal_request.status}</p>
+                        )}
+                      </td>
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
                           {s.registration_id && (
@@ -230,6 +250,19 @@ export default function CourseRequestPage() {
                               })} className="p-1.5 text-green-600 hover:bg-green-50 rounded-lg"><CheckCircle2 size={16} /></button>
                               <button onClick={() => setRemarkFor({ kind: "item", id: s.id })} className="p-1.5 text-red-500 hover:bg-red-50 rounded-lg"><XCircle size={16} /></button>
                             </>
+                          )}
+                          {s.withdrawal_request?.status === "pending" && (
+                            <div className="flex items-center gap-1">
+                              <button onClick={() => setConfirm({
+                                action: () => withdrawalDecision.mutate({ id: s.withdrawal_request!.id, approved: true }),
+                                title: "Approve Withdrawal", message: `Approve ${s.student_name}'s withdrawal request for ${s.course_number}? This will mark the course withdrawn.`,
+                              })} className="px-2 py-1 text-xs font-semibold bg-green-600 text-white rounded-lg hover:bg-green-700">Approve Withdrawal</button>
+                              <button onClick={() => setConfirm({
+                                action: () => withdrawalDecision.mutate({ id: s.withdrawal_request!.id, approved: false }),
+                                title: "Reject Withdrawal", message: `Reject ${s.student_name}'s withdrawal request for ${s.course_number}? The course will remain approved.`,
+                                confirmLabel: "Yes, Reject", confirmClassName: "bg-red-600 hover:bg-red-700 text-white",
+                              })} className="px-2 py-1 text-xs font-semibold border border-red-300 text-red-700 rounded-lg hover:bg-red-50">Reject</button>
+                            </div>
                           )}
                         </div>
                       </td>
@@ -309,7 +342,7 @@ export default function CourseRequestPage() {
         />
       )}
 
-      {confirm && <ConfirmDialog title={confirm.title} message={confirm.message} confirmLabel="Yes, Approve" confirmClassName="bg-green-600 hover:bg-green-700 text-white"
+      {confirm && <ConfirmDialog title={confirm.title} message={confirm.message} confirmLabel={confirm.confirmLabel ?? "Yes, Approve"} confirmClassName={confirm.confirmClassName ?? "bg-green-600 hover:bg-green-700 text-white"}
         onConfirm={() => { confirm.action(); setConfirm(null); }} onCancel={() => setConfirm(null)} />}
     </div>
   );

@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Registration Card - {{ student.name }}</title>
+<style>
+  @page { size: A4; margin: 15mm 12mm; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Segoe UI", "Noto Sans", Arial, sans-serif;
+    font-size: 10.5pt;
+    color: #1a1a1a;
+    line-height: 1.45;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  tr { break-inside: avoid; }
+  thead { display: table-header-group; }
+
+  .header-table td { vertical-align: top; border: none; padding: 0; }
+  .logo-cell { width: 70px; }
+  .logo-cell img { width: 60px; height: auto; }
+  .univ-name { text-align: center; font-weight: 700; font-size: 15pt; text-decoration: underline; margin: 0 0 2px 0; }
+  .univ-sub { text-align: center; font-size: 10pt; margin: 1px 0; }
+  .reg-form { text-align: right; font-size: 9pt; color: #333; white-space: nowrap; }
+  .doc-title { text-align: center; font-weight: 700; font-size: 13pt; text-decoration: underline; margin: 14px 0 12px 0; }
+
+  table.data-table, table.course-table {
+    border: 1px solid #444;
+    margin-bottom: 10px;
+  }
+  table.data-table td, table.data-table th,
+  table.course-table td, table.course-table th {
+    border: 1px solid #666;
+    padding: 4px 6px;
+    font-size: 9.5pt;
+    vertical-align: top;
+  }
+  table.course-table th, table.data-table th { background: #eef3f3; font-weight: 700; text-align: left; }
+  .classification-row td { background: #f7f9f9; font-weight: 700; }
+  .empty-state td { text-align: center; color: #666; font-style: italic; }
+  .col-slno { width: 6%; }
+  .col-code { width: 12%; }
+  .col-credit { width: 10%; }
+
+  .section-heading { font-weight: 700; margin: 16px 0 6px 0; font-size: 11pt; }
+  .total-line { text-align: right; font-weight: 700; margin: 4px 0 10px 0; }
+
+  .signature-block { display: flex; justify-content: space-between; margin-top: 30px; }
+  .signature-cell { width: 30%; text-align: center; border-top: 1px solid #444; padding-top: 6px; }
+
+  .footer-note { margin-top: 20px; font-size: 8pt; color: #777; text-align: center; }
+</style>
+</head>
+<body>
+
+  <table class="header-table">
+    <tr>
+      <td class="logo-cell">
+        {% if logo_data_uri %}<img src="{{ logo_data_uri }}" alt="AVFU Logo">{% endif %}
+      </td>
+      <td>
+        <p class="univ-name">ASSAM VETERINARY AND FISHERY UNIVERSITY</p>
+        <p class="univ-sub">Faculty : Faculty of Veterinary Science</p>
+        <p class="univ-sub">College : {{ college_name or "—" }}</p>
+      </td>
+      <td class="reg-form"></td>
+    </tr>
+  </table>
+
+  <p class="doc-title">SEMESTER COURSE REGISTRATION CARD</p>
+
+  <table class="data-table">
+    <tr>
+      <td style="width:34%; font-weight:600;">Name</td><td>{{ student.name or "—" }}</td>
+      <td style="width:22%; font-weight:600;">Roll No.</td><td>{{ student.roll_no or "—" }}</td>
+    </tr>
+    <tr>
+      <td style="font-weight:600;">Phone No.</td><td>{{ student.mobile or "—" }}</td>
+      <td style="font-weight:600;">Semester</td><td>{{ semester_name or "—" }}</td>
+    </tr>
+    <tr>
+      <td style="font-weight:600;">Academic Session</td><td>{{ academic_year or "—" }}</td>
+      <td style="font-weight:600;">Degree Programme</td><td>{{ program_name or "—" }}{% if program_level %} ({{ program_level }}){% endif %}</td>
+    </tr>
+    <tr>
+      <td style="font-weight:600;">Department</td><td>{{ department_name or "—" }}</td>
+      <td style="font-weight:600;">Major Advisor</td><td>{{ major_advisor_name or "—" }}</td>
+    </tr>
+  </table>
+
+  <p class="section-heading">Selected Courses</p>
+
+  {% for c in classifications %}
+  <table class="course-table">
+    <thead>
+      <tr class="classification-row"><td colspan="6">{{ c.label | upper }}</td></tr>
+      <tr>
+        <th class="col-slno">SL No</th>
+        <th>Course Title</th>
+        <th class="col-code">Course No.</th>
+        <th class="col-credit">Credit Hrs.</th>
+        <th class="col-credit">Nature of Course</th>
+        <th>Course Instructor</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in c.courses %}
+      <tr>
+        <td>{{ row.sl_no }}</td>
+        <td>{{ row.course_title or "—" }}</td>
+        <td>{{ row.course_number or "—" }}</td>
+        <td>{{ row.credits }}({{ row.credit_structure }})</td>
+        <td>{{ row.nature }}</td>
+        <td>{{ row.instructors or "—" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <table class="course-table"><tbody><tr class="empty-state"><td>No courses selected</td></tr></tbody></table>
+  {% endfor %}
+
+  <p class="total-line">Total Credits: {{ total_credits }}</p>
+
+  <p class="footer-note-inline" style="font-size:9pt; margin-bottom:20px;">
+    Status: <b>{{ registration.status_label }}</b>
+    {% if registration.card_submitted_at %} — Registration Card submitted on {{ registration.card_submitted_at }}{% endif %}
+  </p>
+
+  <div class="signature-block">
+    <div class="signature-cell">
+      <p style="font-weight:600;">Signature of Student</p>
+    </div>
+    <div class="signature-cell">
+      <p style="font-weight:600;">Signature of Major Advisor</p>
+      {% if major_advisor_name %}<p style="font-size:8.5pt; color:#444;">{{ major_advisor_name }}</p>{% endif %}
+    </div>
+    <div class="signature-cell">
+      <p style="font-weight:600;">Signature of Head of the Dept.</p>
+      {% if hod_name %}<p style="font-size:8.5pt; color:#444;">{{ hod_name }}</p>{% endif %}
+    </div>
+  </div>
+
+  <p class="footer-note">Generated by AVFU AMS on {{ generated_at.strftime("%d-%b-%Y %H:%M") }} UTC &mdash; Registration Status: {{ registration.status_label }}</p>
+
+</body>
+</html>

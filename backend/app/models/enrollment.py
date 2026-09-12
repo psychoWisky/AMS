@@ -16,8 +16,23 @@ class CourseRegistration(Base):
 
     `stage` (internal code, C.8 display label computed in the endpoint layer,
     mirroring the proven `AdvisoryCommittee.status`/`status_label` pattern):
-        teacher_pending -> major_advisor_pending -> hod_pending -> hod_approved
+        teacher_pending -> card_pending -> major_advisor_pending -> hod_pending -> hod_approved
         reverted (terminal-until-corrected; see revert_remark)
+
+    Registration Card task (this revision) — `card_pending` is a NEW value
+    inserted between `teacher_pending` and `major_advisor_pending`: it means
+    every currently-active (non-withdrawn) selected course has cleared its
+    Course Teacher stage, but the STUDENT has not yet explicitly submitted the
+    Registration Card. This is deliberately a new value on the existing plain
+    String column (no migration needed for this part — the column already
+    supports arbitrary future values, per its original design intent), not a
+    new column or a parallel state machine. `teacher_pending` and
+    `card_pending` are jointly the only two STUDENT-EDITABLE stages (see
+    `_EDITABLE_STAGES` in the endpoint layer) — the student may add/remove
+    courses in either; submitting the Registration Card
+    (`POST /registrations/{id}/submit`) is the only way to move from
+    `card_pending` to `major_advisor_pending`, at which point the registration
+    is permanently locked from the student's side for this cycle.
 
     I/C Academic Cell and DPGS stages are deliberately NOT modeled here — no
     documented demo-role mitigation exists for either (same reasoning as
@@ -33,6 +48,13 @@ class CourseRegistration(Base):
     revert_remark: Mapped[str | None] = mapped_column(Text)
     reverted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    # Registration Card task (this revision) — distinct from `submitted_at`
+    # (which marks when this batch/row was first CREATED, i.e. the student's
+    # first course selection for the semester). `card_submitted_at` marks the
+    # separate, later moment the student explicitly submitted the Registration
+    # Card (stage teacher_pending/card_pending -> major_advisor_pending). Null
+    # until that happens; never reset afterward (permanent audit marker).
+    card_submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -65,6 +87,48 @@ class StudentEnrollment(Base):
     processor: Mapped["User | None"] = relationship("User", foreign_keys=[processed_by])
     offering: Mapped["CourseOffering"] = relationship("CourseOffering", back_populates="enrollments")
     registration: Mapped["CourseRegistration | None"] = relationship("CourseRegistration", back_populates="items")
+    withdrawal_requests: Mapped[list["WithdrawalRequest"]] = relationship(
+        "WithdrawalRequest", back_populates="enrollment", cascade="all, delete-orphan",
+        order_by="WithdrawalRequest.requested_at.desc()",
+    )
+
+
+class WithdrawalRequest(Base):
+    """Approved-course withdrawal request (Registration Card task, this
+    revision) — a dedicated, small, auditable table, deliberately SEPARATE
+    from `StudentEnrollment.status` itself (per explicit instruction): a
+    student's click on "Request Withdrawal" must NOT immediately mark the
+    enrollment withdrawn — it only creates this pending request, which the
+    Course Teacher (the same authorization as any other action on this
+    offering — `_authorize_offering_management`, never a second/different
+    mechanism) then approves or rejects. Only on APPROVAL does
+    `StudentEnrollment.status` actually become "withdrawn" (see
+    `decide_withdrawal_request` in the endpoint layer). Rejecting leaves the
+    enrollment's own status completely untouched — this table is the only
+    place a rejection is ever recorded.
+
+    At most one PENDING request may exist per enrollment at a time — enforced
+    by a partial unique index (`uq_withdrawal_request_one_active`, migration),
+    the same pattern already used for PPW's "one active approval cycle per
+    PPW" constraint (`uq_ppw_cycle_one_active`) — not reinvented here.
+    Historical (approved/rejected) requests are never deleted, so a full
+    audit trail of every withdrawal attempt is preserved even if a later
+    request for the same enrollment is made (e.g. after a rejection, the
+    student may try again with a different reason)."""
+    __tablename__ = "ams_withdrawal_requests"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    enrollment_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_student_enrollments.id", ondelete="CASCADE"))
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending / approved / rejected
+    requested_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id"))
+    decided_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id"))
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decision_remark: Mapped[str | None] = mapped_column(Text)
+
+    enrollment: Mapped["StudentEnrollment"] = relationship("StudentEnrollment", back_populates="withdrawal_requests")
+    requester: Mapped["User"] = relationship("User", foreign_keys=[requested_by])
+    decider: Mapped["User | None"] = relationship("User", foreign_keys=[decided_by])
 
 
 from app.models.user import User  # noqa: E402

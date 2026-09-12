@@ -1,11 +1,14 @@
 """Student & Teacher Enrollment Management (Modules 5.3, 5.4).
 
 Course Registration workflow (BUSINESS_LOGIC.md D.5, C.8; STUDENT_SIDE_IMPLEMENTATION_PLAN.md
-Section 34 CR-3+CR-4):
+Section 34 CR-3+CR-4, Registration Card task this revision):
 
-    Student submits a registration (1+ selected courses for one semester)
+    Student selects/adds courses (1+ per semester, may add more over time)
     -> per selected course: any ONE assigned Course Teacher approves/reverts
-    -> once ALL selected courses have cleared: Major Advisor approves/reverts
+    -> once ALL currently-active selected courses have cleared: registration
+       reaches `card_pending` — student may still add/withdraw here
+    -> Student explicitly submits the Registration Card (locks editing)
+    -> Major Advisor approves/reverts
     -> HOD approves/reverts
     -> [I/C Academic Cell -> DPGS: NOT implemented this phase, see below]
 
@@ -27,24 +30,58 @@ committee back to an actionable stage" precedent. This is a documented
 implementation default, not a confirmed AVFU business rule — see
 `_apply_enrollment_decision`'s docstring for the exact mechanics.
 
-Course Registration Card generation is explicitly deferred (BUSINESS_LOGIC.md
-D.5 Rule 7) — not built this phase.
+REGISTRATION CARD TASK (this revision — supersedes the old one-shot-only
+design and the "Course Registration Card generation is explicitly deferred"
+note that used to be here):
+- `CourseRegistration.stage` gains one new value, `card_pending` (see the
+  model's own docstring) — the registration remains STUDENT-EDITABLE in both
+  `teacher_pending` and `card_pending` (`_EDITABLE_STAGES` below); it becomes
+  locked the moment the student explicitly calls
+  `POST /registrations/{id}/submit`, which is the ONLY way to reach
+  `major_advisor_pending` now (Course-Teacher approval alone no longer
+  auto-advances a registration into the Major-Advisor stage — it only reaches
+  the editable `card_pending` "ready to submit" state).
+- The existing `(student_id, semester_id)` uniqueness on `CourseRegistration`
+  is UNCHANGED and is never dropped — `register_courses` now creates a new
+  registration only the FIRST time; subsequent calls for the same semester
+  detect and reuse the existing row (see its docstring below).
+- A 20-active-credit-per-semester cap (`pending` + `approved`, never
+  `withdrawn`) is enforced server-side on every addition
+  (`_semester_active_credits`).
+- Course-Teacher-approved courses may now be withdrawn via a new, dedicated
+  `WithdrawalRequest` record (student requests with a mandatory reason ->
+  Course Teacher approves/rejects) rather than being silently marked
+  withdrawn by the student's own action — see `request_withdrawal`/
+  `decide_withdrawal_request`. A still-`pending` course may instead be
+  withdrawn directly by the student (no teacher approval needed) via the
+  existing `DELETE /{enrollment_id}`, now permitted for registration-linked
+  rows specifically while `status == "pending"` AND the registration is still
+  editable.
+- A Registration Card PDF is rendered on-demand (never stored) via
+  `GET /registrations/{id}/document`, reusing the AMS-owned Playwright/
+  Chromium pipeline built for PPW (`app/utils/pdf.py`) — no new PDF
+  infrastructure was introduced.
 """
+import logging
+import re
+import urllib.parse
 from typing import Optional, List
 from uuid import UUID
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException
+from pathlib import Path
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from app.db.base import get_db
 from app.core.dependencies import get_current_user, require_roles, require_advisory_committee_established
-from app.models.user import User, UserRole
-from app.models.enrollment import StudentEnrollment, CourseRegistration
+from app.models.user import User, UserRole, Program, Department
+from app.models.enrollment import StudentEnrollment, CourseRegistration, WithdrawalRequest
 from app.models.course import Course, CourseOffering, OfferingFaculty
+from app.models.academic import AcademicCalendar, Semester
 from app.models.research import AdvisoryCommittee, CommitteeMember
 # Programme<->Department many-to-many redesign — single shared student-scope
 # resolvers (app/core/student_scope.py), re-exported under this file's
@@ -55,10 +92,12 @@ from app.core.student_scope import (
 )
 
 router = APIRouter(prefix="/enrollment", tags=["Enrollment"])
+logger = logging.getLogger(__name__)
 
 # BUSINESS_LOGIC.md C.8 status vocabulary.
 _REGISTRATION_STAGE_LABELS = {
     "teacher_pending": "Course Teacher Approval Pending",
+    "card_pending": "Ready for Registration Card Submission",
     "major_advisor_pending": "Major Advisor Approval Pending",
     "hod_pending": "HOD Approval Pending",
     "hod_approved": "HOD Approved",
@@ -71,6 +110,23 @@ _ENROLLMENT_STATUS_LABELS = {
     "withdrawn": "Withdrawn",
     "rejected": "Rejected",  # legacy value only — never written by new code (Rule 35)
 }
+_WITHDRAWAL_STATUS_LABELS = {
+    "pending": "Withdrawal Request Pending",
+    "approved": "Withdrawal Approved",
+    "rejected": "Withdrawal Rejected",
+}
+
+# The only two stages in which a student may still add/remove courses or
+# request a withdrawal (Section 6/2 of this task's confirmed requirement).
+# Every later stage (major_advisor_pending/hod_pending/hod_approved) is
+# permanently locked from the student's side for this cycle. `reverted` is
+# NOT included here — in this codebase a revert always writes the registration
+# directly back to `teacher_pending` (never a literal "reverted" stage value,
+# see `_apply_enrollment_decision`'s docstring), so `reverted` never actually
+# needs to appear in this set for editability purposes.
+_EDITABLE_STAGES = ("teacher_pending", "card_pending")
+
+_MAX_SEMESTER_CREDITS = 20
 
 
 
@@ -157,6 +213,74 @@ async def _authorize_registration_view(registration: CourseRegistration, user: U
     raise HTTPException(403, "You are not authorized to view this registration.")
 
 
+def _ensure_registration_editable(registration: CourseRegistration) -> None:
+    """The single, shared lock check (Section 2/6's explicit requirement —
+    backend-enforced, never a frontend-only hidden button) used by every
+    student-facing mutation: add courses, withdraw a pending course, request
+    withdrawal of an approved course. Once a registration leaves
+    `_EDITABLE_STAGES` (i.e. the Registration Card has been submitted), this
+    always raises — there is no code path, direct-ID or otherwise, that
+    bypasses this single check, since every mutating endpoint below calls it
+    against the registration loaded fresh from the database (never a
+    client-supplied stage/flag)."""
+    if registration.stage not in _EDITABLE_STAGES:
+        raise HTTPException(400, "This registration has already been submitted and cannot be modified.")
+
+
+async def _semester_active_credits(student_id: UUID, semester_id: UUID, db: AsyncSession) -> int:
+    """Live sum of `Course.total_credits` for this student's `pending` +
+    `approved` StudentEnrollment rows in this semester (Section 7/8's
+    confirmed 20-credit rule) — `withdrawn` (and the legacy `rejected` value)
+    never count. Deliberately scoped by the offering's OWN `semester_id`
+    (not by `registration_id`) so it also correctly counts any legacy,
+    non-registration-linked enrollment a student might still have for this
+    semester (the older single-offering `POST /enrollment` path writes the
+    same `ams_student_enrollments` table) — this is a defense-in-depth choice,
+    not an assumption that legacy enrollment is still an active flow. Always
+    computed fresh from the database on every call — no cached/stored total
+    column exists or is introduced."""
+    result = await db.execute(
+        select(StudentEnrollment)
+        .join(CourseOffering, StudentEnrollment.offering_id == CourseOffering.id)
+        .options(selectinload(StudentEnrollment.offering).selectinload(CourseOffering.course))
+        .where(
+            StudentEnrollment.student_id == student_id,
+            CourseOffering.semester_id == semester_id,
+            StudentEnrollment.status.in_(("pending", "approved")),
+        )
+    )
+    return sum(
+        e.offering.course.total_credits
+        for e in result.scalars().all()
+        if e.offering and e.offering.course
+    )
+
+
+async def _recompute_card_readiness(registration_id: UUID, db: AsyncSession) -> None:
+    """Recompute `CourseRegistration.stage` between `teacher_pending` and
+    `card_pending` based on the CURRENT, live status of every non-withdrawn
+    `StudentEnrollment` row still linked to it — never a value trusted from
+    anywhere else. Called after every event that can change whether "all
+    currently-active selected courses are Course-Teacher approved" is true:
+    a teacher's approve/revert decision, a student's pending-course
+    withdrawal, a student adding a new (pending) course, and an approved
+    withdrawal request being granted. A no-op (by design, not by accident) if
+    the registration is already locked (`major_advisor_pending` and beyond) —
+    this function must never be able to un-lock or re-lock a submitted
+    registration; only `submit_registration_card` moves a registration out of
+    `_EDITABLE_STAGES`, and nothing moves it back in this phase."""
+    registration = await db.get(CourseRegistration, registration_id)
+    if not registration or registration.stage not in _EDITABLE_STAGES:
+        return
+    items = (await db.execute(
+        select(StudentEnrollment).where(
+            StudentEnrollment.registration_id == registration_id,
+            StudentEnrollment.status != "withdrawn",
+        )
+    )).scalars().all()
+    registration.stage = "card_pending" if items and all(i.status == "approved" for i in items) else "teacher_pending"
+
+
 class EnrollRequest(BaseModel):
     offering_id: UUID
 
@@ -177,8 +301,40 @@ class StageDecisionIn(BaseModel):
     approved: bool
     remark: Optional[str] = None
 
+class WithdrawalRequestIn(BaseModel):
+    reason: str
 
-def _enroll_dict(e: StudentEnrollment) -> dict:
+    @field_validator("reason")
+    @classmethod
+    def _reason_required(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("A reason is required to request withdrawal.")
+        return v.strip()
+
+class WithdrawalDecisionIn(BaseModel):
+    approved: bool
+    remark: Optional[str] = None
+
+
+def _enroll_dict(e: StudentEnrollment, registration: Optional[CourseRegistration] = None) -> dict:
+    # Withdrawal-request task: surface the MOST RECENT request (relationship
+    # is already ordered newest-first) so the frontend can show "Withdrawal
+    # Request: Pending/Rejected" without a second round-trip. A resolved
+    # (approved/rejected) older request never hides a legitimate later one —
+    # only the single most recent request is ever shown, matching "do not
+    # allow repeated withdrawal requests while one is pending" (a new request
+    # is blocked while one is pending, so there is only ever one "current"
+    # request worth surfacing at a time).
+    latest_wr = e.withdrawal_requests[0] if e.withdrawal_requests else None
+    # Combined status label (My Courses / Course Registration task): once a
+    # course's own Course-Teacher stage is "approved" AND its registration has
+    # moved past the student-editable stages, the more specific
+    # registration-level stage is the more informative thing to show for that
+    # course row — never a value invented beyond what the registration's own
+    # authoritative `stage` already says.
+    combined_label = _ENROLLMENT_STATUS_LABELS.get(e.status, e.status)
+    if e.status == "approved" and registration is not None and registration.stage not in _EDITABLE_STAGES:
+        combined_label = _REGISTRATION_STAGE_LABELS.get(registration.stage, registration.stage)
     return {
         "id": str(e.id),
         "student_id": str(e.student_id),
@@ -188,12 +344,25 @@ def _enroll_dict(e: StudentEnrollment) -> dict:
         "offering_id": str(e.offering_id),
         "course_number": e.offering.course.course_number if e.offering and e.offering.course else None,
         "course_title": e.offering.course.title if e.offering and e.offering.course else None,
+        "credit_structure": e.offering.course.credit_structure if e.offering and e.offering.course else None,
+        "credits": e.offering.course.total_credits if e.offering and e.offering.course else 0,
+        "category": e.offering.course.category if e.offering and e.offering.course else None,
+        "credit_type": e.offering.course.credit_type if e.offering and e.offering.course else None,
         "registration_id": str(e.registration_id) if e.registration_id else None,
         "status": e.status,
-        "status_label": _ENROLLMENT_STATUS_LABELS.get(e.status, e.status),
+        "status_label": combined_label,
         "enrolled_at": e.enrolled_at.isoformat(),
         "processed_at": e.processed_at.isoformat() if e.processed_at else None,
         "remarks": e.remarks,
+        "withdrawal_request": ({
+            "id": str(latest_wr.id),
+            "status": latest_wr.status,
+            "status_label": _WITHDRAWAL_STATUS_LABELS.get(latest_wr.status, latest_wr.status),
+            "reason": latest_wr.reason,
+            "decision_remark": latest_wr.decision_remark,
+            "requested_at": latest_wr.requested_at.isoformat(),
+            "decided_at": latest_wr.decided_at.isoformat() if latest_wr.decided_at else None,
+        } if latest_wr else None),
     }
 
 
@@ -208,17 +377,23 @@ def _registration_dict(r: CourseRegistration) -> dict:
         "calendar_id": str(r.calendar_id),
         "stage": r.stage,
         "status_label": _REGISTRATION_STAGE_LABELS.get(r.stage, r.stage),
+        "is_editable": r.stage in _EDITABLE_STAGES,
+        "is_card_ready": r.stage == "card_pending",
         "revert_remark": r.revert_remark,
         "reverted_at": r.reverted_at.isoformat() if r.reverted_at else None,
         "submitted_at": r.submitted_at.isoformat(),
-        "items": [_enroll_dict(e) for e in r.items],
+        "card_submitted_at": r.card_submitted_at.isoformat() if r.card_submitted_at else None,
+        "items": [_enroll_dict(e, r) for e in r.items if e.status != "withdrawn"],
+        "withdrawn_items": [_enroll_dict(e, r) for e in r.items if e.status == "withdrawn"],
     }
 
 
 _REGISTRATION_LOAD_OPTIONS = (
     selectinload(CourseRegistration.student).selectinload(User.program),
     selectinload(CourseRegistration.items).selectinload(StudentEnrollment.offering).selectinload(CourseOffering.course),
+    selectinload(CourseRegistration.items).selectinload(StudentEnrollment.offering).selectinload(CourseOffering.faculty_assignments).selectinload(OfferingFaculty.faculty),
     selectinload(CourseRegistration.items).selectinload(StudentEnrollment.student),
+    selectinload(CourseRegistration.items).selectinload(StudentEnrollment.withdrawal_requests),
 )
 
 
@@ -275,13 +450,26 @@ async def enroll(
     return {"message": "Enrollment request submitted.", "id": str(e.id)}
 
 
-# ── Student: submit a Course Registration (1+ courses, one semester) ────────────
+# ── Student: submit / add to a Course Registration (1+ courses, one semester) ──
 
 @router.post("/register", status_code=201)
 async def register_courses(
     body: RegisterCoursesRequest, db: AsyncSession = Depends(get_db),
     user: User = Depends(require_advisory_committee_established),
 ):
+    """Registration Card task (this revision) — this endpoint now serves
+    BOTH the first submission for a semester AND every subsequent "add more
+    courses" call, without ever creating a second `CourseRegistration` row
+    for the same `(student_id, semester_id)` (that uniqueness is UNCHANGED
+    and is never dropped): if a registration already exists, this appends
+    new `StudentEnrollment` rows to it (after re-validating it is still
+    editable) instead of attempting a second insert.
+
+    Calendar/semester consistency fix (this revision): `calendar_id` is no
+    longer trusted from the client at all — it is derived from the loaded
+    `Semester` row's own `calendar_id`, so a `CourseRegistration` can never
+    be created with a `calendar_id` inconsistent with its `semester_id`.
+    """
     if not body.offering_ids:
         raise HTTPException(400, "Select at least one course.")
     if len(set(body.offering_ids)) != len(body.offering_ids):
@@ -291,9 +479,38 @@ async def register_courses(
     if not scope:
         raise HTTPException(403, "Your academic program is not configured; contact administration.")
 
-    # Per-course eligibility, capacity — validated before any row is written,
-    # mirroring the legacy single-course `enroll()` checks exactly.
+    semester = await db.get(Semester, body.semester_id)
+    if not semester:
+        raise HTTPException(404, "Semester not found.")
+    derived_calendar_id = semester.calendar_id  # authoritative — never body.calendar_id
+
+    # Lock check FIRST (Section 2's explicit "malicious student must not be
+    # able to bypass the lock through repeated POST requests" requirement) —
+    # checked before any per-offering validation, so a locked registration
+    # always gets the unambiguous "already submitted" message regardless of
+    # what else might also be wrong with the request body (e.g. a duplicate
+    # or invalid offering id would otherwise mask the real reason).
+    existing_result = await db.execute(
+        select(CourseRegistration).where(
+            CourseRegistration.student_id == user.id, CourseRegistration.semester_id == body.semester_id,
+        )
+    )
+    registration = existing_result.scalar_one_or_none()
+    if registration:
+        # Row-lock this registration for the remainder of the transaction —
+        # same concurrency-safety pattern already used by PPW's approve/revert
+        # endpoints — so two near-simultaneous "add more courses" calls for
+        # the same registration cannot both read a stale credit total and
+        # both pass the 20-credit check (Section 8's explicit requirement).
+        await db.execute(select(CourseRegistration.id).where(CourseRegistration.id == registration.id).with_for_update())
+        registration = await db.get(CourseRegistration, registration.id)
+        _ensure_registration_editable(registration)
+
+    # Per-course eligibility, capacity, and duplicate-within-this-request
+    # checks — validated before any row is written, mirroring the legacy
+    # single-course `enroll()` checks exactly.
     offerings: dict[UUID, CourseOffering] = {}
+    requested_credits = 0
     for oid in body.offering_ids:
         offering = await db.get(CourseOffering, oid)
         if not offering or offering.status != "published" or offering.semester_id != body.semester_id:
@@ -302,7 +519,7 @@ async def register_courses(
         # eligibility here either — mirrors the single-offering `enroll()`.
         course = await db.get(Course, offering.course_id)
         if not course or course.program_level != scope["level"]:
-            raise HTTPException(403, "One or more selected offerings are not available to your program.")
+            raise HTTPException(403, "This course is not available to your programme level.")
         count_result = await db.execute(
             select(func.count()).select_from(StudentEnrollment).where(
                 StudentEnrollment.offering_id == oid, StudentEnrollment.status == "approved",
@@ -310,18 +527,39 @@ async def register_courses(
         )
         if count_result.scalar() >= offering.max_enrollment:
             raise HTTPException(400, f"{course.course_number} is full.")
+        dupe = await db.execute(select(StudentEnrollment.id).where(
+            StudentEnrollment.student_id == user.id, StudentEnrollment.offering_id == oid,
+        ))
+        if dupe.scalar_one_or_none():
+            raise HTTPException(409, f"You are already registered for {course.course_number}.")
         offerings[oid] = offering
+        requested_credits += course.total_credits
 
-    registration = CourseRegistration(
-        student_id=user.id, semester_id=body.semester_id, calendar_id=body.calendar_id,
-        stage="teacher_pending",
-    )
-    db.add(registration)
-    try:
-        await db.flush()
-    except IntegrityError:
-        await db.rollback()
-        raise HTTPException(409, "You already have a course registration for this semester.")
+    if not registration:
+        registration = CourseRegistration(
+            student_id=user.id, semester_id=body.semester_id, calendar_id=derived_calendar_id,
+            stage="teacher_pending",
+        )
+        db.add(registration)
+        try:
+            await db.flush()
+        except IntegrityError:
+            # A concurrent request created it first between our SELECT and
+            # this INSERT — extremely unlikely in this demo AMS, but fail
+            # closed with a clear, retryable message rather than a 500.
+            await db.rollback()
+            raise HTTPException(409, "You already have a course registration for this semester. Please retry.")
+
+    # 20-credit cap (Section 7/8) — always computed live, never trusted from
+    # the client, and evaluated against the FULL prospective total (existing
+    # active credits + everything requested in this call).
+    current_credits = await _semester_active_credits(user.id, body.semester_id, db)
+    if current_credits + requested_credits > _MAX_SEMESTER_CREDITS:
+        raise HTTPException(
+            400,
+            f"Adding these course(s) would exceed the maximum of {_MAX_SEMESTER_CREDITS} credits for this "
+            f"semester ({current_credits} already selected + {requested_credits} requested).",
+        )
 
     for oid in body.offering_ids:
         db.add(StudentEnrollment(student_id=user.id, offering_id=oid, registration_id=registration.id))
@@ -331,31 +569,82 @@ async def register_courses(
         await db.rollback()
         raise HTTPException(409, "One or more selected courses are already part of an existing registration.")
 
+    # A freshly-added course is always `pending` — if the registration had
+    # reached `card_pending` (all previously-selected courses already
+    # cleared), it must fall back to `teacher_pending` now that a new,
+    # not-yet-approved course exists.
+    await _recompute_card_readiness(registration.id, db)
+    await db.commit()
+
     await db.refresh(registration)
-    return {"id": str(registration.id), "message": "Registration submitted."}
+    return {"id": str(registration.id), "message": "Registration submitted.", "stage": registration.stage}
 
 
 @router.get("/my")
-async def my_enrollments(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
-    result = await db.execute(
-        select(StudentEnrollment).options(
+async def my_enrollments(
+    calendar_id: Optional[UUID] = None, semester_id: Optional[UUID] = None,
+    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user),
+):
+    """My Courses task (this revision) — the confirmed K.7 column set (SL No
+    is a frontend-assigned row index, not stored) plus enough extra fields
+    (course_type/credit_type/semester_name/academic_year/teachers) for the
+    "View Details" action and the Academic-Year/Semester filters, without a
+    second endpoint — `calendar_id`/`semester_id` are optional narrowing
+    filters, self-scoped (always `user.id`, never a client-supplied student).
+    `status_label` reflects the REGISTRATION-level stage once a course's own
+    Course-Teacher stage is done and the registration has moved into the
+    locked chain (Major Advisor/HOD), exactly like `_enroll_dict`'s combined
+    label — never a value that doesn't correspond to real backend state."""
+    q = (
+        select(StudentEnrollment)
+        .join(CourseOffering, StudentEnrollment.offering_id == CourseOffering.id)
+        .options(
             selectinload(StudentEnrollment.offering).selectinload(CourseOffering.course),
-        ).where(StudentEnrollment.student_id == user.id).order_by(StudentEnrollment.enrolled_at.desc())
+            selectinload(StudentEnrollment.offering).selectinload(CourseOffering.semester),
+            selectinload(StudentEnrollment.offering).selectinload(CourseOffering.calendar),
+            selectinload(StudentEnrollment.offering).selectinload(CourseOffering.faculty_assignments).selectinload(OfferingFaculty.faculty),
+            selectinload(StudentEnrollment.registration),
+            selectinload(StudentEnrollment.withdrawal_requests),
+        )
+        .where(StudentEnrollment.student_id == user.id)
     )
+    if calendar_id: q = q.where(CourseOffering.calendar_id == calendar_id)
+    if semester_id: q = q.where(CourseOffering.semester_id == semester_id)
+    result = await db.execute(q.order_by(StudentEnrollment.enrolled_at.desc()))
+
     items = []
     for e in result.scalars().all():
+        o = e.offering
+        c = o.course if o else None
+        registration = e.registration
+        combined_label = _ENROLLMENT_STATUS_LABELS.get(e.status, e.status)
+        if e.status == "approved" and registration is not None and registration.stage not in _EDITABLE_STAGES:
+            combined_label = _REGISTRATION_STAGE_LABELS.get(registration.stage, registration.stage)
+        latest_wr = e.withdrawal_requests[0] if e.withdrawal_requests else None
         items.append({
             "id": str(e.id),
             "offering_id": str(e.offering_id),
             "registration_id": str(e.registration_id) if e.registration_id else None,
-            "course_number": e.offering.course.course_number if e.offering and e.offering.course else None,
-            "course_title": e.offering.course.title if e.offering and e.offering.course else None,
-            "credit_structure": e.offering.course.credit_structure if e.offering and e.offering.course else None,
-            "section": e.offering.section if e.offering else None,
+            "registration_stage": registration.stage if registration else None,
+            "course_number": c.course_number if c else None,
+            "course_title": c.title if c else None,
+            "credit_structure": c.credit_structure if c else None,
+            "credits": c.total_credits if c else 0,
+            "category": c.category if c else None,
+            "credit_type": c.credit_type if c else None,
+            "section": o.section if o else None,
+            "semester_name": o.semester.name if o and o.semester else None,
+            "academic_year": o.calendar.academic_year if o and o.calendar else None,
+            "calendar_id": str(o.calendar_id) if o and o.calendar_id else None,
+            "semester_id": str(o.semester_id) if o and o.semester_id else None,
+            "teachers": [fa.faculty.full_name for fa in o.faculty_assignments if fa.faculty] if o else [],
             "status": e.status,
-            "status_label": _ENROLLMENT_STATUS_LABELS.get(e.status, e.status),
+            "status_label": combined_label,
             "enrolled_at": e.enrolled_at.isoformat(),
             "remarks": e.remarks,
+            "withdrawal_request": ({
+                "status": latest_wr.status, "status_label": _WITHDRAWAL_STATUS_LABELS.get(latest_wr.status, latest_wr.status),
+            } if latest_wr else None),
         })
     return items
 
@@ -365,23 +654,109 @@ async def withdraw(
     enrollment_id: UUID, db: AsyncSession = Depends(get_db),
     user: User = Depends(require_roles(UserRole.STUDENT)),
 ):
+    """Withdrawal task (this revision) — a still-PENDING, registration-linked
+    course may now be withdrawn directly by the student (no Course Teacher
+    involvement needed, since it was never approved), but ONLY while the
+    registration is still editable (`_EDITABLE_STAGES`). This is Case A from
+    the confirmed requirement; an APPROVED course must instead go through
+    `request_withdrawal` below (Case B) — this endpoint explicitly refuses an
+    approved, registration-linked item rather than silently withdrawing it,
+    so a student can never bypass the Course-Teacher-approval requirement for
+    an already-cleared course merely by calling the older endpoint. Legacy
+    (non-registration) rows keep their original, unrestricted behavior."""
     e = await db.get(StudentEnrollment, enrollment_id)
     if not e or e.student_id != user.id:
         raise HTTPException(404, "Enrollment not found.")
     if e.registration_id:
-        # Finding 3 (verification audit): individual withdrawal from an active
-        # Course Registration is NOT a confirmed AVFU business rule — allowing
-        # it would let one course sit permanently at "withdrawn" (neither
-        # pending nor approved), which the all-courses-cleared check could
-        # never satisfy, silently stranding the registration. Rather than
-        # invent unconfirmed semantics for partial withdrawal, this path is
-        # disabled for registration-linked items. Open question, not decided
-        # here: whether/how a student should be able to drop a single course
-        # from an already-submitted registration.
-        raise HTTPException(400, "This course is part of a Course Registration and cannot be withdrawn individually.")
+        registration = await db.get(CourseRegistration, e.registration_id)
+        if not registration:
+            raise HTTPException(404, "Enrollment not found.")
+        _ensure_registration_editable(registration)
+        if e.status == "approved":
+            raise HTTPException(400, "This course has already been approved by its Course Teacher — submit a withdrawal request instead.")
+        if e.status != "pending":
+            raise HTTPException(400, "This course cannot be withdrawn in its current state.")
+        e.status = "withdrawn"
+        await db.commit()
+        await _recompute_card_readiness(registration.id, db)
+        await db.commit()
+        return
     if e.status != "pending":
         raise HTTPException(400, "Can only withdraw pending enrollments.")
     e.status = "withdrawn"; await db.commit()
+
+
+# ── Approved-course withdrawal requests (Case B) ─────────────────────────────
+
+@router.post("/{enrollment_id}/withdrawal-request", status_code=201)
+async def request_withdrawal(
+    enrollment_id: UUID, body: WithdrawalRequestIn, db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(UserRole.STUDENT)),
+):
+    e = await db.get(StudentEnrollment, enrollment_id)
+    if not e or e.student_id != user.id:
+        raise HTTPException(404, "Enrollment not found.")
+    if e.status != "approved":
+        raise HTTPException(400, "A withdrawal request can only be made for a course already approved by its Course Teacher.")
+    if e.registration_id:
+        registration = await db.get(CourseRegistration, e.registration_id)
+        if not registration:
+            raise HTTPException(404, "Enrollment not found.")
+        _ensure_registration_editable(registration)
+    existing = await db.execute(select(WithdrawalRequest).where(
+        WithdrawalRequest.enrollment_id == e.id, WithdrawalRequest.status == "pending",
+    ))
+    if existing.scalar_one_or_none():
+        raise HTTPException(409, "A withdrawal request is already pending for this course.")
+    wr = WithdrawalRequest(enrollment_id=e.id, reason=body.reason, requested_by=user.id)
+    db.add(wr)
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(409, "A withdrawal request is already pending for this course.")
+    return {"id": str(wr.id), "message": "Withdrawal request submitted."}
+
+
+@router.patch("/withdrawal-requests/{request_id}")
+async def decide_withdrawal_request(
+    request_id: UUID, body: WithdrawalDecisionIn, db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(
+        UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.HOD, UserRole.FACULTY, UserRole.REGISTRAR,
+    )),
+):
+    """Approve/reject an approved-course withdrawal request. Reuses
+    `_authorize_offering_management` UNCHANGED (Section 11's explicit
+    instruction not to create a second, incompatible authorization
+    mechanism) — a Course Teacher may only decide a request for an offering
+    they are actually assigned to (or their own department, for HOD; or
+    unrestricted, for admins) — never merely by knowing the request's ID."""
+    wr = await db.get(WithdrawalRequest, request_id)
+    if not wr:
+        raise HTTPException(404, "Withdrawal request not found.")
+    e = await db.get(StudentEnrollment, wr.enrollment_id)
+    if not e:
+        raise HTTPException(404, "Enrollment not found.")
+    await _authorize_offering_management(e.offering_id, user, db)
+    if wr.status != "pending":
+        raise HTTPException(400, "This withdrawal request has already been decided.")
+
+    wr.status = "approved" if body.approved else "rejected"
+    wr.decided_by = user.id
+    wr.decided_at = datetime.now(timezone.utc)
+    wr.decision_remark = body.remark
+    if body.approved:
+        # Only on approval does the enrollment itself change — a rejection
+        # leaves `StudentEnrollment.status` completely untouched (Section 12's
+        # explicit "do not silently alter the enrollment on rejection").
+        e.status = "withdrawn"
+    await db.commit()
+
+    if body.approved and e.registration_id:
+        await _recompute_card_readiness(e.registration_id, db)
+        await db.commit()
+
+    return {"message": f"Withdrawal request {wr.status}.", "status": wr.status}
 
 
 # ── Registration-level views ─────────────────────────────────────────────────
@@ -446,6 +821,189 @@ async def get_registration(registration_id: UUID, db: AsyncSession = Depends(get
     if not r: raise HTTPException(404, "Registration not found.")
     await _authorize_registration_view(r, user, db)
     return _registration_dict(r)
+
+
+# ── Registration Card: student submission (the lock point) ──────────────────
+
+@router.post("/registrations/{registration_id}/submit")
+async def submit_registration_card(
+    registration_id: UUID, db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(UserRole.STUDENT)),
+):
+    """The ONE and ONLY way a registration moves from `card_pending` into the
+    locked Major-Advisor chain (Section 2/3/21's explicit requirement).
+    Independently re-validates every precondition against live DB state —
+    never trusts the registration's own cached `stage` alone, so a desync
+    (however unlikely) can never let an incomplete registration through."""
+    r = await db.get(CourseRegistration, registration_id)
+    if not r:
+        raise HTTPException(404, "Registration not found.")
+    if r.student_id != user.id:
+        raise HTTPException(404, "Registration not found.")
+    if r.stage not in _EDITABLE_STAGES:
+        raise HTTPException(400, "This registration has already been submitted and cannot be modified.")
+
+    items = (await db.execute(
+        select(StudentEnrollment).where(
+            StudentEnrollment.registration_id == r.id, StudentEnrollment.status != "withdrawn",
+        )
+    )).scalars().all()
+    if not items:
+        raise HTTPException(400, "Add at least one course before submitting the Registration Card.")
+    if not all(i.status == "approved" for i in items):
+        raise HTTPException(400, "All selected courses must be approved by their Course Teacher before submitting the Registration Card.")
+
+    r.stage = "major_advisor_pending"
+    r.card_submitted_at = datetime.now(timezone.utc)
+    r.revert_remark = None; r.reverted_at = None
+    await db.commit()
+    return {"message": "Registration Card submitted.", "stage": r.stage, "status_label": _REGISTRATION_STAGE_LABELS[r.stage]}
+
+
+# ── Registration Card: PDF document (on-demand, never stored) ───────────────
+
+_CATEGORY_LABELS = {
+    "optional": "Optional Course", "core": "Core Course", "compulsory": "Compulsory Course (CC)",
+    "research": "Research Course", "seminar": "Seminar Course", "deficiency": "Deficiency",
+    "bridge": "Bridge", "prerequisite": "Prerequisite", "mandatory_mba": "Mandatory Course (MBA)",
+    "uncategorized": "Other Course(s)",
+}
+
+_TEMPLATES_DIR = Path(__file__).resolve().parents[3] / "templates"
+_reg_card_jinja_env = None  # lazily constructed, cached at module level — mirrors ppw.py's own pattern, kept file-local rather than importing ppw.py's private cache
+
+
+def _render_registration_card_html(context: dict) -> str:
+    global _reg_card_jinja_env
+    if _reg_card_jinja_env is None:
+        from jinja2 import Environment, FileSystemLoader, select_autoescape
+        _reg_card_jinja_env = Environment(
+            loader=FileSystemLoader(str(_TEMPLATES_DIR)), autoescape=select_autoescape(["html"]),
+        )
+    template = _reg_card_jinja_env.get_template("registration_card.html")
+    return template.render(**context)
+
+
+async def _build_registration_card_context(r: CourseRegistration, db: AsyncSession) -> dict:
+    """Builds the full render context for the Registration Card PDF, using
+    ONLY real AMS data relationships (Section 17's explicit "do not invent
+    values" instruction) — any field with no confirmed source in the current
+    schema (e.g. Minor/Supporting Discipline, "Year" of study) is simply
+    rendered as "—", never fabricated. Course grouping uses the EXISTING
+    `Course.category` vocabulary (already used across AMS) rather than PPW's
+    unrelated six-category classification, per explicit instruction not to
+    force PPW's taxonomy onto Registration Card."""
+    student = await db.get(User, r.student_id)
+    program = await db.get(Program, student.program_id) if student and student.program_id else None
+    department = await db.get(Department, student.department_id) if student and student.department_id else None
+    semester = await db.get(Semester, r.semester_id)
+    calendar = await db.get(AcademicCalendar, r.calendar_id)
+    ma_id = await _get_major_advisor_id(r.student_id, db)
+    major_advisor = await db.get(User, ma_id) if ma_id else None
+
+    active_items = [e for e in r.items if e.status != "withdrawn"]
+    groups: dict[str, list[dict]] = {}
+    order: list[str] = []
+    for e in active_items:
+        o = e.offering
+        c = o.course if o else None
+        cat = (c.category if c and c.category else "uncategorized")
+        if cat not in order:
+            order.append(cat)
+            groups[cat] = []
+        groups[cat].append({
+            "course_number": c.course_number if c else None,
+            "course_title": c.title if c else None,
+            "credit_structure": c.credit_structure if c else None,
+            "credits": c.total_credits if c else 0,
+            "nature": "Non-Credit" if c and c.credit_type == "non_credit" else "Credit",
+            "instructors": ", ".join(fa.faculty.full_name for fa in o.faculty_assignments if fa.faculty) if o else "",
+        })
+
+    classifications = []
+    total_credits = 0
+    for cat in order:
+        rows = groups[cat]
+        for idx, row in enumerate(rows, start=1):
+            row["sl_no"] = idx
+            total_credits += row["credits"]
+        classifications.append({"label": _CATEGORY_LABELS.get(cat, cat.replace("_", " ").title()), "courses": rows})
+
+    # HOD signature status is derived the same way _authorize_hod_registration
+    # resolves the student's HOD — live, never a stored/cached value.
+    hod_dept_id = await _student_department_id(r.student_id, db)
+    hod = None
+    if hod_dept_id:
+        hod_result = await db.execute(select(User).where(User.role == UserRole.HOD, User.department_id == hod_dept_id, User.is_active == True).limit(1))
+        hod = hod_result.scalar_one_or_none()
+
+    from app.utils.pdf import get_logo_data_uri
+    return {
+        "registration": _registration_dict(r),
+        "student": {
+            "name": student.full_name if student else None,
+            "roll_no": student.student_roll if student else None,
+            "mobile": student.mobile if student else None,
+        },
+        "program_name": program.name if program else None,
+        "program_level": program.level if program else None,
+        "department_name": department.name if department else None,
+        "college_name": department.stream if department else None,  # BUSINESS_LOGIC.md Open Question 28 — same established assumption as PPW/research.py
+        "semester_name": semester.name if semester else None,
+        "academic_year": calendar.academic_year if calendar else None,
+        "major_advisor_name": major_advisor.full_name if major_advisor else None,
+        "hod_name": hod.full_name if hod else None,
+        "classifications": classifications,
+        "total_credits": total_credits,
+        "logo_data_uri": get_logo_data_uri(),
+        "generated_at": datetime.now(timezone.utc),
+    }
+
+
+@router.get("/registrations/{registration_id}/document")
+async def get_registration_document(
+    registration_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user),
+):
+    """Official Registration Card as a PDF — on-demand rendering, never
+    persisted (Section 19's explicit "prefer on-demand generation" — the
+    document always reflects live registration state). Reuses
+    `_authorize_registration_view` UNCHANGED (Section 20's explicit
+    instruction) — the exact same viewer rules `GET /registrations/{id}`
+    already enforces, so a student can never download another student's card
+    merely by changing `registration_id` in the URL."""
+    result = await db.execute(
+        select(CourseRegistration).options(*_REGISTRATION_LOAD_OPTIONS).where(CourseRegistration.id == registration_id)
+    )
+    r = result.scalar_one_or_none()
+    if not r:
+        raise HTTPException(404, "Registration not found.")
+    await _authorize_registration_view(r, user, db)
+    if r.stage == "teacher_pending":
+        raise HTTPException(400, "The Registration Card is available once every selected course has been approved by its Course Teacher.")
+
+    context = await _build_registration_card_context(r, db)
+    html = _render_registration_card_html(context)
+
+    from starlette.concurrency import run_in_threadpool
+    from app.utils.pdf import render_ppw_pdf, ChromiumUnavailable, ChromiumRenderFailed
+    try:
+        pdf_bytes = await run_in_threadpool(render_ppw_pdf, html)
+    except ChromiumUnavailable as exc:
+        logger.error("Registration Card generation unavailable (registration_id=%s): %s", registration_id, exc)
+        raise HTTPException(503, "PDF generation service is currently unavailable.")
+    except ChromiumRenderFailed as exc:
+        logger.error("Registration Card render failed (registration_id=%s): %s", registration_id, exc)
+        raise HTTPException(422, "Unable to generate Registration Card.")
+
+    roll_or_id = (r.student.student_roll or str(r.student_id)) if r.student else str(r.student_id)
+    safe_roll = re.sub(r"[^A-Za-z0-9_-]", "-", roll_or_id)
+    filename = f"RegistrationCard-{safe_roll}-{r.stage}.pdf"
+    encoded_name = urllib.parse.quote(filename, safe="")
+
+    return Response(
+        content=pdf_bytes, media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"},
+    )
 
 
 # ── Faculty/Admin: manage per-course enrollments (Course Teacher stage) ─────────
@@ -528,16 +1086,19 @@ async def _apply_enrollment_decision(e: StudentEnrollment, status: str, remarks:
             s.status = "pending"; s.processed_by = None; s.processed_at = None; s.remarks = None
         await db.commit()
     elif status == "approved":
-        siblings = (await db.execute(
-            select(StudentEnrollment).where(StudentEnrollment.registration_id == registration.id)
-        )).scalars().all()
-        if siblings and all(s.status == "approved" for s in siblings):
-            registration.stage = "major_advisor_pending"
+        # Registration Card task (this revision): reaching "every currently-
+        # active course approved" now lands on `card_pending` — a student-
+        # editable "ready to submit" state — never a direct jump to
+        # `major_advisor_pending` anymore. Only the student's own explicit
+        # `POST /registrations/{id}/submit` call can lock the registration.
+        await _recompute_card_readiness(registration.id, db)
+        registration = await db.get(CourseRegistration, registration.id)
+        if registration.stage == "card_pending":
             # Clear any earlier revert marker now that every course has been
             # corrected and cleared again — prevents a stale "Reverted" remark
             # from lingering after the cycle successfully advances.
             registration.revert_remark = None; registration.reverted_at = None
-            await db.commit()
+        await db.commit()
 
 
 @router.patch("/{enrollment_id}")

@@ -28,6 +28,11 @@ const NAV = [
   // remains staff-only "Enrollment Management" (review/approve per-offering
   // requests) for every other role, unchanged.
   { label: "Enrollment",      icon: ClipboardList,   href: "/enrollment",   roles: ["super_admin","academic_admin","hod","faculty","registrar"] },
+  // My Courses task (this revision) — same route (`/enrollment`), a
+  // separate nav entry so students see the confirmed "My Courses" label
+  // (BUSINESS_LOGIC.md K.7) instead of the staff-facing "Enrollment" label;
+  // the route itself branches on role internally, unchanged.
+  { label: "My Courses",      icon: BookOpen,        href: "/enrollment",   roles: ["student"] },
   { label: "Course Registration",icon: ClipboardCheck,href: "/course-registration", roles: ["student"] },
   { label: "Course Request",  icon: ClipboardList,   href: "/course-request", roles: ["super_admin","academic_admin","hod","faculty","research_supervisor"] },
   { label: "Academic Progress",icon: GraduationCap,  href: "/academic-progress", roles: ["super_admin","academic_admin","hod","faculty","student","registrar","research_supervisor"] },

@@ -464,6 +464,12 @@ def _offering_dict(o: CourseOffering, enrolled: int) -> dict:
         "course_number": o.course.course_number if o.course else None,
         "course_title": o.course.title if o.course else None,
         "credit_structure": o.course.credit_structure if o.course else None,
+        # Registration Card / 20-credit task — a numeric credit value alongside
+        # the existing display-only credit_structure string, so the frontend
+        # can compute a live running total without re-parsing "2+1" strings.
+        # Backend enforcement of the 20-credit cap does not depend on this
+        # field at all (it always recomputes from Course.total_credits itself).
+        "credits": o.course.total_credits if o.course else 0,
         "category": o.course.category if o.course else None,
         "credit_type": o.course.credit_type if o.course else None,
         "is_research": bool(o.course and o.course.category == "research"),
