@@ -83,7 +83,7 @@ function StudentCommitteeView() {
   if (isLoading) return <div className="flex items-center justify-center py-24 text-gray-600"><Loader2 className="animate-spin mr-2" />Loading…</div>;
 
   return (
-    <div className="p-6 max-w-5xl mx-auto">
+    <div className="p-6 w-full">
       <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2 mb-2"><FlaskConical size={24} className="text-[#0D6E6E]" />Advisory Committee</h1>
       <p className="text-gray-700 text-sm mb-6">Your PG/PhD advisory committee and research courses</p>
 
@@ -113,9 +113,9 @@ function StudentCommitteeView() {
             {!credit || credit.courses.length === 0 ? (
               <p className="text-sm text-gray-600 text-center py-6">No courses recorded yet.</p>
             ) : (
-              <div className="w-full overflow-x-auto">
+              <div className="w-full overflow-auto max-h-[65vh]">
               <table className="w-full text-sm min-w-[700px]">
-                <thead className="bg-gray-50 border-b border-gray-200">
+                <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10">
                   <tr>{["Course Number", "Course Title", "Course Credit", "Credit Type", "Session", "Status"].map((h) => (
                     <th key={h} className="text-left px-3 py-2 font-semibold text-gray-700">{h}</th>
                   ))}</tr>
@@ -318,12 +318,12 @@ function StaffCommitteeView() {
       </div>
 
       {/* Committee table */}
-      <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
+      <div className="bg-white rounded-2xl border border-gray-200 overflow-auto max-h-[65vh]">
         {committees.length === 0 ? (
           <div className="text-center py-16 text-gray-600"><FlaskConical size={40} className="mx-auto mb-3 opacity-30" /><p>No advisory committees found.</p></div>
         ) : (
           <table className="w-full text-sm">
-            <thead className="bg-gray-50 border-b border-gray-200">
+            <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10">
               <tr>{["Sl No", "Advisory Role", "Student Name", "Degree", "College", "Status", "Action"].map((h) => (
                 <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700">{h}</th>
               ))}</tr>

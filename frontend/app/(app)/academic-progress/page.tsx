@@ -143,12 +143,12 @@ export default function AcademicProgressPage() {
           {/* Courses */}
           <div>
             <h2 className="text-base font-bold text-gray-900 mb-2">Academic Courses</h2>
-            <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
+            <div className="bg-white rounded-2xl border border-gray-200 overflow-auto max-h-[65vh]">
               {progress.courses.length === 0 ? (
                 <p className="text-sm text-gray-600 text-center py-8">No enrollments found for the selected period.</p>
               ) : (
                 <table className="w-full text-sm">
-                  <thead className="bg-gray-50 border-b border-gray-200">
+                  <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10">
                     <tr>{["Sl No", "Course Number", "Course Title", "Credit", "Semester", "Academic Year", "Status", "Action"].map((h) => (
                       <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700">{h}</th>
                     ))}</tr>
@@ -203,7 +203,7 @@ export default function AcademicProgressPage() {
                 <p className="text-sm text-gray-600">No published results yet.</p>
               ) : (
                 <table className="w-full text-sm">
-                  <thead className="bg-gray-50 border-b border-gray-200">
+                  <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10">
                     <tr>{["Semester", "SGPA", "Credits"].map((h) => (
                       <th key={h} className="text-left px-4 py-2.5 font-semibold text-gray-700">{h}</th>
                     ))}</tr>

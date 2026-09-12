@@ -80,7 +80,7 @@ function ProfileForm({ user }: { user: NonNullable<ReturnType<typeof useUser>> }
   );
 
   return (
-    <div className="p-6 max-w-3xl mx-auto space-y-6">
+    <div className="p-6 max-w-5xl mx-auto space-y-6">
       <div>
         <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2"><IdCard size={24} className="text-[#0D6E6E]" />Student Management</h1>
         <p className="text-gray-700 text-base mt-1">View and update your student profile</p>
@@ -102,10 +102,13 @@ function ProfileForm({ user }: { user: NonNullable<ReturnType<typeof useUser>> }
           </label>
         </div>
 
-        {/* Read-only fields */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-5 text-sm">
+        {/* Read-only fields — 3 equal columns (not a 4-column grid meant for
+            4 items) so Email gets enough width to display in full; `break-all`
+            (not `truncate`) lets an unusually long email wrap to a second
+            line instead of being cut off. */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-5 text-sm">
           <div><p className="text-gray-500">Roll No.</p><p className="font-semibold font-mono">{user.student_roll ?? "—"}</p></div>
-          <div><p className="text-gray-500">Email</p><p className="font-semibold truncate">{user.email}</p></div>
+          <div><p className="text-gray-500">Email</p><p className="font-semibold break-all">{user.email}</p></div>
           <div><p className="text-gray-500">Role</p><p className="font-semibold capitalize">{user.role}</p></div>
         </div>
 

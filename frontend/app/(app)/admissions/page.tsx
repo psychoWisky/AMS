@@ -144,7 +144,7 @@ export default function AdmissionsPage() {
       </div>
 
       {/* Table */}
-      <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
+      <div className="bg-white rounded-2xl border border-gray-200 overflow-auto max-h-[65vh]">
         {isLoading ? (
           <div className="flex justify-center py-20 text-gray-400">Loading…</div>
         ) : filtered.length === 0 ? (
@@ -154,7 +154,7 @@ export default function AdmissionsPage() {
           </div>
         ) : (
           <table className="w-full text-sm">
-            <thead className="bg-gray-50 border-b border-gray-200 text-xs uppercase tracking-wide text-gray-500">
+            <thead className="bg-gray-50 border-b border-gray-200 text-xs uppercase tracking-wide text-gray-500 sticky top-0 z-10">
               <tr>
                 {["App. No.", "Applicant", "Email / Mobile", "Year & Category", "Submitted", "Status", "Action"].map((h) => (
                   <th key={h} className="text-left px-4 py-3 font-semibold">{h}</th>

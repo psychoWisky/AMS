@@ -340,14 +340,14 @@ export default function CoursesPage() {
             </select>
           </div>
 
-          <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
+          <div className="bg-white rounded-2xl border border-gray-200 overflow-auto max-h-[65vh]">
             {isLoading ? (
               <div className="flex items-center justify-center py-16 text-gray-600"><Loader2 className="animate-spin mr-2" />Loading…</div>
             ) : filteredCourses.length === 0 ? (
               <div className="text-center py-16 text-gray-600"><BookOpen size={40} className="mx-auto mb-3 opacity-30" /><p>No courses found.</p></div>
             ) : (
               <table className="w-full text-sm min-w-[1000px]">
-                <thead className="bg-gray-50 border-b border-gray-200">
+                <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10">
                   <tr>{["Sl No", "Course College", "Course Number", "Course Title", "Programme", "Credit", "Credit Type", "Research", "Compulsory", ...(canManage ? ["Action"] : [])].map((h) => (
                     <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700 whitespace-nowrap">{h}</th>
                   ))}</tr>
@@ -511,14 +511,14 @@ export default function CoursesPage() {
             </select>
           </div>
 
-          <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
+          <div className="bg-white rounded-2xl border border-gray-200 overflow-auto max-h-[65vh]">
             {offeringsLoading ? (
               <div className="flex items-center justify-center py-16 text-gray-600"><Loader2 className="animate-spin mr-2" />Loading…</div>
             ) : offerings.length === 0 ? (
               <div className="text-center py-16 text-gray-600"><BookOpen size={40} className="mx-auto mb-3 opacity-30" /><p>No offerings found for this filter.</p></div>
             ) : (
               <table className="w-full text-sm min-w-[900px]">
-                <thead className="bg-gray-50 border-b border-gray-200">
+                <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10">
                   <tr>{["Sl No", "Course Number", "Course Title", "Semester", "Credit", "Credit Type", "Research", "Status", "Action"].map((h) => (
                     <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700 whitespace-nowrap">{h}</th>
                   ))}</tr>
@@ -564,14 +564,14 @@ export default function CoursesPage() {
 
       {/* ── Available to Department ─────────────────────────────────────── */}
       {tab === "availability" && (
-        <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
+        <div className="bg-white rounded-2xl border border-gray-200 overflow-auto max-h-[65vh]">
           {availabilityLoading ? (
             <div className="flex items-center justify-center py-16 text-gray-600"><Loader2 className="animate-spin mr-2" />Loading…</div>
           ) : availableToMe.length === 0 ? (
             <div className="text-center py-16 text-gray-600"><BookOpen size={40} className="mx-auto mb-3 opacity-30" /><p>No other-department courses have been made available to your department yet.</p></div>
           ) : (
             <table className="w-full text-sm min-w-[800px]">
-              <thead className="bg-gray-50 border-b border-gray-200">
+              <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10">
                 <tr>{["Course Number", "Course Title", "Credit", "Owning Department", "Action"].map((h) => (
                   <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700 whitespace-nowrap">{h}</th>
                 ))}</tr>

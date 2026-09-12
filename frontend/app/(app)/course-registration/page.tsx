@@ -336,8 +336,13 @@ export default function CourseRegistrationPage() {
               first submission, as long as the registration is still editable
               (this task's core fix). */}
           {!isLocked && (
-            <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
+            <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
               <div className="px-4 py-3 border-b border-gray-100"><h2 className="font-bold text-gray-800">Available Courses</h2></div>
+              {/* Table scrolls within its own bounded area (both axes) so the
+                  horizontal scrollbar stays reachable without scrolling the
+                  whole page down, and many rows scroll internally instead of
+                  growing the page — title/footer above/below stay fixed. */}
+              <div className="overflow-auto max-h-[65vh]">
               {offeringsLoading ? (
                 <div className="flex items-center justify-center py-16 text-gray-600"><Loader2 className="animate-spin mr-2" />Loading…</div>
               ) : availableOfferings.length === 0 ? (
@@ -353,7 +358,7 @@ export default function CourseRegistrationPage() {
                 </div>
               ) : (
                 <table className="w-full text-sm min-w-[900px]">
-                  <thead className="bg-gray-50 border-b border-gray-200">
+                  <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10">
                     <tr>{["", "Course Number", "Course Title", "Department", "Credit", "Credit Type", "Course Teachers"].map((h) => (
                       <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700">{h}</th>
                     ))}</tr>
@@ -378,6 +383,7 @@ export default function CourseRegistrationPage() {
                   </tbody>
                 </table>
               )}
+              </div>
               {availableOfferings.length > 0 && (
                 <div className="flex justify-end p-4 border-t border-gray-100">
                   <button onClick={() => setConfirmSubmit(true)} disabled={selected.size === 0 || submitRegistration.isPending}

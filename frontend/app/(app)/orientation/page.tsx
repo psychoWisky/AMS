@@ -245,7 +245,7 @@ export default function OrientationPage() {
   function closeModal() { setModalOpen(false); setEditing(null); setForm(EMPTY_FORM); }
 
   return (
-    <div className="p-6 max-w-7xl mx-auto">
+    <div className="p-6 w-full">
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2">
@@ -293,7 +293,7 @@ export default function OrientationPage() {
       </div>
 
       {/* Table */}
-      <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
+      <div className="bg-white rounded-2xl border border-gray-200 overflow-auto max-h-[65vh]">
         {isLoading ? (
           <div className="flex justify-center py-20 text-gray-400">Loading…</div>
         ) : candidates.length === 0 ? (
@@ -303,7 +303,7 @@ export default function OrientationPage() {
           </div>
         ) : (
           <table className="w-full text-sm min-w-[1100px]">
-            <thead className="bg-gray-50 border-b border-gray-200 text-xs uppercase tracking-wide text-gray-500">
+            <thead className="bg-gray-50 border-b border-gray-200 text-xs uppercase tracking-wide text-gray-500 sticky top-0 z-10">
               <tr>
                 {["Name", "Email / Mobile", "University / AVFU Email", "Programme", "Department", "Attendance", "Selection", "Roll No.", "Credentials", "Actions"].map((h) => (
                   <th key={h} className="text-left px-4 py-3 font-semibold whitespace-nowrap">{h}</th>

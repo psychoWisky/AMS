@@ -85,7 +85,7 @@ export default function GradingPage() {
   });
 
   return (
-    <div className="p-6 max-w-6xl mx-auto">
+    <div className="p-6 w-full">
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2"><BarChart3 size={24} className="text-[#0D6E6E]" />Grading & Results</h1>
@@ -183,9 +183,9 @@ export default function GradingPage() {
                 </div>
               )}
             </div>
-            <div className="overflow-x-auto">
+            <div className="overflow-auto max-h-[65vh]">
               <table className="w-full text-sm">
-                <thead className="bg-gray-50 border-b border-gray-200">
+                <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10">
                   <tr>{["Roll No.", "Student Name", "Internal (40)", "External (60)", "Total", "Grade", "Points", "Absent"].map((h) => (
                     <th key={h} className="text-left px-4 py-3 font-semibold text-gray-600 text-sm">{h}</th>
                   ))}</tr>

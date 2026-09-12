@@ -184,7 +184,7 @@ export default function CourseRequestPage() {
   }
 
   return (
-    <div className="p-6 max-w-6xl mx-auto space-y-8">
+    <div className="p-6 w-full space-y-8">
       {(role === "faculty" || role === "research_supervisor") && (
         <div>
           <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2 mb-2"><ClipboardList size={24} className="text-[#0D6E6E]" />Course Request</h1>
@@ -208,7 +208,7 @@ export default function CourseRequestPage() {
             </select>
           </div>
 
-          <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
+          <div className="bg-white rounded-2xl border border-gray-200 overflow-auto max-h-[65vh]">
             {!offeringId ? (
               <div className="text-center py-12 text-gray-500">Select a course to see student registrations.</div>
             ) : studentsLoading ? (
@@ -217,7 +217,7 @@ export default function CourseRequestPage() {
               <div className="text-center py-16 text-gray-600"><ClipboardList size={40} className="mx-auto mb-3 opacity-30" /><p>No student registrations for this course yet.</p></div>
             ) : (
               <table className="w-full text-sm">
-                <thead className="bg-gray-50 border-b border-gray-200">
+                <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10">
                   <tr>{["Sl No", "Student Name", "Roll No", "Status", "Action"].map((h) => (
                     <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700">{h}</th>
                   ))}</tr>

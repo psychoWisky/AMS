@@ -212,14 +212,14 @@ export default function EnrollmentPage() {
           )}
         </div>
 
-        <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
+        <div className="bg-white rounded-2xl border border-gray-200 overflow-auto max-h-[65vh]">
           {myLoading ? (
             <div className="flex justify-center py-16"><Loader2 className="animate-spin text-gray-600" /></div>
           ) : myCourses.length === 0 ? (
             <div className="text-center py-16 text-gray-600"><ClipboardList size={40} className="mx-auto mb-3 opacity-30" /><p>No courses found for this filter.</p></div>
           ) : (
             <table className="w-full text-sm min-w-[900px]">
-              <thead className="bg-gray-50 border-b border-gray-200">
+              <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10">
                 <tr>{["SL No", "Course Type", "Course Number", "Course Title", "Credit", "Credit Type", "Status", "Action"].map((h) => (
                   <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700">{h}</th>
                 ))}</tr>
@@ -294,12 +294,12 @@ export default function EnrollmentPage() {
       </div>
 
       {selectedOffering ? (
-        <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
+        <div className="bg-white rounded-2xl border border-gray-200 overflow-auto max-h-[65vh]">
           {enrollments.length === 0 ? (
             <div className="text-center py-16 text-gray-600"><ClipboardList size={40} className="mx-auto mb-3 opacity-30" /><p>No {statusFilter} enrollments.</p></div>
           ) : (
             <table className="w-full text-sm">
-              <thead className="bg-gray-50 border-b border-gray-200">
+              <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10">
                 <tr>{["Student", "Roll No.", "Enrolled", "Status", "Remarks", "Actions"].map((h) => (
                   <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700">{h}</th>
                 ))}</tr>

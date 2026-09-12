@@ -224,7 +224,7 @@ export default function DashboardPage() {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
           <div><p className="text-gray-700">Name</p><p className="font-semibold">{user?.full_name}</p></div>
           <div><p className="text-gray-700">Role</p><p className="font-semibold">{ROLES[role as keyof typeof ROLES] ?? role}</p></div>
-          <div><p className="text-gray-700">Email</p><p className="font-semibold truncate">{user?.email}</p></div>
+          <div><p className="text-gray-700">Email</p><p className="font-semibold break-all">{user?.email}</p></div>
           <div><p className="text-gray-700">Designation</p><p className="font-semibold">{user?.designation ?? "—"}</p></div>
         </div>
       </div>

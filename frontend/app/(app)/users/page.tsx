@@ -312,12 +312,12 @@ export default function UsersPage() {
       )}
 
       {/* Users table */}
-      <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
+      <div className="bg-white rounded-2xl border border-gray-200 overflow-auto max-h-[65vh]">
         {isLoading ? <div className="flex justify-center py-16"><Loader2 className="animate-spin text-gray-600" /></div> : filtered.length === 0 ? (
           <div className="text-center py-16 text-gray-600"><Users size={40} className="mx-auto mb-3 opacity-30" /><p>No users found.</p></div>
         ) : (
           <table className="w-full text-sm">
-            <thead className="bg-gray-50 border-b border-gray-200">
+            <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10">
               <tr>{["Name", "Email", "Role", "Designation", "Department", ...(isAdmin ? ["Action"] : [])].map((h) => (
                 <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700">{h}</th>
               ))}</tr>

@@ -62,7 +62,7 @@ export default function FacultiesPage() {
   }
 
   return (
-    <div className="p-6 max-w-5xl mx-auto">
+    <div className="p-6 w-full">
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2"><UserCog size={24} className="text-[#0D6E6E]" />Faculties</h1>
@@ -80,14 +80,14 @@ export default function FacultiesPage() {
           className="w-full pl-9 pr-4 py-2.5 border border-gray-200 rounded-xl text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
       </div>
 
-      <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden overflow-x-auto">
+      <div className="bg-white rounded-2xl border border-gray-200 overflow-auto max-h-[65vh]">
         {isLoading ? (
           <div className="flex items-center justify-center py-16 text-gray-600"><Loader2 className="animate-spin mr-2" />Loading…</div>
         ) : filtered.length === 0 ? (
           <div className="text-center py-16 text-gray-600"><UserCog size={40} className="mx-auto mb-3 opacity-30" /><p>No faculty found in your department yet.</p></div>
         ) : (
           <table className="w-full text-sm">
-            <thead className="bg-gray-50 border-b border-gray-200">
+            <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10">
               <tr>{["Sl No", "Name", "Email", "Designation", "Mobile"].map((h) => (
                 <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700">{h}</th>
               ))}</tr>

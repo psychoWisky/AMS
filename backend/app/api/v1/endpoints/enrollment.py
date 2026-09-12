@@ -259,26 +259,32 @@ async def _semester_active_credits(student_id: UUID, semester_id: UUID, db: Asyn
 async def _recompute_card_readiness(registration_id: UUID, db: AsyncSession) -> None:
     """Recompute `CourseRegistration.stage` between `teacher_pending` and
     `card_pending` based on the CURRENT, live status of every non-withdrawn
-    `StudentEnrollment` row still linked to it — never a value trusted from
-    anywhere else. Called after every event that can change whether "all
-    currently-active selected courses are Course-Teacher approved" is true:
-    a teacher's approve/revert decision, a student's pending-course
-    withdrawal, a student adding a new (pending) course, and an approved
-    withdrawal request being granted. A no-op (by design, not by accident) if
-    the registration is already locked (`major_advisor_pending` and beyond) —
-    this function must never be able to un-lock or re-lock a submitted
-    registration; only `submit_registration_card` moves a registration out of
-    `_EDITABLE_STAGES`, and nothing moves it back in this phase."""
+    active enrollment for this student's SEMESTER — never a value trusted
+    from anywhere else, and never scoped to `registration_id`-linked rows
+    alone (bug fix, this revision: a student whose only remaining active
+    courses are legacy rows with `registration_id IS NULL` — e.g. after
+    withdrawing every registration-linked pending course — would otherwise
+    have those legacy-approved courses silently ignored here, incorrectly
+    leaving the registration stuck at `teacher_pending` even though nothing
+    is actually pending anymore; this uses the same semester-scoped
+    population `_registration_dict`'s Selected Courses list and
+    `_semester_active_credits`'s 20-credit enforcement already use, so all
+    three can never disagree again). Called after every event that can
+    change whether "all currently-active selected courses are Course-Teacher
+    approved" is true: a teacher's approve/revert decision, a student's
+    pending-course withdrawal, a student adding a new (pending) course, and
+    an approved withdrawal request being granted. A no-op (by design, not by
+    accident) if the registration is already locked (`major_advisor_pending`
+    and beyond) — this function must never be able to un-lock or re-lock a
+    submitted registration; only `submit_registration_card` moves a
+    registration out of `_EDITABLE_STAGES`, and nothing moves it back in
+    this phase."""
     registration = await db.get(CourseRegistration, registration_id)
     if not registration or registration.stage not in _EDITABLE_STAGES:
         return
-    items = (await db.execute(
-        select(StudentEnrollment).where(
-            StudentEnrollment.registration_id == registration_id,
-            StudentEnrollment.status != "withdrawn",
-        )
-    )).scalars().all()
-    registration.stage = "card_pending" if items and all(i.status == "approved" for i in items) else "teacher_pending"
+    all_items = await _semester_scoped_enrollments(registration.student_id, registration.semester_id, db)
+    active = [e for e in all_items if e.status != "withdrawn"]
+    registration.stage = "card_pending" if active and all(e.status == "approved" for e in active) else "teacher_pending"
 
 
 class EnrollRequest(BaseModel):
