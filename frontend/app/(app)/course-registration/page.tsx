@@ -18,12 +18,32 @@ interface Offering {
   status: string; enrolled_count: number; max_enrollment: number;
 }
 interface WithdrawalRequestInfo {
-  id: string; status: string; status_label: string; reason: string; decision_remark: string | null;
-  requested_at: string; decided_at: string | null;
+  // Selected-Courses-before-first-registration fix (this revision): the
+  // fallback `/enrollment/my` source (see `myEnrollmentsForSemester` below)
+  // only reports `status`/`status_label` for a withdrawal request — the
+  // extra detail fields are optional so that fallback shape satisfies this
+  // interface too; every render in THIS page only ever reads `status`/
+  // `status_label` off an item's `withdrawal_request`.
+  status: string; status_label: string;
+  id?: string; reason?: string; decision_remark?: string | null;
+  requested_at?: string; decided_at?: string | null;
 }
 interface EnrollmentItem {
   id: string; offering_id: string; course_number: string; course_title: string; credits: number;
   status: string; status_label: string; remarks: string | null; withdrawal_request: WithdrawalRequestInfo | null;
+  // Registration Card Preview task (this revision) — additive, optional
+  // (the pre-registration `/enrollment/my` fallback below doesn't set
+  // them): grouping/instructor detail so the on-screen preview can mirror
+  // the printed card's course table without depending on the PDF pipeline.
+  category?: string | null; credit_structure?: string; credit_type?: string | null; instructors?: string[];
+}
+// Minimal shape consumed from the pre-existing, semester-scoped `/enrollment/my`
+// endpoint (unchanged — already used by "My Courses") — reused here only as a
+// fallback data source, never a second/duplicated calculation.
+interface MyEnrollmentItem {
+  id: string; offering_id: string; course_number: string; course_title: string; credits: number;
+  status: string; status_label: string; remarks: string | null;
+  withdrawal_request: { status: string; status_label: string } | null;
 }
 interface Registration {
   id: string; semester_id: string; calendar_id: string; stage: string; status_label: string;
@@ -37,8 +57,24 @@ interface Registration {
   // prefer this over summing `items` client-side (see `usedCredits` below).
   selected_credits: number; max_credits: number;
   items: EnrollmentItem[]; withdrawn_items: EnrollmentItem[];
+  // Registration Card Preview task (this revision) — additive display
+  // fields, mirroring exactly what the PDF already shows (see
+  // `_registration_dict`'s docstring), so an on-page preview never needs
+  // the fragile Chromium/PDF pipeline to show the same information.
+  program_name: string | null; program_level: string | null; department_name: string | null;
+  semester_name: string | null; academic_year: string | null;
+  major_advisor_name: string | null; hod_name: string | null; student_mobile: string | null;
 }
 
+// Registration Card Preview task (this revision) — mirrors the PDF's own
+// `_CATEGORY_LABELS` (enrollment.py) exactly, so the on-screen grouping
+// headings read identically to the printed card.
+const CATEGORY_LABELS: Record<string, string> = {
+  optional: "Optional Course", core: "Core Course", compulsory: "Compulsory Course (CC)",
+  research: "Research Course", seminar: "Seminar Course", deficiency: "Deficiency",
+  bridge: "Bridge", prerequisite: "Prerequisite", mandatory_mba: "Mandatory Course (MBA)",
+  uncategorized: "Other Course(s)",
+};
 const STAGE_STYLE: Record<string, string> = {
   teacher_pending: "bg-amber-100 text-amber-700",
   card_pending: "bg-teal-100 text-teal-700",
@@ -127,21 +163,54 @@ export default function CourseRegistrationPage() {
   });
 
   const currentRegistration = myRegistrations.find((r) => r.semester_id === semesterId);
+
+  // Selected-Courses-before-first-registration fix (this revision): a
+  // `CourseRegistration` row for this semester is only ever created the
+  // FIRST time this student calls `POST /enrollment/register` for it — a
+  // student whose only courses so far are active (pending/approved) legacy
+  // enrollments (no `registration_id`, predating this workflow) has NO
+  // `CourseRegistration` row yet, so `currentRegistration` above is
+  // `undefined` even though real selected courses already exist. Falling
+  // back to the pre-existing, semester-scoped `GET /enrollment/my` endpoint
+  // (already used by "My Courses", unchanged) fixes both the "Selected
+  // Courses shows nothing / 0 credits" display bug AND makes those courses
+  // correctly excluded from "Available Courses" below from the very first
+  // page load — not only after the student adds a new course and a
+  // registration gets created incidentally. Only fetched while there is no
+  // `currentRegistration` yet, since once one exists its own `items` are
+  // already this same semester-scoped population (never a second,
+  // independently-computed source once a registration exists).
+  const { data: myEnrollmentsForSemester = [] } = useQuery<MyEnrollmentItem[]>({
+    queryKey: ["ams-my-enrollments-for-registration", semesterId],
+    queryFn: async () => (await api.get("/enrollment/my", { params: { semester_id: semesterId } })).data,
+    enabled: !!semesterId && !currentRegistration,
+  });
+
   // Registration Card task: the binary "submitted -> read-only-forever" view
   // is gone. A registration is still fully editable (add/remove/withdraw)
   // while `is_editable` is true — only once the student has explicitly
   // submitted the Registration Card does the selection UI disappear. The
   // backend is authoritative for this — `is_editable` comes straight from
   // `CourseRegistration.stage`, never derived/guessed on the frontend.
+  // No `currentRegistration` at all is never "locked" — a legacy-only
+  // student with no registration yet can always withdraw/request-withdrawal
+  // on those courses (the backend's existing unrestricted legacy-item path).
   const isLocked = currentRegistration ? !currentRegistration.is_editable : false;
 
-  const activeItems = currentRegistration?.items ?? [];
+  const activeItems: EnrollmentItem[] = currentRegistration?.items ?? myEnrollmentsForSemester
+    .filter((e) => e.status !== "withdrawn")
+    .map((e) => ({
+      id: e.id, offering_id: e.offering_id, course_number: e.course_number, course_title: e.course_title,
+      credits: e.credits, status: e.status, status_label: e.status_label, remarks: e.remarks,
+      withdrawal_request: e.withdrawal_request,
+    }));
   // Selected-Courses/credit fix (this revision): prefer the backend's
   // authoritative `selected_credits` (semester-scoped, includes legacy
   // registration_id=NULL rows) over a client-side sum. Falling back to
-  // summing `activeItems` only when there is no registration yet at all
-  // (nothing selected, so both are equivalently 0) — never a second,
-  // independently-computed total that could drift from the backend's.
+  // summing `activeItems` when there is no registration yet at all (which
+  // now correctly includes the pre-registration legacy items above too) —
+  // never a second, independently-computed total that could drift from the
+  // backend's once a registration exists.
   const usedCredits = currentRegistration?.selected_credits ?? activeItems.reduce((sum, it) => sum + (it.credits || 0), 0);
   const remainingCredits = MAX_SEMESTER_CREDITS - usedCredits;
   const registeredOfferingIds = new Set(activeItems.map((it) => it.offering_id));
@@ -151,6 +220,17 @@ export default function CourseRegistrationPage() {
     return sum + (o?.credits || 0);
   }, 0);
   const allApproved = activeItems.length > 0 && activeItems.every((it) => it.status === "approved");
+
+  // Registration Card Preview task (this revision) — groups `activeItems`
+  // by `category`, exactly mirroring the printed card's own grouping
+  // (`_build_registration_card_context`'s `classifications`), so the
+  // on-screen preview always matches what the PDF would show for the same
+  // data — never a second, independently-invented grouping.
+  const previewGroups = activeItems.reduce<Record<string, EnrollmentItem[]>>((acc, it) => {
+    const key = it.category ?? "uncategorized";
+    (acc[key] ??= []).push(it);
+    return acc;
+  }, {});
 
   function invalidateAll() {
     qc.invalidateQueries({ queryKey: ["ams-my-registrations"] });
@@ -261,13 +341,20 @@ export default function CourseRegistrationPage() {
             </div>
           </div>
 
-          {currentRegistration && (
+          {(currentRegistration || activeItems.length > 0) && (
             <div className="bg-white rounded-2xl border border-gray-200 p-5 mb-6">
               <div className="flex items-center justify-between mb-3">
                 <h2 className="font-bold text-gray-800">Your Selected Courses</h2>
-                <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-semibold ${STAGE_STYLE[currentRegistration.stage] ?? "bg-gray-100"}`}>{currentRegistration.status_label}</span>
+                {/* Selected-Courses-before-first-registration fix: before any
+                    CourseRegistration row exists yet, there is no backend
+                    `stage`/`status_label` to show — derive an equivalent
+                    label straight from the (already semester-scoped) items
+                    instead of hiding the badge outright. */}
+                <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-semibold ${STAGE_STYLE[currentRegistration?.stage ?? ""] ?? "bg-amber-100 text-amber-700"}`}>
+                  {currentRegistration?.status_label ?? (allApproved ? "Course Teacher Approved" : "Course Teacher Approval Pending")}
+                </span>
               </div>
-              {currentRegistration.revert_remark && (
+              {currentRegistration?.revert_remark && (
                 <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-800 mb-3">
                   <span className="font-bold">Reverted — reason: </span>{currentRegistration.revert_remark}
                 </div>
@@ -303,14 +390,24 @@ export default function CourseRegistrationPage() {
 
               {/* Registration Card banner — appears once every currently-
                   selected course has been Course-Teacher approved, and
-                  persists (in a different shape) after submission. */}
-              {allApproved && !isLocked && (
+                  persists (in a different shape) after submission. Requires
+                  an actual `currentRegistration` (never shown for the
+                  pre-registration legacy-only fallback above) since
+                  submit/download both need a real CourseRegistration id —
+                  a student must add at least one course via this page
+                  (creating that row) before a card can be submitted. */}
+              {currentRegistration && allApproved && !isLocked && (
                 <div className="mt-4 bg-teal-50 border border-teal-200 rounded-xl p-4">
                   <p className="text-sm font-semibold text-teal-800 mb-3">All selected courses are approved.</p>
                   <div className="flex gap-2">
                     <button onClick={() => downloadCard.mutate()} disabled={downloadCard.isPending}
                       className="flex items-center gap-1.5 px-4 py-2 border border-[#0D6E6E] text-[#0D6E6E] rounded-xl text-sm font-semibold hover:bg-[#E6F4F4] disabled:opacity-60">
-                      {downloadCard.isPending ? <Loader2 size={14} className="animate-spin" /> : <FileText size={14} />} View Registration Card
+                      {/* Registration Card Preview task (this revision): relabeled from
+                          "View Registration Card" — the Registration Card Preview
+                          section below now covers "viewing" the content on-screen;
+                          this button's only job is producing the official PDF file,
+                          matching PPW's own "Download PPW Document" naming. */}
+                      {downloadCard.isPending ? <Loader2 size={14} className="animate-spin" /> : <FileText size={14} />} {downloadCard.isPending ? "Generating…" : "Download PDF"}
                     </button>
                     <button onClick={() => setConfirmCard(true)} disabled={submitCard.isPending}
                       className="px-4 py-2 bg-[#0D6E6E] text-white rounded-xl text-sm font-bold hover:bg-[#178F8F] disabled:opacity-60">
@@ -322,13 +419,116 @@ export default function CourseRegistrationPage() {
               {isLocked && (
                 <div className="mt-4 bg-blue-50 border border-blue-200 rounded-xl p-4">
                   <p className="text-sm font-semibold text-blue-800 mb-1">Registration Card Submitted</p>
-                  <p className="text-sm text-blue-700 mb-3">Status: {currentRegistration.status_label}. No further edits are possible for this registration.</p>
+                  <p className="text-sm text-blue-700 mb-3">Status: {currentRegistration?.status_label}. No further edits are possible for this registration.</p>
                   <button onClick={() => downloadCard.mutate()} disabled={downloadCard.isPending}
                     className="flex items-center gap-1.5 px-4 py-2 bg-[#0D6E6E] text-white rounded-xl text-sm font-bold hover:bg-[#178F8F] disabled:opacity-60">
                     {downloadCard.isPending ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />} Download PDF
                   </button>
                 </div>
               )}
+            </div>
+          )}
+
+          {/* Registration Card Preview task (this revision) — an always-
+              available, on-screen mock-up of the printed card, mirroring
+              PPW's own "PPW Preview" section (ppw/page.tsx): plain React/
+              HTML, entirely independent of the Chromium/PDF pipeline, so a
+              student can always see exactly what the card contains even if
+              PDF generation is temporarily unavailable. Requires an actual
+              `currentRegistration` (its `program_name`/`department_name`/
+              `major_advisor_name`/etc. fields only exist once one does) —
+              same gating as the Download/Submit banner above. */}
+          {currentRegistration && (
+            <div className="bg-white rounded-2xl border border-gray-200 p-8 mb-6">
+              <h2 className="font-bold text-gray-800 mb-4">Registration Card Preview</h2>
+              <div className="border border-gray-300 rounded-xl p-8 max-w-3xl mx-auto text-sm leading-relaxed">
+                <div className="text-center mb-4">
+                  <p className="font-bold text-base underline">ASSAM VETERINARY AND FISHERY UNIVERSITY</p>
+                  <p>Faculty : Faculty of Veterinary Science</p>
+                  <p>College : {currentRegistration.department_name ?? "—"}</p>
+                </div>
+                <p className="text-center font-bold text-base underline my-4">SEMESTER COURSE REGISTRATION CARD</p>
+
+                <table className="w-full my-4 text-sm border border-gray-400">
+                  <tbody>
+                    <tr>
+                      <td className="border border-gray-300 px-2 py-1.5 font-semibold w-1/4">Name</td>
+                      <td className="border border-gray-300 px-2 py-1.5 w-1/4">{user?.full_name ?? "—"}</td>
+                      <td className="border border-gray-300 px-2 py-1.5 font-semibold w-1/4">Roll No.</td>
+                      <td className="border border-gray-300 px-2 py-1.5 w-1/4">{user?.student_roll ?? "—"}</td>
+                    </tr>
+                    <tr>
+                      <td className="border border-gray-300 px-2 py-1.5 font-semibold">Phone No.</td>
+                      <td className="border border-gray-300 px-2 py-1.5">{currentRegistration.student_mobile ?? "—"}</td>
+                      <td className="border border-gray-300 px-2 py-1.5 font-semibold">Semester</td>
+                      <td className="border border-gray-300 px-2 py-1.5">{currentRegistration.semester_name ?? "—"}</td>
+                    </tr>
+                    <tr>
+                      <td className="border border-gray-300 px-2 py-1.5 font-semibold">Academic Session</td>
+                      <td className="border border-gray-300 px-2 py-1.5">{currentRegistration.academic_year ?? "—"}</td>
+                      <td className="border border-gray-300 px-2 py-1.5 font-semibold">Degree Programme</td>
+                      <td className="border border-gray-300 px-2 py-1.5">
+                        {currentRegistration.program_name ?? "—"}{currentRegistration.program_level ? ` (${currentRegistration.program_level})` : ""}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="border border-gray-300 px-2 py-1.5 font-semibold">Department</td>
+                      <td className="border border-gray-300 px-2 py-1.5">{currentRegistration.department_name ?? "—"}</td>
+                      <td className="border border-gray-300 px-2 py-1.5 font-semibold">Major Advisor</td>
+                      <td className="border border-gray-300 px-2 py-1.5">{currentRegistration.major_advisor_name ?? "—"}</td>
+                    </tr>
+                  </tbody>
+                </table>
+
+                <p className="font-bold mt-4 mb-2">Selected Courses</p>
+                {Object.keys(previewGroups).length === 0 ? (
+                  <p className="text-gray-500 italic text-sm">No courses selected</p>
+                ) : (
+                  Object.entries(previewGroups).map(([cat, rows]) => (
+                    <table key={cat} className="w-full text-xs border border-gray-400 mb-3">
+                      <thead>
+                        <tr className="bg-gray-100">
+                          <td colSpan={6} className="border border-gray-300 px-2 py-1 font-bold">
+                            {(CATEGORY_LABELS[cat] ?? cat.replace(/_/g, " ")).toUpperCase()}
+                          </td>
+                        </tr>
+                        <tr className="bg-gray-50">
+                          {["SL No", "Course Title", "Course No.", "Credit Hrs.", "Nature", "Course Instructor"].map((h) => (
+                            <th key={h} className="border border-gray-300 px-2 py-1 text-left">{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {rows.map((row, idx) => (
+                          <tr key={row.id}>
+                            <td className="border border-gray-300 px-2 py-1">{idx + 1}</td>
+                            <td className="border border-gray-300 px-2 py-1">{row.course_title}</td>
+                            <td className="border border-gray-300 px-2 py-1 font-mono">{row.course_number}</td>
+                            <td className="border border-gray-300 px-2 py-1">{row.credits}{row.credit_structure ? `(${row.credit_structure})` : ""}</td>
+                            <td className="border border-gray-300 px-2 py-1">{row.credit_type === "non_credit" ? "Non-Credit" : "Credit"}</td>
+                            <td className="border border-gray-300 px-2 py-1">{row.instructors?.join(", ") || "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  ))
+                )}
+                <p className="text-right font-bold text-sm">Total Credits: {usedCredits}</p>
+
+                <p className="text-sm mt-4">Status: <span className="font-bold">{currentRegistration.status_label}</span></p>
+
+                <div className="grid grid-cols-3 gap-6 mt-10 text-center text-xs">
+                  <div className="border-t border-gray-400 pt-2"><p className="font-semibold">Signature of Student</p></div>
+                  <div className="border-t border-gray-400 pt-2">
+                    <p className="font-semibold">Signature of Major Advisor</p>
+                    {currentRegistration.major_advisor_name && <p className="text-gray-500 mt-0.5">{currentRegistration.major_advisor_name}</p>}
+                  </div>
+                  <div className="border-t border-gray-400 pt-2">
+                    <p className="font-semibold">Signature of Head of the Dept.</p>
+                    {currentRegistration.hod_name && <p className="text-gray-500 mt-0.5">{currentRegistration.hod_name}</p>}
+                  </div>
+                </div>
+              </div>
             </div>
           )}
 

@@ -354,6 +354,12 @@ def _enroll_dict(e: StudentEnrollment, registration: Optional[CourseRegistration
         "credits": e.offering.course.total_credits if e.offering and e.offering.course else 0,
         "category": e.offering.course.category if e.offering and e.offering.course else None,
         "credit_type": e.offering.course.credit_type if e.offering and e.offering.course else None,
+        # On-screen Registration Card Preview task (this revision) — mirrors
+        # the PDF's own "Course Instructor" column; every existing caller of
+        # `_enroll_dict` already eager-loads `offering.faculty_assignments`
+        # (see `_semester_scoped_enrollments` and `offering_enrollments`'s
+        # query below), so this never introduces a lazy-load.
+        "instructors": [fa.faculty.full_name for fa in e.offering.faculty_assignments if fa.faculty] if e.offering else [],
         "registration_id": str(e.registration_id) if e.registration_id else None,
         "status": e.status,
         "status_label": combined_label,
@@ -427,12 +433,39 @@ async def _registration_dict(r: CourseRegistration, db: AsyncSession) -> dict:
     selected_credits = sum(
         e.offering.course.total_credits for e in active if e.offering and e.offering.course
     )
+    # On-screen Registration Card Preview task (this revision) — a handful of
+    # extra, purely-additive display fields so the frontend can render a
+    # PPW-Preview-style on-page mock-up of the printed card without depending
+    # on the Chromium/PDF pipeline at all. Computed independently here (not
+    # refactored to share code with `_build_registration_card_context`, the
+    # PDF's own context builder) so the already-working PDF path is never
+    # touched by this addition — a couple of small extra read-only queries,
+    # no different from what the PDF path already does for the same data.
+    department = await db.get(Department, r.student.department_id) if r.student and r.student.department_id else None
+    semester = await db.get(Semester, r.semester_id)
+    calendar = await db.get(AcademicCalendar, r.calendar_id)
+    ma_id = await _get_major_advisor_id(r.student_id, db)
+    major_advisor = await db.get(User, ma_id) if ma_id else None
+    hod_dept_id = await _student_department_id(r.student_id, db)
+    hod = None
+    if hod_dept_id:
+        hod_result = await db.execute(select(User).where(
+            User.role == UserRole.HOD, User.department_id == hod_dept_id, User.is_active == True,
+        ).limit(1))
+        hod = hod_result.scalar_one_or_none()
     return {
         "id": str(r.id),
         "student_id": str(r.student_id),
         "student_name": r.student.full_name if r.student else None,
         "student_roll": r.student.student_roll if r.student else None,
+        "student_mobile": r.student.mobile if r.student else None,
         "program_name": r.student.program.name if r.student and r.student.program else None,
+        "program_level": r.student.program.level if r.student and r.student.program else None,
+        "department_name": department.name if department else None,
+        "semester_name": semester.name if semester else None,
+        "academic_year": calendar.academic_year if calendar else None,
+        "major_advisor_name": major_advisor.full_name if major_advisor else None,
+        "hod_name": hod.full_name if hod else None,
         "semester_id": str(r.semester_id),
         "calendar_id": str(r.calendar_id),
         "stage": r.stage,
@@ -1092,8 +1125,24 @@ async def offering_enrollments(
     )),
 ):
     await _authorize_offering_management(offering_id, user, db)
+    # MissingGreenlet fix (this revision): `_enroll_dict()` below reads
+    # `e.withdrawal_requests` for every row — that relationship was never
+    # eager-loaded here, so accessing it triggered an implicit lazy load,
+    # which isn't supported under this async session outside of an explicit
+    # async-safe context (`sqlalchemy.exc.MissingGreenlet`). This crashed the
+    # endpoint with a 500 for ANY offering with at least one enrollment (an
+    # offering with zero enrollments never reached `_enroll_dict` at all, so
+    # it looked identical to a genuinely empty course — the frontend has no
+    # error handling on this query and silently falls back to an empty
+    # list). Adding the eager load here fixes it with no change to the
+    # returned data shape or any other behavior.
     q = select(StudentEnrollment).options(
         selectinload(StudentEnrollment.student), selectinload(StudentEnrollment.offering).selectinload(CourseOffering.course),
+        selectinload(StudentEnrollment.withdrawal_requests),
+        # `_enroll_dict` also now reads `offering.faculty_assignments` (the
+        # Registration Card Preview task's new `instructors` field) — eager
+        # load it here too, same MissingGreenlet-avoidance reasoning as above.
+        selectinload(StudentEnrollment.offering).selectinload(CourseOffering.faculty_assignments).selectinload(OfferingFaculty.faculty),
     ).where(StudentEnrollment.offering_id == offering_id)
     if status: q = q.where(StudentEnrollment.status == status)
     result = await db.execute(q.order_by(StudentEnrollment.enrolled_at))

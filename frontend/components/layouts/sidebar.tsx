@@ -1,5 +1,6 @@
 "use client";
 import { usePathname, useRouter } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import { useRole } from "@/stores/auth.store";
 import { cn } from "@/lib/utils";
 import {
@@ -70,6 +71,7 @@ export function AMSSidebar({ collapsed, onToggle }: { collapsed: boolean; onTogg
   const role = useRole();
   const clearAuth = useAuthStore((s) => s.clearAuth);
   const router = useRouter();
+  const qc = useQueryClient();
   // Issue 6: self-service password change available to EVERY role, not just
   // students — surfaced here (near Logout) since it applies regardless of
   // which nav items a given role sees.
@@ -79,6 +81,15 @@ export function AMSSidebar({ collapsed, onToggle }: { collapsed: boolean; onTogg
 
   async function logout() {
     clearAuth();
+    // Cross-account stale-cache fix: logout previously only cleared the auth
+    // store — the single app-wide QueryClient (created once in providers.tsx,
+    // 5-minute staleTime) survives this client-side navigation, so a
+    // freshly-logged-in user (even a different account, in the same browser
+    // tab) could see another session's still-"fresh" cached query results
+    // for up to 5 minutes (e.g. a Course Request list fetched empty just
+    // before a student registered). Clearing the cache on every logout
+    // guarantees the next login always starts from a clean slate.
+    qc.clear();
     router.push("/login");
   }
 

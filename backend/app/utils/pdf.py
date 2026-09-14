@@ -82,6 +82,23 @@ def render_ppw_pdf(html: str) -> bytes:
     (starlette.concurrency.run_in_threadpool) rather than awaited directly,
     to avoid blocking the FastAPI event loop.
     """
+    # Windows subprocess-launch fix (this revision): Playwright's sync API
+    # creates its OWN fresh asyncio event loop inside whichever thread it
+    # runs on (here, a run_in_threadpool worker thread) to drive its
+    # subprocess-backed browser. The event loop *policy* that determines
+    # what kind of loop `asyncio.new_event_loop()` produces is process-wide
+    # (not set anywhere else in this app), and on Windows a loop can come up
+    # as a `SelectorEventLoop` — which has no subprocess support at all
+    # (`NotImplementedError` from `_make_subprocess_transport`) — instead of
+    # the `ProactorEventLoop` Windows subprocesses require. Forcing the
+    # policy here, right before Playwright creates its loop, guarantees a
+    # Proactor loop for it without touching uvicorn's own main event loop
+    # (already running fine, unaffected by a policy set on a worker thread).
+    # No-op on every other platform.
+    import asyncio, sys
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
     try:
         from playwright.sync_api import sync_playwright
         from playwright._impl._errors import Error as PlaywrightError

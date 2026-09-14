@@ -242,7 +242,7 @@ export default function EnrollmentPage() {
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2">
                         <button onClick={() => setDetailsRow(row)} className="flex items-center gap-1 text-xs font-semibold text-[#0D6E6E] hover:underline"><Eye size={12} /> View Details</button>
-                        {row.registration_id && row.registration_stage && cardEligibleStages.includes(row.registration_stage) && (
+                        {row.status !== "withdrawn" && row.registration_id && row.registration_stage && cardEligibleStages.includes(row.registration_stage) && (
                           <button onClick={() => downloadCard.mutate(row.registration_id!)} disabled={downloadCard.isPending}
                             className="flex items-center gap-1 text-xs font-semibold text-[#0D6E6E] hover:underline">
                             <Download size={12} /> Registration Card
