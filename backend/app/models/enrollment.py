@@ -76,6 +76,20 @@ class StudentEnrollment(Base):
     # value (pre-existing rows only) — Course Registration's confirmed chain
     # has no reject path (BUSINESS_LOGIC.md Rule 35); new code never writes it.
     status: Mapped[str]            = mapped_column(String(20), default="pending")
+    # Major/Minor/Supporting/Research/Seminar/Compulsory classification task
+    # (this revision) — deliberately placed on the per-course selection row
+    # (StudentEnrollment), not on the registration-level CourseRegistration
+    # parent, mirroring PPW's own PpwCourse.classification exactly (a
+    # per-course concept, not a per-registration one). Nullable: every
+    # existing enrollment (legacy or otherwise) predates this classification
+    # and simply has no value here — never backfilled. Deliberately reuses
+    # the SAME controlled vocabulary as PpwCourse.classification
+    # (major/minor/supporting/research/seminar/compulsory — see
+    # app/core/classification.py's re-export of PPW_CLASSIFICATIONS) rather
+    # than inventing a second one, and is entirely independent from
+    # `Course.category` (a different, pre-existing, unrelated taxonomy that
+    # this task does not touch).
+    classification: Mapped[str | None] = mapped_column(String(20))
     enrolled_at: Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     processed_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id"))
     processed_at: Mapped[datetime | None]  = mapped_column(DateTime(timezone=True))

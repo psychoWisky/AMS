@@ -4,12 +4,24 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { useRole } from "@/stores/auth.store";
 import { toast } from "sonner";
-import { formatDate, ADMIN_ROLES } from "@/lib/utils";
+import { formatDate } from "@/lib/utils";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { CalendarDays, Plus, ChevronDown, ChevronRight, Clock, BookOpen, Loader2, Trash2 } from "lucide-react";
+import { CalendarDays, Plus, ChevronDown, ChevronRight, Clock, BookOpen, Loader2, Trash2, Pencil } from "lucide-react";
 
-interface Calendar { id: string; name: string; academic_year: string; start_date: string; end_date: string; status: string; }
-interface Semester { id: string; calendar_id: string; name: string; sem_type: string; start_date: string; end_date: string; status: string; registration_start: string | null; exam_start: string | null; result_declaration: string | null; }
+interface Calendar { id: string; name: string; academic_year: string; start_date: string; end_date: string; status: string; description: string | null; }
+interface Semester { id: string; calendar_id: string; name: string; sem_type: string; start_date: string; end_date: string; status: string; registration_start: string | null; registration_end: string | null; exam_start: string | null; exam_end: string | null; result_declaration: string | null; }
+
+// Academic Year/Semester administration task (this revision) — the backend
+// (`academic_calendar.py`) restricts every create/edit/delete/status-change
+// operation on Calendar/Semester to SUPER_ADMIN + ACADEMIC_ADMIN only; the
+// page previously gated its buttons behind the much broader, shared
+// `ADMIN_ROLES` (which also includes registrar/examiner/hod) — those roles
+// could see Create/Delete/status controls here and get a 403 on click. This
+// page-local constant matches the backend's actual `require_roles(...)`
+// exactly, so a control is only ever shown to a role that can actually use
+// it; `ADMIN_ROLES` itself is intentionally left untouched (other pages
+// legitimately rely on its broader membership).
+const CALENDAR_ADMIN_ROLES = ["super_admin", "academic_admin"];
 
 const STATUS_COLOR: Record<string, string> = {
   draft: "bg-gray-100 text-gray-700",
@@ -22,13 +34,18 @@ const STATUS_COLOR: Record<string, string> = {
 export default function CalendarPage() {
   const role = useRole();
   const qc = useQueryClient();
-  const isAdmin = role ? ADMIN_ROLES.includes(role) : false;
+  const isAdmin = role ? CALENDAR_ADMIN_ROLES.includes(role) : false;
   const [expanded, setExpanded] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [showSemCreate, setShowSemCreate] = useState<string | null>(null);
   const [form, setForm] = useState({ name: "", academic_year: "", start_date: "", end_date: "" });
   const [semForm, setSemForm] = useState({ name: "", sem_type: "odd", start_date: "", end_date: "", registration_start: "", exam_start: "", exam_end: "", result_declaration: "" });
   const [deleteTarget, setDeleteTarget] = useState<Calendar | null>(null);
+  const [editCalTarget, setEditCalTarget] = useState<Calendar | null>(null);
+  const [editCalForm, setEditCalForm] = useState({ name: "", academic_year: "", start_date: "", end_date: "" });
+  const [editSemTarget, setEditSemTarget] = useState<Semester | null>(null);
+  const [editSemForm, setEditSemForm] = useState({ name: "", sem_type: "odd", start_date: "", end_date: "", registration_start: "", exam_start: "", exam_end: "", result_declaration: "" });
+  const [deleteSemTarget, setDeleteSemTarget] = useState<Semester | null>(null);
 
   const { data: calendars = [], isLoading } = useQuery<Calendar[]>({
     queryKey: ["ams-calendars"],
@@ -81,6 +98,46 @@ export default function CalendarPage() {
       const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
       toast.error(typeof detail === "string" ? detail : "Failed to delete academic year.");
       setDeleteTarget(null);
+    },
+  });
+
+  // Academic Year/Semester administration task (this revision) — Edit uses
+  // the pre-existing `PUT /academic/calendars/{id}` / `PUT /academic/semesters/{id}`
+  // endpoints (already implemented server-side; this page simply never had
+  // a form for them before). Delete Semester uses the newly-added
+  // `DELETE /academic/semesters/{id}` (mirrors deleteCal's pattern exactly
+  // — backend independently re-validates safety regardless of this UI).
+  const editCal = useMutation({
+    mutationFn: ({ id, data }: { id: string; data: typeof editCalForm }) => api.put(`/academic/calendars/${id}`, data),
+    onSuccess: () => { toast.success("Academic year updated."); qc.invalidateQueries({ queryKey: ["ams-calendars"] }); setEditCalTarget(null); },
+    onError: (err: unknown) => {
+      const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+      const msg = Array.isArray(detail) ? detail.map((e: { msg: string }) => e.msg).join(", ") : (typeof detail === "string" ? detail : "Failed to update academic year.");
+      toast.error(msg);
+    },
+  });
+
+  const editSem = useMutation({
+    mutationFn: ({ id, data }: { id: string; data: typeof editSemForm }) => api.put(`/academic/semesters/${id}`, data),
+    onSuccess: () => { toast.success("Semester updated."); qc.invalidateQueries({ queryKey: ["ams-semesters", expanded] }); setEditSemTarget(null); },
+    onError: (err: unknown) => {
+      const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+      const msg = Array.isArray(detail) ? detail.map((e: { msg: string }) => e.msg).join(", ") : (typeof detail === "string" ? detail : "Failed to update semester.");
+      toast.error(msg);
+    },
+  });
+
+  const deleteSem = useMutation({
+    mutationFn: (id: string) => api.delete(`/academic/semesters/${id}`),
+    onSuccess: () => {
+      toast.success("Semester deleted.");
+      qc.invalidateQueries({ queryKey: ["ams-semesters", expanded] });
+      setDeleteSemTarget(null);
+    },
+    onError: (err: unknown) => {
+      const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+      toast.error(typeof detail === "string" ? detail : "Failed to delete semester.");
+      setDeleteSemTarget(null);
     },
   });
 
@@ -153,6 +210,20 @@ export default function CalendarPage() {
                   {["draft","active","closed"].map((s) => <option key={s} value={s}>{s}</option>)}
                 </select>
               )}
+              {/* Edit (Academic Year/Semester administration task, this
+                  revision) — uses the pre-existing PUT endpoint; available
+                  regardless of status (editing a non-draft year's dates/name
+                  is not restricted by any documented business rule, unlike
+                  delete). */}
+              {isAdmin && (
+                <button onClick={(e) => {
+                  e.stopPropagation();
+                  setEditCalForm({ name: cal.name, academic_year: cal.academic_year, start_date: cal.start_date, end_date: cal.end_date });
+                  setEditCalTarget(cal);
+                }} title="Edit academic year" className="p-1.5 text-gray-500 hover:bg-gray-100 rounded-lg">
+                  <Pencil size={16} />
+                </button>
+              )}
               {/* Delete (this task's confirmed requirement) — only ever shown
                   for a DRAFT year; the backend independently rejects any
                   attempt on a non-DRAFT one regardless of this check. */}
@@ -224,6 +295,29 @@ export default function CalendarPage() {
                           {["upcoming","active","completed"].map((s) => <option key={s} value={s}>{s}</option>)}
                         </select>
                       )}
+                      {/* Edit/Delete Semester (Academic Year/Semester
+                          administration task, this revision) — Delete uses
+                          the newly-added DELETE endpoint; the backend
+                          independently blocks it if the semester has any
+                          course offerings/registrations/admit cards,
+                          regardless of this button being shown. */}
+                      {isAdmin && (
+                        <button onClick={() => {
+                          setEditSemForm({
+                            name: sem.name, sem_type: sem.sem_type, start_date: sem.start_date, end_date: sem.end_date,
+                            registration_start: sem.registration_start ?? "", exam_start: sem.exam_start ?? "",
+                            exam_end: sem.exam_end ?? "", result_declaration: sem.result_declaration ?? "",
+                          });
+                          setEditSemTarget(sem);
+                        }} title="Edit semester" className="p-1.5 text-gray-500 hover:bg-gray-100 rounded-lg">
+                          <Pencil size={14} />
+                        </button>
+                      )}
+                      {isAdmin && (
+                        <button onClick={() => setDeleteSemTarget(sem)} title="Delete semester" className="p-1.5 text-red-600 hover:bg-red-50 rounded-lg">
+                          <Trash2 size={14} />
+                        </button>
+                      )}
                     </div>
                   ))}
                   {semesters.filter((s) => s.calendar_id === cal.id).length === 0 && (
@@ -244,6 +338,87 @@ export default function CalendarPage() {
           confirmLabel={deleteCal.isPending ? "Deleting…" : "Yes, Delete"}
           onCancel={() => setDeleteTarget(null)}
           onConfirm={() => deleteCal.mutate(deleteTarget.id)}
+        />
+      )}
+
+      {/* Edit Academic Year modal (Academic Year/Semester administration
+          task, this revision) */}
+      {editCalTarget && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
+            <h3 className="text-xl font-bold mb-4">Edit Academic Year</h3>
+            <div className="space-y-3">
+              {[["Name", "name", "text"], ["Academic Year", "academic_year", "text"], ["Start Date", "start_date", "date"], ["End Date", "end_date", "date"]].map(([label, key, type]) => (
+                <div key={key}>
+                  <label className="block text-base font-semibold text-gray-700 mb-1">{label}</label>
+                  <input type={type} value={(editCalForm as Record<string, string>)[key]}
+                    onChange={(e) => setEditCalForm((f) => ({ ...f, [key]: e.target.value }))}
+                    className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+                </div>
+              ))}
+            </div>
+            <div className="flex gap-3 mt-5">
+              <button onClick={() => setEditCalTarget(null)} className="flex-1 py-2.5 border border-gray-200 rounded-xl text-base font-medium hover:bg-gray-50">Cancel</button>
+              <button
+                onClick={() => {
+                  if (!editCalForm.name.trim() || !editCalForm.academic_year.trim() || !editCalForm.start_date || !editCalForm.end_date) {
+                    toast.error("Please fill in all fields before saving."); return;
+                  }
+                  editCal.mutate({ id: editCalTarget.id, data: editCalForm });
+                }}
+                disabled={editCal.isPending}
+                className="flex-1 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-base font-bold hover:bg-[#178F8F] disabled:opacity-60">
+                {editCal.isPending ? "Saving…" : "Save"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Semester modal */}
+      {editSemTarget && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6">
+            <h3 className="text-xl font-bold mb-4">Edit Semester</h3>
+            <div className="grid grid-cols-2 gap-3">
+              {[["Semester Name", "name", "text"], ["Type", "sem_type", "text"],
+                ["Start Date", "start_date", "date"], ["End Date", "end_date", "date"],
+                ["Reg Start", "registration_start", "date"], ["Exam Start", "exam_start", "date"],
+                ["Exam End", "exam_end", "date"], ["Result Declaration", "result_declaration", "date"]].map(([label, key, type]) => (
+                <div key={key}>
+                  <label className="block text-base font-semibold text-gray-600 mb-0.5">{label}</label>
+                  <input type={type} value={(editSemForm as Record<string, string>)[key]}
+                    onChange={(e) => setEditSemForm((f) => ({ ...f, [key]: e.target.value }))}
+                    className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-base focus:outline-none focus:ring-1 focus:ring-[#0D6E6E]" />
+                </div>
+              ))}
+            </div>
+            <div className="flex gap-3 mt-5">
+              <button onClick={() => setEditSemTarget(null)} className="flex-1 py-2.5 border border-gray-200 rounded-xl text-base font-medium hover:bg-gray-50">Cancel</button>
+              <button
+                onClick={() => {
+                  if (!editSemForm.name.trim() || !editSemForm.start_date || !editSemForm.end_date) {
+                    toast.error("Semester name, start date and end date are required."); return;
+                  }
+                  editSem.mutate({ id: editSemTarget.id, data: editSemForm });
+                }}
+                disabled={editSem.isPending}
+                className="flex-1 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-base font-bold hover:bg-[#178F8F] disabled:opacity-60">
+                {editSem.isPending ? "Saving…" : "Save"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Semester confirmation */}
+      {deleteSemTarget && (
+        <ConfirmDialog
+          title="Delete Semester"
+          message={`Delete the semester "${deleteSemTarget.name}"? This cannot be undone. This will fail if the semester has any course offerings, registrations, or admit cards.`}
+          confirmLabel={deleteSem.isPending ? "Deleting…" : "Yes, Delete"}
+          onCancel={() => setDeleteSemTarget(null)}
+          onConfirm={() => deleteSem.mutate(deleteSemTarget.id)}
         />
       )}
     </div>

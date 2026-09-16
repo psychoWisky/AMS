@@ -37,6 +37,12 @@ interface Ppw {
   id: string; status: string;
   field_of_investigation: string | null; minor_field: string | null;
   supporting_field: string | null; research_title: string | null;
+  // Discipline-derivation task (this revision) — backend-derived, never
+  // client-editable (see ppw.py's PpwIn docstring): Major = the student's
+  // own department; Minor/Supporting = the department of the actually
+  // selected Minor/2nd-Supporting course.
+  major_discipline_name: string | null; minor_discipline_name: string | null;
+  supporting_discipline_name: string | null;
   submitted_at: string | null;
   classifications: ClassificationSummary[];
   total_credits: number;
@@ -109,6 +115,18 @@ function PpwEditor({ ppw }: { ppw: Ppw }) {
   const qc = useQueryClient();
   const [addingFor, setAddingFor] = useState<string | null>(null);
   const [courseSearch, setCourseSearch] = useState("");
+  // PPW Add Course dialog task (this revision) — a genuine, INDEPENDENT
+  // department filter (unlike Course Registration's classification
+  // dropdown, this really does filter the list). Reset whenever the dialog
+  // is opened for a different classification (see `setAddingFor` calls
+  // below). Backend-authoritative regardless: `add_ppw_course` never trusts
+  // a client-supplied department — see ppw.py's docstring.
+  const [departmentFilter, setDepartmentFilter] = useState("");
+
+  const { data: departments = [] } = useQuery<{ id: string; name: string; code: string }[]>({
+    queryKey: ["ams-departments"],
+    queryFn: async () => (await api.get("/departments")).data,
+  });
   // Phase 2: editable while draft OR reverted (student may correct and resubmit) —
   // was "draft"-only in Phase 1. `is_editable` is server-computed (ppw.py's
   // _EDITABLE_STATUSES), never re-derived here, so the UI can never drift from
@@ -116,16 +134,26 @@ function PpwEditor({ ppw }: { ppw: Ppw }) {
   const isDraft = ppw.is_editable;
   const isReverted = ppw.status === "reverted";
 
+  // Classification-aware narrowing (pre-existing) + the new, genuine
+  // Department filter (this revision) — the backend (`GET /ppw/available-
+  // courses?classification=...&department_id=...`) narrows department for
+  // major/minor/supporting per the approved rules (own department for
+  // Major; excludes own for Minor, narrowed further once a Minor department
+  // is established; LPM-only for the first Supporting pick, LPM+non-Major/
+  // Minor once one Supporting selection exists), AND applies the student's
+  // own chosen `department_id` on top as a plain filter. Both are UX only,
+  // never the authorization boundary (add_ppw_course independently
+  // re-validates regardless of what this list contains).
   const { data: availableCourses = [] } = useQuery<AvailableCourse[]>({
-    queryKey: ["ams-ppw-available-courses"],
-    queryFn: async () => (await api.get("/ppw/available-courses")).data,
+    queryKey: ["ams-ppw-available-courses", addingFor, departmentFilter],
+    queryFn: async () => (await api.get("/ppw/available-courses", {
+      params: { classification: addingFor, department_id: departmentFilter || undefined },
+    })).data,
     enabled: !!addingFor,
   });
 
   const [form, setForm] = useState(() => ({
     field_of_investigation: ppw.field_of_investigation ?? "",
-    minor_field: ppw.minor_field ?? "",
-    supporting_field: ppw.supporting_field ?? "",
     research_title: ppw.research_title ?? "",
   }));
 
@@ -253,8 +281,6 @@ function PpwEditor({ ppw }: { ppw: Ppw }) {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {([
             ["field_of_investigation", "Field of Investigation for Thesis / Project / Dissertation *"],
-            ["minor_field", "Minor Field *"],
-            ["supporting_field", "Supporting Field *"],
             ["research_title", "Research Title *"],
           ] as const).map(([key, label]) => (
             <div key={key}>
@@ -262,6 +288,24 @@ function PpwEditor({ ppw }: { ppw: Ppw }) {
               <textarea value={form[key]} disabled={!isDraft} rows={2}
                 onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
                 className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E] disabled:bg-gray-50 disabled:text-gray-600 resize-none" />
+            </div>
+          ))}
+        </div>
+
+        {/* Discipline-derivation task (this revision): Major/Minor/Supporting
+            Discipline are now read-only, derived directly from the student's
+            own department and the actual selected Minor/Supporting courses
+            below — never free text the student can type independently of
+            what they actually selected. */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4 pt-4 border-t border-gray-100">
+          {([
+            ["Major Discipline", ppw.major_discipline_name],
+            ["Minor Discipline", ppw.minor_discipline_name],
+            ["Supporting Discipline", ppw.supporting_discipline_name],
+          ] as const).map(([label, value]) => (
+            <div key={label}>
+              <p className="text-sm text-gray-500">{label}</p>
+              <p className="font-semibold text-gray-800">{value ?? "—"}</p>
             </div>
           ))}
         </div>
@@ -288,7 +332,7 @@ function PpwEditor({ ppw }: { ppw: Ppw }) {
                   </p>
                 </div>
                 {isDraft && (
-                  <button onClick={() => { setAddingFor(c.classification); setCourseSearch(""); }}
+                  <button onClick={() => { setAddingFor(c.classification); setCourseSearch(""); setDepartmentFilter(""); }}
                     className="flex items-center gap-1.5 px-3 py-1.5 bg-[#0D6E6E] text-white rounded-lg text-sm font-semibold hover:bg-[#178F8F]">
                     <Plus size={14} /> Add Course
                   </button>
@@ -329,6 +373,16 @@ function PpwEditor({ ppw }: { ppw: Ppw }) {
                     <input autoFocus value={courseSearch} onChange={(e) => setCourseSearch(e.target.value)} placeholder="Search course code or title…"
                       className="w-full pl-8 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
                   </div>
+                  {/* PPW Add Course dialog task (this revision) — a genuine
+                      Department filter (unlike Course Registration's
+                      classification dropdown, this really does filter the
+                      list; backend re-validates authorization regardless —
+                      see list_available_courses's docstring). */}
+                  <select value={departmentFilter} onChange={(e) => setDepartmentFilter(e.target.value)}
+                    className="w-full mb-2 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
+                    <option value="">All Departments</option>
+                    {departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                  </select>
                   <div className="max-h-48 overflow-y-auto border border-gray-200 rounded-lg bg-white">
                     {filteredCourses.length === 0 ? (
                       <p className="text-sm text-gray-500 p-3">No matching courses.</p>

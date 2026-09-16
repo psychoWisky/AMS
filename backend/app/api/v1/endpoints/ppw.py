@@ -21,7 +21,7 @@ from typing import List, Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel, field_validator
@@ -48,6 +48,11 @@ from app.api.v1.endpoints.research import _student_department_id
 # PPW course-selection task — shared programme-level eligibility check
 # (see app/core/student_scope.py's docstring for why this lives there).
 from app.core.student_scope import course_level_matches
+# Major/Minor/Supporting discipline validation (this task) — shared with
+# Course Registration (enrollment.py); see its docstring for the full rules.
+from app.core.classification import (
+    ClassificationError, LPM_DEPARTMENT_CODE, get_lpm_department_id, validate_major, validate_minor, validate_supporting,
+)
 
 router = APIRouter(prefix="/ppw", tags=["PPW"])
 logger = logging.getLogger(__name__)
@@ -96,12 +101,20 @@ _ENDORSEMENT_ROWS = [
 
 
 class PpwIn(BaseModel):
-    """All 4 fields optional at creation — a draft may start empty (Section 1
-    lists these as PPW-required, but Section 8 confirms drafts are editable/
-    incremental; non-emptiness is enforced only at submit time, see submit_ppw)."""
+    """Discipline-derivation task (this revision): `minor_field`/
+    `supporting_field` were REMOVED from this input schema — they are no
+    longer arbitrary client-provided text. Both are now derived and written
+    server-side, from the actual selected Minor/Supporting courses'
+    departments, by `_recompute_ppw_discipline_fields` (called after every
+    course add/remove) — a client can no longer set either field to a value
+    unrelated to what was actually selected. `field_of_investigation`/
+    `research_title` remain freely editable — this task's approved rules do
+    not apply to them (they are not disciplines derived from course
+    selection). A student may start a draft with these two fields empty
+    (Section 1 lists them as required, but Section 8 confirms drafts are
+    editable/incremental; non-emptiness is enforced only at submit time, see
+    submit_ppw)."""
     field_of_investigation: Optional[str] = None
-    minor_field: Optional[str] = None
-    supporting_field: Optional[str] = None
     research_title: Optional[str] = None
 
 
@@ -326,6 +339,11 @@ def _ppw_dict(p: Ppw) -> dict:
             "course_title": pc.course.title if pc.course else None,
             "credit_structure": pc.course.credit_structure if pc.course else None,
             "credits": pc.course.total_credits if pc.course else 0,
+            # Discipline-derivation task (this revision) — `department_id`
+            # added alongside the pre-existing `department_name` so the
+            # frontend can compare against the student's own department
+            # without a second lookup.
+            "department_id": str(pc.course.department_id) if pc.course and pc.course.department_id else None,
             "department_name": pc.course.department.name if pc.course and pc.course.department else None,
         })
     # PPW credit-summary correction (this task's confirmed business
@@ -348,6 +366,18 @@ def _ppw_dict(p: Ppw) -> dict:
             "courses": by_class.get(c, []),
         })
 
+    # Discipline-derivation task (this revision) — Major/Minor/Supporting
+    # Discipline are derived here, purely from already-loaded relationships,
+    # never stored redundantly: Major = the student's own department (always
+    # known, independent of course selection); Minor = the (validated-
+    # single) department of every "minor"-classified selection; Supporting =
+    # see `_supporting_discipline_name` below (order-independent bug fix).
+    major_discipline_name = p.student.department.name if p.student and p.student.department else None
+    minor_courses = by_class.get("minor", [])
+    minor_discipline_name = minor_courses[0]["department_name"] if minor_courses else None
+    supporting_pcs = [pc for pc in p.courses if pc.classification == "supporting"]
+    supporting_discipline_name = _supporting_discipline_name(supporting_pcs)
+
     return {
         "id": str(p.id),
         "student_id": str(p.student_id),
@@ -356,6 +386,14 @@ def _ppw_dict(p: Ppw) -> dict:
         "minor_field": p.minor_field,
         "supporting_field": p.supporting_field,
         "research_title": p.research_title,
+        # Discipline-derivation task (this revision) — the authoritative,
+        # backend-derived values; `minor_field`/`supporting_field` above are
+        # kept only for backward-compatible display (they are now written
+        # by `_recompute_ppw_discipline_fields` from these SAME derivations,
+        # never from client-supplied text — see PpwIn's docstring).
+        "major_discipline_name": major_discipline_name,
+        "minor_discipline_name": minor_discipline_name,
+        "supporting_discipline_name": supporting_discipline_name,
         "submitted_at": p.submitted_at.isoformat() if p.submitted_at else None,
         "created_at": p.created_at.isoformat(),
         "updated_at": p.updated_at.isoformat(),
@@ -363,6 +401,35 @@ def _ppw_dict(p: Ppw) -> dict:
         "total_credits": total_credits,
         "header": _student_header(p.student),
     }
+
+
+def _supporting_discipline_name(supporting_pcs: list["PpwCourse"]) -> Optional[str]:
+    """Supporting Discipline (bug fix, this revision — see
+    `app/core/classification.py`'s docstring for the full investigation):
+    the department of whichever Supporting selection is NOT LPM, identified
+    by `Department.code` (never by name, never by insertion order/`sl_no`).
+    Only when BOTH selections are LPM does Discipline become LPM itself
+    (Example A). Returns `None` until exactly two Supporting selections
+    exist — an incomplete pair has no discipline yet, matching the
+    structural rule that Supporting requires exactly two courses."""
+    if len(supporting_pcs) < 2:
+        return None
+    non_lpm = [pc for pc in supporting_pcs if pc.course and pc.course.department and pc.course.department.code != LPM_DEPARTMENT_CODE]
+    chosen = non_lpm[0] if non_lpm else supporting_pcs[0]
+    return chosen.course.department.name if chosen.course and chosen.course.department else None
+
+
+def _recompute_ppw_discipline_fields(p: Ppw) -> None:
+    """Overwrites `Ppw.minor_field`/`Ppw.supporting_field` from the actual
+    selected courses' departments — called after every add/remove of a
+    minor/supporting `PpwCourse` (never left to whatever a client PATCH
+    might have tried to set — `PpwIn` no longer even accepts these two
+    fields, see its docstring). Pure/no DB access: relies on `p.courses`
+    already being loaded (every caller uses `_PPW_LOAD_OPTIONS`)."""
+    minor = [pc for pc in p.courses if pc.classification == "minor"]
+    supporting = [pc for pc in p.courses if pc.classification == "supporting"]
+    p.minor_field = (minor[0].course.department.name if minor and minor[0].course and minor[0].course.department else None)
+    p.supporting_field = _supporting_discipline_name(supporting)
 
 
 _PPW_LOAD_OPTIONS = (
@@ -391,6 +458,7 @@ async def _get_owned_ppw(ppw_id: UUID, user: User, db: AsyncSession, require_dra
 
 @router.get("/available-courses")
 async def list_available_courses(
+    classification: Optional[str] = None, department_id: Optional[UUID] = None,
     db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.STUDENT)),
 ):
     """Student-department is NO LONGER used to restrict which courses a
@@ -414,7 +482,29 @@ async def list_available_courses(
     courses.py/enrollment.py — see `course_level_matches`). This filter is
     applied here (list) AND independently re-validated in `add_ppw_course`
     (selection) — this list is display-only and is never trusted as the
-    authorization boundary."""
+    authorization boundary.
+
+    Discipline-derivation task (this revision) — the optional `classification`
+    query param makes this list classification-aware (Section 5's explicit
+    requirement), purely for UX; `add_ppw_course` re-validates independently
+    regardless of what this param was or whether it was even supplied:
+    - major: only the student's own department.
+    - minor: excludes the student's own department; if a Minor selection
+      already exists, narrowed further to that exact department (a student
+      already committed to one Minor department cannot browse others).
+    - supporting: if the student has 0 Supporting selections so far, only
+      LPM (guides the required "one from LPM" pick); with exactly 1 already
+      selected, LPM + every department except the student's Major/Minor.
+    - research/seminar/compulsory/omitted: unchanged, no department filter.
+
+    PPW Add Course dialog task (this revision) — the optional `department_id`
+    is a genuine, INDEPENDENT filter (unlike Course Registration's
+    classification dropdown, which is an identifier, not a filter): it is a
+    plain AND-condition on top of whatever the `classification` narrowing
+    above already computed. Like `classification`, this is display-only —
+    `add_ppw_course` never trusts a client-supplied department for
+    authorization; it always re-derives the course's actual department from
+    the database row itself."""
     scope = await _resolve_student_scope(user, db)
     if not scope:
         return []
@@ -423,6 +513,52 @@ async def list_available_courses(
         .options(selectinload(Course.department))
         .where(Course.status == "active", Course.program_level == scope["level"])
     )
+
+    if classification in ("major", "minor", "supporting"):
+        ppw_result = await db.execute(
+            select(Ppw).options(*_PPW_LOAD_OPTIONS).where(Ppw.student_id == user.id)
+        )
+        existing_ppw = ppw_result.scalar_one_or_none()
+        existing_courses = existing_ppw.courses if existing_ppw else []
+        student_department_id = user.department_id
+
+        if classification == "major":
+            if student_department_id:
+                q = q.where(Course.department_id == student_department_id)
+        elif classification == "minor":
+            existing_minor_dept_id = next(
+                (pc.course.department_id for pc in existing_courses if pc.classification == "minor" and pc.course), None,
+            )
+            if existing_minor_dept_id:
+                q = q.where(Course.department_id == existing_minor_dept_id)
+            elif student_department_id:
+                q = q.where(Course.department_id != student_department_id)
+        elif classification == "supporting":
+            lpm_department_id = await get_lpm_department_id(db)
+            existing_supporting_dept_ids = [
+                pc.course.department_id for pc in existing_courses if pc.classification == "supporting" and pc.course
+            ]
+            if len(existing_supporting_dept_ids) == 0:
+                if lpm_department_id:
+                    q = q.where(Course.department_id == lpm_department_id)
+            else:
+                existing_minor_dept_id = next(
+                    (pc.course.department_id for pc in existing_courses if pc.classification == "minor" and pc.course), None,
+                )
+                exclude = {d for d in (student_department_id, existing_minor_dept_id) if d}
+                if lpm_department_id:
+                    conditions = [Course.department_id == lpm_department_id]
+                    if exclude:
+                        conditions.append(Course.department_id.not_in(exclude))
+                    else:
+                        conditions.append(Course.department_id.is_not(None))
+                    q = q.where(or_(*conditions))
+                elif exclude:
+                    q = q.where(Course.department_id.not_in(exclude))
+
+    if department_id:
+        q = q.where(Course.department_id == department_id)
+
     result = await db.execute(q.order_by(Course.course_number))
     return [{
         "id": str(c.id), "course_number": c.course_number, "title": c.title,
@@ -603,6 +739,39 @@ async def add_ppw_course(
     if not course_level_matches(course.program_level, scope["level"]):
         raise HTTPException(403, "This course is not available to your programme level.")
 
+    # Major/Minor/Supporting discipline task (this revision) — the
+    # authoritative backend check. `course.department_id` is read from the
+    # DB record itself (never client-supplied — `PpwCourseIn` has no
+    # department field at all), and the student's own department comes from
+    # their authenticated `user` row, never the request body. `p.courses`
+    # is already loaded with `course.department` (see `_PPW_LOAD_OPTIONS`),
+    # so every existing selection's department is available with no extra
+    # query.
+    student_department_id = user.department_id
+    existing_minor_dept_id = next(
+        (pc.course.department_id for pc in p.courses if pc.classification == "minor" and pc.course), None,
+    )
+    existing_supporting_dept_ids = [
+        pc.course.department_id for pc in sorted(
+            (x for x in p.courses if x.classification == "supporting" and x.course), key=lambda x: x.sl_no,
+        )
+    ]
+    try:
+        if body.classification == "major":
+            validate_major(course.department_id, student_department_id)
+        elif body.classification == "minor":
+            validate_minor(course.department_id, student_department_id, existing_minor_dept_id)
+        elif body.classification == "supporting":
+            lpm_department_id = await get_lpm_department_id(db)
+            major_department_id = student_department_id  # Major Discipline is always the student's own department
+            validate_supporting(
+                course.department_id, lpm_department_id, major_department_id, existing_minor_dept_id,
+                existing_supporting_dept_ids,
+            )
+        # research/seminar/compulsory: no department restriction — unchanged.
+    except ClassificationError as exc:
+        raise HTTPException(400, str(exc))
+
     count_result = await db.execute(select(PpwCourse).where(PpwCourse.ppw_id == ppw_id, PpwCourse.classification == body.classification))
     next_sl_no = len(count_result.scalars().all()) + 1
 
@@ -613,6 +782,23 @@ async def add_ppw_course(
     except IntegrityError:
         await db.rollback()
         raise HTTPException(409, "This course has already been added to your PPW.")
+
+    # Recompute minor_field/supporting_field from the now-updated selection
+    # (discipline-derivation task) — reload with courses eager-loaded since
+    # the in-memory `p` doesn't include the just-added `pc` in `p.courses`.
+    # `populate_existing=True` is required here, not optional: `p` (from
+    # `_get_owned_ppw` earlier in this same function) is already in the
+    # session's identity map, and without this flag a re-SELECT can return
+    # that same object with its `courses` collection left un-refreshed
+    # (SQLAlchemy does not always know to re-run a `selectinload` against an
+    # already-populated relationship) — silently recomputing from STALE
+    # course data instead of the row just committed.
+    result = await db.execute(
+        select(Ppw).options(*_PPW_LOAD_OPTIONS).where(Ppw.id == ppw_id).execution_options(populate_existing=True)
+    )
+    p = result.scalar_one()
+    _recompute_ppw_discipline_fields(p)
+    await db.commit()
     return {"id": str(pc.id), "message": "Course added."}
 
 
@@ -626,6 +812,17 @@ async def remove_ppw_course(
     if not pc or pc.ppw_id != ppw_id:
         raise HTTPException(404, "Selected course not found on this PPW.")
     await db.delete(pc)
+    await db.commit()
+
+    # Discipline-derivation task — removing the sole Minor/Supporting
+    # selection must clear the now-stale derived field, not leave it behind.
+    # `populate_existing=True` — see the identical reload in `add_ppw_course`
+    # for why this is required, not optional.
+    result = await db.execute(
+        select(Ppw).options(*_PPW_LOAD_OPTIONS).where(Ppw.id == ppw_id).execution_options(populate_existing=True)
+    )
+    p = result.scalar_one()
+    _recompute_ppw_discipline_fields(p)
     await db.commit()
 
 

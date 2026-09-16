@@ -36,6 +36,12 @@ interface EnrollmentItem {
   // them): grouping/instructor detail so the on-screen preview can mirror
   // the printed card's course table without depending on the PDF pipeline.
   category?: string | null; credit_structure?: string; credit_type?: string | null; instructors?: string[];
+  // Major/Minor/Supporting discipline task (this revision) — this
+  // selection's classification (if any) and the OFFERING's own department
+  // (Course Registration is offering-based — see `_enroll_dict`'s
+  // docstring), used to derive which departments remain legal for the
+  // NEXT Minor/Supporting pick (see `useMinorSupportingState` below).
+  classification?: string | null; department_id?: string | null; department_name?: string | null;
 }
 // Minimal shape consumed from the pre-existing, semester-scoped `/enrollment/my`
 // endpoint (unchanged — already used by "My Courses") — reused here only as a
@@ -43,6 +49,7 @@ interface EnrollmentItem {
 interface MyEnrollmentItem {
   id: string; offering_id: string; course_number: string; course_title: string; credits: number;
   status: string; status_label: string; remarks: string | null;
+  classification?: string | null; department_id?: string | null; department_name?: string | null;
   withdrawal_request: { status: string; status_label: string } | null;
 }
 interface Registration {
@@ -64,6 +71,10 @@ interface Registration {
   program_name: string | null; program_level: string | null; department_name: string | null;
   semester_name: string | null; academic_year: string | null;
   major_advisor_name: string | null; hod_name: string | null; student_mobile: string | null;
+  // Major/Minor/Supporting discipline task (this revision) — backend-
+  // derived (see `_registration_dict`'s docstring), never client text.
+  major_discipline_name: string | null; minor_discipline_name: string | null;
+  supporting_discipline_name: string | null;
 }
 
 // Registration Card Preview task (this revision) — mirrors the PDF's own
@@ -123,6 +134,20 @@ export default function CourseRegistrationPage() {
   // departments' courses. "" = All Departments (the default).
   const [departmentFilter, setDepartmentFilter] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Student Classification task (this revision) — this is an IDENTIFIER the
+  // student assigns to the course(s) they are about to select ("I am
+  // selecting this as a Major course"), never a filter on `Course.category`
+  // (a separate, pre-existing, unrelated concept — see the Offering
+  // interface's own `category` field, untouched by this control). Defaults
+  // to "major" (the first of exactly four allowed values — Major/Minor/
+  // Supporting/Compulsory; Research/Seminar are PPW-only classifications
+  // and are deliberately not offered here). Every course checked in ONE
+  // batch shares this classification; the backend independently
+  // re-validates every selection regardless of this value (see
+  // `register_courses`'s classification validation) — this control can
+  // never bypass authorization.
+  const [classification, setClassification] = useState("major");
+  const [courseSearch, setCourseSearch] = useState("");
   const [confirmSubmit, setConfirmSubmit] = useState(false);
   const [confirmCard, setConfirmCard] = useState(false);
   const [withdrawConfirm, setWithdrawConfirm] = useState<EnrollmentItem | null>(null);
@@ -203,6 +228,7 @@ export default function CourseRegistrationPage() {
       id: e.id, offering_id: e.offering_id, course_number: e.course_number, course_title: e.course_title,
       credits: e.credits, status: e.status, status_label: e.status_label, remarks: e.remarks,
       withdrawal_request: e.withdrawal_request,
+      classification: e.classification, department_id: e.department_id, department_name: e.department_name,
     }));
   // Selected-Courses/credit fix (this revision): prefer the backend's
   // authoritative `selected_credits` (semester-scoped, includes legacy
@@ -214,7 +240,53 @@ export default function CourseRegistrationPage() {
   const usedCredits = currentRegistration?.selected_credits ?? activeItems.reduce((sum, it) => sum + (it.credits || 0), 0);
   const remainingCredits = MAX_SEMESTER_CREDITS - usedCredits;
   const registeredOfferingIds = new Set(activeItems.map((it) => it.offering_id));
-  const availableOfferings = offerings.filter((o) => !registeredOfferingIds.has(o.id));
+  const baseAvailableOfferings = offerings.filter((o) => !registeredOfferingIds.has(o.id));
+
+  // Student Classification task (this revision) — three INDEPENDENT
+  // dimensions, composed together (AND), mirroring PPW's identical pattern
+  // (see ppw/page.tsx and the backend's GET /ppw/available-courses
+  // docstring): (1) classification-aware department narrowing — which
+  // department(s) are LEGAL for the chosen classification, per the approved
+  // Major/Minor/Supporting rules; (2) the student's own, separately-chosen
+  // Department filter; (3) free-text search. None of this ever touches
+  // `Course.category` — a course whose category is e.g. "research" remains
+  // fully visible/selectable under any classification, exactly as required
+  // (the student, not `Course.category`, decides how a course is being
+  // used). All of this is UX only, never the authorization boundary —
+  // `register_courses` independently re-validates every selection's
+  // department regardless of what this client-side filter shows.
+  const lpmDepartmentId = departments.find((d) => d.code === "LPM")?.id;
+  const existingMinorDeptId = activeItems.find((it) => it.classification === "minor")?.department_id ?? null;
+  const existingSupportingDeptIds = activeItems
+    .filter((it) => it.classification === "supporting")
+    .map((it) => it.department_id)
+    .filter((id): id is string => !!id);
+  function classificationAllowsDepartment(o: Offering): boolean {
+    if (classification === "major") return o.department_id === user?.department_id;
+    if (classification === "minor") {
+      if (existingMinorDeptId) return o.department_id === existingMinorDeptId;
+      return o.department_id !== user?.department_id;
+    }
+    if (classification === "supporting") {
+      if (existingSupportingDeptIds.length === 0) return !!lpmDepartmentId && o.department_id === lpmDepartmentId;
+      const isLpm = !!lpmDepartmentId && o.department_id === lpmDepartmentId;
+      if (isLpm) return true;
+      return o.department_id !== user?.department_id && o.department_id !== existingMinorDeptId;
+    }
+    return true; // compulsory — no department restriction invented; never Course.category-based.
+  }
+  const availableOfferings = baseAvailableOfferings.filter((o) => {
+    if (!classificationAllowsDepartment(o)) return false;
+    // Department filter (independent dimension — Part D): a plain,
+    // student-chosen AND-filter, composed with the classification's own
+    // narrowing above rather than disabled/mutually-exclusive with it — a
+    // student may legitimately combine "Major Courses" + "Department: VETM"
+    // in one query, exactly as specified.
+    if (departmentFilter && o.department_id !== departmentFilter) return false;
+    const q = courseSearch.trim().toLowerCase();
+    if (q && !o.course_number.toLowerCase().includes(q) && !o.course_title.toLowerCase().includes(q)) return false;
+    return true;
+  });
   const selectedCredits = Array.from(selected).reduce((sum, id) => {
     const o = availableOfferings.find((x) => x.id === id);
     return sum + (o?.credits || 0);
@@ -240,6 +312,11 @@ export default function CourseRegistrationPage() {
   const submitRegistration = useMutation({
     mutationFn: () => api.post("/enrollment/register", {
       calendar_id: calendarId, semester_id: semesterId, offering_ids: Array.from(selected),
+      // Major/Minor/Supporting discipline task (this revision) — every
+      // offering in this batch shares the currently-selected classification
+      // (omitted entirely when unclassified, preserving the exact
+      // pre-existing request shape for that case).
+      ...(classification ? { classifications: Object.fromEntries(Array.from(selected).map((id) => [id, classification])) } : {}),
     }),
     onSuccess: () => { toast.success("Courses added for approval."); setSelected(new Set()); invalidateAll(); },
     onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed to submit registration."),
@@ -314,15 +391,13 @@ export default function CourseRegistrationPage() {
           <option value="">Select Semester…</option>
           {semesters.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
         </select>
-        {/* Department filter (this task's confirmed requirement) — a
-            student's OWN department no longer restricts this catalogue; this
-            is purely an optional narrowing filter across ALL departments. */}
-        <select value={departmentFilter} onChange={(e) => { setDepartmentFilter(e.target.value); setSelected(new Set()); }}
-          className="border border-gray-200 rounded-xl px-3 py-2.5 text-base focus:outline-none">
-          <option value="">All Departments</option>
-          {departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-        </select>
       </div>
+
+      {classification === "major" && !user?.department_id && (
+        <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 mb-4">
+          Your department is not configured, so no Major courses can be shown. Contact administration.
+        </p>
+      )}
 
       {semesterId && (regsLoading ? (
         <div className="flex items-center justify-center py-16 text-gray-600"><Loader2 className="animate-spin mr-2" />Loading…</div>
@@ -429,6 +504,119 @@ export default function CourseRegistrationPage() {
             </div>
           )}
 
+          {/* Available Courses (Section order + Student Classification tasks,
+              this revision) — moved to come BEFORE the Registration Card
+              Preview below (was: Selected -> Preview -> Available; now:
+              Selected -> Available -> Preview), and its Classification/
+              Department/Search controls now live here, scoped to exactly
+              what they affect — they never touch "Your Selected Courses" or
+              the Preview below. Still visible/actionable even after a first
+              submission, as long as the registration is still editable
+              (this task's core fix, unchanged). */}
+          {!isLocked && (
+            <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden mb-6">
+              <div className="px-4 py-3 border-b border-gray-100 space-y-3">
+                <h2 className="font-bold text-gray-800">Available Courses</h2>
+                <div className="flex flex-wrap gap-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-500 mb-1">Classification</label>
+                    {/* Student Classification (this revision) — an IDENTIFIER
+                        of how the student is using the course they select
+                        ("I am selecting this as a Major course"), never a
+                        filter on `Course.category`. Exactly four values —
+                        Research/Seminar are PPW-only classifications and are
+                        deliberately not offered here (Part O). Changing this
+                        narrows which DEPARTMENT(S) are legal per the
+                        approved Major/Minor/Supporting rules (see
+                        `classificationAllowsDepartment` above) — it never
+                        filters by `Course.category`, so a course whose
+                        category is e.g. "research" remains fully visible/
+                        selectable here. */}
+                    <select value={classification} onChange={(e) => { setClassification(e.target.value); setSelected(new Set()); }}
+                      className="border border-gray-200 rounded-xl px-3 py-2.5 text-base focus:outline-none">
+                      <option value="major">Major Courses</option>
+                      <option value="minor">Minor Courses</option>
+                      <option value="supporting">Supporting Courses</option>
+                      <option value="compulsory">Compulsory Credit Courses</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-500 mb-1">Department</label>
+                    {/* Department filter — an INDEPENDENT dimension (Part D):
+                        composed together with Classification (AND), never
+                        disabled/mutually-exclusive with it. "Classification:
+                        Major Courses" + "Department: VETM" is a valid,
+                        supported combination. */}
+                    <select value={departmentFilter} onChange={(e) => { setDepartmentFilter(e.target.value); setSelected(new Set()); }}
+                      className="border border-gray-200 rounded-xl px-3 py-2.5 text-base focus:outline-none">
+                      <option value="">All Departments</option>
+                      {departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                    </select>
+                  </div>
+                  <div className="flex-1 min-w-[200px]">
+                    <label className="block text-xs font-semibold text-gray-500 mb-1">Search</label>
+                    <input value={courseSearch} onChange={(e) => setCourseSearch(e.target.value)} placeholder="Search courses…"
+                      className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-base focus:outline-none" />
+                  </div>
+                </div>
+              </div>
+              {/* Table scrolls within its own bounded area (both axes) so the
+                  horizontal scrollbar stays reachable without scrolling the
+                  whole page down, and many rows scroll internally instead of
+                  growing the page — title/footer above/below stay fixed. */}
+              <div className="overflow-auto max-h-[65vh]">
+              {offeringsLoading ? (
+                <div className="flex items-center justify-center py-16 text-gray-600"><Loader2 className="animate-spin mr-2" />Loading…</div>
+              ) : availableOfferings.length === 0 ? (
+                <div className="text-center py-16 text-gray-600">
+                  <ClipboardCheck size={40} className="mx-auto mb-3 opacity-30" />
+                  <p>
+                    {offerings.length > 0 && availableOfferings.length === 0
+                      ? "You have already selected every eligible course for this semester."
+                      : departmentFilter || courseSearch
+                        ? "No eligible courses match the current Classification/Department/Search filters."
+                        : "No eligible courses found for this semester. If this seems wrong, your academic program may not be configured — contact administration."}
+                  </p>
+                </div>
+              ) : (
+                <table className="w-full text-sm min-w-[900px]">
+                  <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10">
+                    <tr>{["", "Course Number", "Course Title", "Department", "Credit", "Credit Type", "Course Teachers"].map((h) => (
+                      <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700">{h}</th>
+                    ))}</tr>
+                  </thead>
+                  <tbody>
+                    {availableOfferings.map((o, i) => {
+                      const wouldExceed = !selected.has(o.id) && usedCredits + selectedCredits + o.credits > MAX_SEMESTER_CREDITS;
+                      return (
+                        <tr key={o.id} onClick={() => !wouldExceed && toggle(o.id, o.credits)}
+                          className={`${wouldExceed ? "opacity-40 cursor-not-allowed" : "cursor-pointer"} ${i % 2 === 0 ? "bg-white" : "bg-gray-50/50"} hover:bg-[#E6F4F4]`}
+                          title={wouldExceed ? `Exceeds the ${MAX_SEMESTER_CREDITS}-credit semester limit` : undefined}>
+                          <td className="px-4 py-3">{selected.has(o.id) ? <CheckSquare size={18} className="text-[#0D6E6E]" /> : <Square size={18} className="text-gray-400" />}</td>
+                          <td className="px-4 py-3 font-mono font-bold text-[#0D6E6E] whitespace-nowrap">{o.course_number}</td>
+                          <td className="px-4 py-3">{o.course_title}</td>
+                          <td className="px-4 py-3 text-gray-600 whitespace-nowrap">{o.department_name ?? "—"}</td>
+                          <td className="px-4 py-3 font-mono">{o.credit_structure} ({o.credits})</td>
+                          <td className="px-4 py-3 text-gray-600">{o.credit_type ? CREDIT_TYPE_LABELS[o.credit_type] : "—"}</td>
+                          <td className="px-4 py-3 text-gray-600">{o.faculty_names.join(", ") || "—"}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+              </div>
+              {availableOfferings.length > 0 && (
+                <div className="flex justify-end p-4 border-t border-gray-100">
+                  <button onClick={() => setConfirmSubmit(true)} disabled={selected.size === 0 || submitRegistration.isPending}
+                    className="px-5 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-base font-bold hover:bg-[#178F8F] disabled:opacity-50">
+                    {currentRegistration ? "Add Selected Course" : "Submit Registration"}{selected.size !== 1 ? "s" : ""} ({selected.size})
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Registration Card Preview task (this revision) — an always-
               available, on-screen mock-up of the printed card, mirroring
               PPW's own "PPW Preview" section (ppw/page.tsx): plain React/
@@ -437,7 +625,8 @@ export default function CourseRegistrationPage() {
               PDF generation is temporarily unavailable. Requires an actual
               `currentRegistration` (its `program_name`/`department_name`/
               `major_advisor_name`/etc. fields only exist once one does) —
-              same gating as the Download/Submit banner above. */}
+              same gating as the Download/Submit banner above. Moved to come
+              AFTER Available Courses (Section order task, this revision). */}
           {currentRegistration && (
             <div className="bg-white rounded-2xl border border-gray-200 p-8 mb-6">
               <h2 className="font-bold text-gray-800 mb-4">Registration Card Preview</h2>
@@ -477,6 +666,25 @@ export default function CourseRegistrationPage() {
                       <td className="border border-gray-300 px-2 py-1.5 font-semibold">Major Advisor</td>
                       <td className="border border-gray-300 px-2 py-1.5">{currentRegistration.major_advisor_name ?? "—"}</td>
                     </tr>
+                    {/* Major/Minor/Supporting discipline task (this
+                        revision) — backend-derived (see
+                        `_registration_dict`'s docstring); rows only render
+                        when at least one classified selection exists, so a
+                        registration with none renders exactly as before. */}
+                    {(currentRegistration.major_discipline_name || currentRegistration.minor_discipline_name || currentRegistration.supporting_discipline_name) && (
+                      <>
+                        <tr>
+                          <td className="border border-gray-300 px-2 py-1.5 font-semibold">Major Discipline</td>
+                          <td className="border border-gray-300 px-2 py-1.5">{currentRegistration.major_discipline_name ?? "—"}</td>
+                          <td className="border border-gray-300 px-2 py-1.5 font-semibold">Minor Discipline</td>
+                          <td className="border border-gray-300 px-2 py-1.5">{currentRegistration.minor_discipline_name ?? "—"}</td>
+                        </tr>
+                        <tr>
+                          <td className="border border-gray-300 px-2 py-1.5 font-semibold">Supporting Discipline</td>
+                          <td className="border border-gray-300 px-2 py-1.5" colSpan={3}>{currentRegistration.supporting_discipline_name ?? "—"}</td>
+                        </tr>
+                      </>
+                    )}
                   </tbody>
                 </table>
 
@@ -529,69 +737,6 @@ export default function CourseRegistrationPage() {
                   </div>
                 </div>
               </div>
-            </div>
-          )}
-
-          {/* Available courses — remains visible and actionable even after a
-              first submission, as long as the registration is still editable
-              (this task's core fix). */}
-          {!isLocked && (
-            <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-              <div className="px-4 py-3 border-b border-gray-100"><h2 className="font-bold text-gray-800">Available Courses</h2></div>
-              {/* Table scrolls within its own bounded area (both axes) so the
-                  horizontal scrollbar stays reachable without scrolling the
-                  whole page down, and many rows scroll internally instead of
-                  growing the page — title/footer above/below stay fixed. */}
-              <div className="overflow-auto max-h-[65vh]">
-              {offeringsLoading ? (
-                <div className="flex items-center justify-center py-16 text-gray-600"><Loader2 className="animate-spin mr-2" />Loading…</div>
-              ) : availableOfferings.length === 0 ? (
-                <div className="text-center py-16 text-gray-600">
-                  <ClipboardCheck size={40} className="mx-auto mb-3 opacity-30" />
-                  <p>
-                    {offerings.length > 0 && availableOfferings.length === 0
-                      ? "You have already selected every eligible course for this semester."
-                      : departmentFilter
-                        ? "No eligible courses found for this department in this semester."
-                        : "No eligible courses found for this semester. If this seems wrong, your academic program may not be configured — contact administration."}
-                  </p>
-                </div>
-              ) : (
-                <table className="w-full text-sm min-w-[900px]">
-                  <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10">
-                    <tr>{["", "Course Number", "Course Title", "Department", "Credit", "Credit Type", "Course Teachers"].map((h) => (
-                      <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700">{h}</th>
-                    ))}</tr>
-                  </thead>
-                  <tbody>
-                    {availableOfferings.map((o, i) => {
-                      const wouldExceed = !selected.has(o.id) && usedCredits + selectedCredits + o.credits > MAX_SEMESTER_CREDITS;
-                      return (
-                        <tr key={o.id} onClick={() => !wouldExceed && toggle(o.id, o.credits)}
-                          className={`${wouldExceed ? "opacity-40 cursor-not-allowed" : "cursor-pointer"} ${i % 2 === 0 ? "bg-white" : "bg-gray-50/50"} hover:bg-[#E6F4F4]`}
-                          title={wouldExceed ? `Exceeds the ${MAX_SEMESTER_CREDITS}-credit semester limit` : undefined}>
-                          <td className="px-4 py-3">{selected.has(o.id) ? <CheckSquare size={18} className="text-[#0D6E6E]" /> : <Square size={18} className="text-gray-400" />}</td>
-                          <td className="px-4 py-3 font-mono font-bold text-[#0D6E6E] whitespace-nowrap">{o.course_number}</td>
-                          <td className="px-4 py-3">{o.course_title}</td>
-                          <td className="px-4 py-3 text-gray-600 whitespace-nowrap">{o.department_name ?? "—"}</td>
-                          <td className="px-4 py-3 font-mono">{o.credit_structure} ({o.credits})</td>
-                          <td className="px-4 py-3 text-gray-600">{o.credit_type ? CREDIT_TYPE_LABELS[o.credit_type] : "—"}</td>
-                          <td className="px-4 py-3 text-gray-600">{o.faculty_names.join(", ") || "—"}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              )}
-              </div>
-              {availableOfferings.length > 0 && (
-                <div className="flex justify-end p-4 border-t border-gray-100">
-                  <button onClick={() => setConfirmSubmit(true)} disabled={selected.size === 0 || submitRegistration.isPending}
-                    className="px-5 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-base font-bold hover:bg-[#178F8F] disabled:opacity-50">
-                    {currentRegistration ? "Add Selected Course" : "Submit Registration"}{selected.size !== 1 ? "s" : ""} ({selected.size})
-                  </button>
-                </div>
-              )}
             </div>
           )}
         </>

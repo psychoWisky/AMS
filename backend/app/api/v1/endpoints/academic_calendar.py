@@ -185,6 +185,40 @@ async def update_semester(
     await db.commit(); return {"message": "Updated."}
 
 
+@router.delete("/semesters/{sem_id}", status_code=204)
+async def delete_semester(
+    sem_id: UUID, db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+):
+    """Delete a Semester (Academic Year/Semester administration task, this
+    revision) — mirrors `delete_calendar`'s exact safety pattern (same roles,
+    same explicit-check-before-delete approach): every table that references
+    `Semester.id` (confirmed exhaustively by inspecting every FK in the
+    schema — CourseOffering.semester_id, CourseRegistration.semester_id,
+    AdmitCard.semester_id; nothing else does) is checked explicitly first,
+    and the delete is blocked with a clear 400 if any real data references
+    this semester. No cascading deletion of transactional data is performed
+    or intended — an unused semester deletes cleanly; a referenced one never
+    does, regardless of what the frontend shows/hides."""
+    sem = await db.get(Semester, sem_id)
+    if not sem: raise HTTPException(404, "Semester not found.")
+
+    offering_exists = await db.execute(select(CourseOffering.id).where(CourseOffering.semester_id == sem_id).limit(1))
+    if offering_exists.scalar_one_or_none():
+        raise HTTPException(400, "This semester has course offerings and cannot be deleted. Remove them first.")
+
+    registration_exists = await db.execute(select(CourseRegistration.id).where(CourseRegistration.semester_id == sem_id).limit(1))
+    if registration_exists.scalar_one_or_none():
+        raise HTTPException(400, "This semester has course registrations and cannot be deleted. Remove them first.")
+
+    admit_card_exists = await db.execute(select(AdmitCard.id).where(AdmitCard.semester_id == sem_id).limit(1))
+    if admit_card_exists.scalar_one_or_none():
+        raise HTTPException(400, "This semester has admit cards issued against it and cannot be deleted. Remove them first.")
+
+    await db.delete(sem)
+    await db.commit()
+
+
 @router.patch("/semesters/{sem_id}/status")
 async def update_semester_status(
     sem_id: UUID, status: str, db: AsyncSession = Depends(get_db),

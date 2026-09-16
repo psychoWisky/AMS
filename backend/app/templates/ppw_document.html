@@ -152,6 +152,12 @@
 
   <table class="data-table">
     <tr><td style="width:32%; font-weight:600;">Field of Investigation for Thesis / Project / Dissertation</td><td>{{ ppw.field_of_investigation or "—" }}</td></tr>
+    <!-- Discipline-derivation task (this revision): Major/Minor/Supporting
+         Discipline below are backend-derived from the student's own
+         department and the actual selected course departments — never
+         arbitrary client text (see ppw.py's _ppw_dict/_recompute_ppw_
+         discipline_fields). Minor/Supporting Field kept for continuity. -->
+    <tr><td style="font-weight:600;">Major Discipline</td><td>{{ ppw.major_discipline_name or "—" }}</td></tr>
     <tr><td style="font-weight:600;">Minor Field</td><td>{{ ppw.minor_field or "—" }}</td></tr>
     <tr><td style="font-weight:600;">Supporting Field</td><td>{{ ppw.supporting_field or "—" }}</td></tr>
     <tr><td style="font-weight:600;">Research Title</td><td>{{ ppw.research_title or "—" }}</td></tr>
