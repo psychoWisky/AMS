@@ -4,9 +4,10 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { useRole } from "@/stores/auth.store";
 import { toast } from "sonner";
-import { Users, Plus, Search, Loader2, Pencil, KeyRound } from "lucide-react";
+import { Users, Plus, Search, Loader2, Pencil, KeyRound, Upload } from "lucide-react";
 import { ROLES, ADMIN_ROLES } from "@/lib/utils";
 import { ChangePasswordModal } from "@/components/ui/change-password-modal";
+import { UserBulkUploadModal } from "@/components/ui/user-bulk-upload-modal";
 
 interface User {
   id: string; email: string; full_name: string; role: string; designation: string | null;
@@ -40,6 +41,7 @@ export default function UsersPage() {
   const [editForm, setEditForm] = useState(EMPTY_EDIT_FORM);
   const [form, setForm] = useState(EMPTY_FORM);
   const [resetPwUser, setResetPwUser] = useState<User | null>(null);
+  const [showBulkUpload, setShowBulkUpload] = useState(false);
 
   const { data: users = [], isLoading } = useQuery<User[]>({
     queryKey: ["ams-users"],
@@ -159,10 +161,19 @@ export default function UsersPage() {
           <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2"><Users size={24} className="text-[#0D6E6E]" />User Management</h1>
           <p className="text-gray-700 text-base mt-1">Manage faculty, students, and admin accounts</p>
         </div>
-        <button onClick={openCreate}
-          className="flex items-center gap-2 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-xl font-semibold text-base hover:bg-[#178F8F]">
-          <Plus size={16} /> Add User
-        </button>
+        <div className="flex items-center gap-2">
+          {/* Bulk Faculty/User Excel Upload task (this revision) — Super
+              Admin/Academic Admin-scoped; the backend independently enforces
+              the same roles already authorized for individual Add User. */}
+          <button onClick={() => setShowBulkUpload(true)}
+            className="flex items-center gap-2 px-4 py-2.5 border border-[#0D6E6E] text-[#0D6E6E] rounded-xl font-semibold text-base hover:bg-[#E6F4F4]">
+            <Upload size={16} /> Bulk Upload
+          </button>
+          <button onClick={openCreate}
+            className="flex items-center gap-2 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-xl font-semibold text-base hover:bg-[#178F8F]">
+            <Plus size={16} /> Add User
+          </button>
+        </div>
       </div>
 
       {/* Filters */}
@@ -309,6 +320,23 @@ export default function UsersPage() {
       {/* Reset Password modal (Issue 6 — administrative reset, no old password) */}
       {resetPwUser && (
         <ChangePasswordModal mode="admin-reset" targetUserId={resetPwUser.id} targetUserName={resetPwUser.full_name} onClose={() => setResetPwUser(null)} />
+      )}
+
+      {showBulkUpload && (
+        <UserBulkUploadModal
+          uploadUrl="/auth/users/bulk-upload"
+          templateUrl="/auth/users/bulk-upload/template"
+          templateFilename="ams_users_bulk_upload_template.xlsx"
+          onClose={() => setShowBulkUpload(false)}
+          onSuccess={(count, sent, total) => {
+            toast.success(
+              `${count} user${count === 1 ? "" : "s"} created successfully.` +
+              (total > 0 ? ` ${sent}/${total} credential email(s) sent.` : ""),
+            );
+            qc.invalidateQueries({ queryKey: ["ams-users"] });
+            setShowBulkUpload(false);
+          }}
+        />
       )}
 
       {/* Users table */}

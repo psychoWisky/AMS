@@ -1,21 +1,25 @@
 """AMS Authentication — login, refresh, me, user management."""
-import hashlib, random, string, smtplib
+import hashlib, io, random, string, smtplib
 from email.mime.text import MIMEText
 from datetime import datetime, date, timezone, timedelta
 from typing import Optional, List, Literal
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request, UploadFile, File
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel, EmailStr, field_validator, model_validator
+import openpyxl
 
 from app.db.base import get_db
 from app.core.security import verify_password, hash_password, create_access_token, create_refresh_token, verify_token
 from app.core.dependencies import get_current_user, require_roles, is_profile_complete, get_missing_profile_fields
 from app.core.config import settings
 from app.core.email import send_email
-from app.models.user import User, UserRole, RefreshToken, Designation
+from app.core.bulk_upload import bulk_cell_to_str, parse_bulk_upload_file
+from app.models.user import User, UserRole, RefreshToken, Designation, Department, College
 # Programme<->Department many-to-many redesign — shared validation, whenever
 # both fields are supplied together they must form a real association.
 # Neither field becomes mandatory by importing this (Faculty/HOD keep working
@@ -175,6 +179,9 @@ def _user_dict(u: User) -> dict:
         "role": u.role.value,
         "designation": u.designation,
         "department_id": str(u.department_id) if u.department_id else None,
+        # Bulk Faculty/User Excel Upload task (this revision) — College is
+        # part of the user's own profile now (User.college_id).
+        "college_id": str(u.college_id) if u.college_id else None,
         "program_id": str(u.program_id) if u.program_id else None,
         "student_roll": u.student_roll,
         "date_of_birth": u.date_of_birth.isoformat() if u.date_of_birth else None,
@@ -504,3 +511,370 @@ async def create_faculty(
         "message": "Faculty account created." + ("" if sent else " Credential email could not be sent — SMTP is not configured for this environment; share the login details manually."),
         "email_sent": sent,
     }
+
+
+# ── Bulk Faculty/User Excel Upload (this revision) ──────────────────────────
+#
+# Common Excel format, used identically at BOTH upload locations (HOD
+# Faculties -> Bulk Upload, Super Admin User Management -> Bulk Upload):
+#     First name | Middle name | Last name | AVFU email | Designation |
+#     Role | College | Department | Gender | Mobile
+# Middle name/Gender/Mobile are optional; every other column is required.
+#
+# Two separate, authorization-specific endpoints (never a single generic
+# unrestricted upload endpoint) share one row-validation helper
+# (`_validate_user_bulk_rows`) parameterized by `force_role`/
+# `force_department_id` — the HOD endpoint passes both (Role/Department are
+# NEVER taken from the file for that path, only checked against them, see
+# that function's docstring); the Super Admin endpoint passes neither
+# (Role/Department/College come from the file, subject to validation,
+# exactly like Super Admin's existing individual `create_user`).
+_USER_BULK_COLUMNS = [
+    "First name", "Middle name", "Last name", "AVFU email", "Designation",
+    "Role", "College", "Department", "Gender", "Mobile",
+]
+_USER_BULK_REQUIRED_COLUMNS = [c for c in _USER_BULK_COLUMNS if c not in ("Middle name", "Gender", "Mobile")]
+_MAX_USER_BULK_BYTES = settings.MAX_FILE_SIZE_MB * 1024 * 1024
+
+
+def _role_from_label(raw: str) -> Optional[UserRole]:
+    """Case-insensitive role resolution against the REAL `UserRole` enum
+    ("Faculty"/"FACULTY"/"faculty" all resolve to `UserRole.FACULTY`) —
+    never a hard-coded string list, and never accepts a value that isn't an
+    actual enum member."""
+    key = raw.strip().lower()
+    for r in UserRole:
+        if r.value == key:
+            return r
+    return None
+
+
+async def _validate_user_bulk_rows(
+    rows: list[dict], db: AsyncSession, *,
+    force_role: Optional[UserRole], force_department_id: Optional[UUID],
+) -> tuple[list[dict], list[dict]]:
+    """Phase 1 — validates the ENTIRE file against the database with no
+    writes of its own. Returns (findings, valid_row_data); if `findings` is
+    non-empty the caller must create nothing at all (all-or-nothing, mirrors
+    orientation.py's bulk-upload philosophy exactly).
+
+    Each finding is `{"row", "column", "value", "error"}` — a flat,
+    row+column-addressable structure (Section 23's explicit requirement),
+    not a single bundled message per row; a row with several problems
+    produces several findings, since nothing here short-circuits on the
+    first failure within a row.
+
+    `force_role`/`force_department_id` (the HOD path): when set, the Excel's
+    OWN Role/Department values are still read and validated AGAINST these —
+    a mismatch is reported with the exact expected/received values — but the
+    value actually used to create the user always comes from these
+    parameters, never from the file itself. This is the load-bearing
+    security property: a HOD can never use the Excel file to create a
+    non-Faculty account or a colleague in another department, exactly
+    mirroring `create_faculty`'s own department_id/role handling above.
+    When both are `None` (the Super Admin path), Role/Department/College are
+    taken from the file, subject to validation — `super_admin` is always
+    rejected regardless (see `allowed_roles` below), matching Section 10's
+    explicit requirement without inventing a further restriction beyond it.
+    """
+    designation_names = (await db.execute(select(Designation.name).where(Designation.is_active == True))).scalars().all()
+    designation_idx = {d.strip().lower(): d for d in designation_names}
+
+    department_rows = (await db.execute(select(Department.id, Department.code, Department.name))).all()
+    department_by_code = {code.strip().lower(): did for did, code, name in department_rows}
+    department_names = {did: name for did, code, name in department_rows}
+
+    college_rows = (await db.execute(select(College.id, College.code))).all()
+    college_by_code = {code.strip().lower(): cid for cid, code in college_rows}
+
+    existing_emails = {e.lower() for e in (await db.execute(select(User.email))).scalars().all()}
+
+    # Never SUPER_ADMIN through bulk upload, for either path (Section 10) —
+    # for the HOD path this is moot (force_role already pins FACULTY), but
+    # applying it unconditionally means the same rule can never accidentally
+    # diverge between the two call sites.
+    allowed_roles = set(UserRole) - {UserRole.SUPER_ADMIN}
+
+    hod_department_label = department_names.get(force_department_id) if force_department_id else None
+
+    findings: list[dict] = []
+    seen_emails: dict[str, int] = {}
+    row_payload: dict[int, dict] = {}
+
+    for entry in rows:
+        row_no = entry["row"]
+        v = entry["values"]
+        row_findings: list[dict] = []
+
+        def add(column: str, value: str, error: str) -> None:
+            row_findings.append({"row": row_no, "column": column, "value": value, "error": error})
+
+        for col in _USER_BULK_REQUIRED_COLUMNS:
+            if not v.get(col):
+                add(col, v.get(col, ""), f"{col} is required.")
+
+        email_norm: Optional[str] = None
+        raw_email = v.get("AVFU email", "")
+        if raw_email:
+            if not raw_email.lower().endswith("@" + _AVFU_STAFF_EMAIL_DOMAIN):
+                add("AVFU email", raw_email, f"Invalid AVFU email address. Must be an @{_AVFU_STAFF_EMAIL_DOMAIN} address.")
+            else:
+                email_norm = raw_email.lower()
+
+        role_value: Optional[UserRole] = None
+        raw_role = v.get("Role", "")
+        if raw_role:
+            resolved_role = _role_from_label(raw_role)
+            if force_role is not None:
+                if resolved_role != force_role:
+                    add("Role", raw_role, f'Expected "{force_role.value}", received "{raw_role.strip()}".')
+                else:
+                    role_value = force_role
+            elif resolved_role is None:
+                add("Role", raw_role, f"'{raw_role}' is not a recognized role.")
+            elif resolved_role not in allowed_roles:
+                add("Role", raw_role, f'Role "{resolved_role.value}" cannot be created through bulk upload.')
+            else:
+                role_value = resolved_role
+
+        department_id_value: Optional[UUID] = None
+        raw_dept = v.get("Department", "")
+        if raw_dept:
+            resolved_dept = department_by_code.get(raw_dept.strip().lower())
+            if not resolved_dept:
+                add("Department", raw_dept, f"Department '{raw_dept}' was not found.")
+            elif force_department_id is not None and resolved_dept != force_department_id:
+                suffix = f" (expected: {hod_department_label})" if hod_department_label else ""
+                add("Department", raw_dept, f"Department does not match the authenticated HOD's department{suffix}.")
+            else:
+                department_id_value = resolved_dept
+
+        college_id_value: Optional[UUID] = None
+        raw_college = v.get("College", "")
+        if raw_college:
+            resolved_college = college_by_code.get(raw_college.strip().lower())
+            if not resolved_college:
+                add("College", raw_college, f"College '{raw_college}' was not found.")
+            else:
+                college_id_value = resolved_college
+
+        designation_value: Optional[str] = None
+        raw_desig = v.get("Designation", "")
+        if raw_desig:
+            resolved_desig = designation_idx.get(raw_desig.strip().lower())
+            if not resolved_desig:
+                add("Designation", raw_desig, f"Designation \"{raw_desig}\" is not an active designation.")
+            else:
+                designation_value = resolved_desig
+
+        if email_norm:
+            if email_norm in existing_emails:
+                add("AVFU email", raw_email, "This email is already registered to an existing AMS user.")
+            elif email_norm in seen_emails:
+                other = seen_emails[email_norm]
+                add("AVFU email", raw_email, f"Duplicate email within the uploaded file (also row {other}).")
+                findings.append({
+                    "row": other, "column": "AVFU email", "value": raw_email,
+                    "error": f"Duplicate email within the uploaded file (also row {row_no}).",
+                })
+            else:
+                seen_emails[email_norm] = row_no
+
+        if row_findings:
+            findings.extend(row_findings)
+        elif email_norm and role_value and department_id_value and college_id_value and designation_value:
+            row_payload[row_no] = {
+                "first_name": v.get("First name", "").strip() or None,
+                "middle_name": v.get("Middle name", "").strip() or None,
+                "last_name": v.get("Last name", "").strip() or None,
+                "email": email_norm,
+                "designation": designation_value,
+                "role": role_value,
+                "college_id": college_id_value,
+                "department_id": department_id_value,
+                "gender": v.get("Gender", "").strip() or None,
+                "mobile": v.get("Mobile", "").strip() or None,
+            }
+
+    # A row that looked valid in isolation may have been retroactively
+    # invalidated once a LATER duplicate-email row was found above — drop it
+    # from the create list (mirrors orientation.py's identical handling).
+    invalidated_rows = {f["row"] for f in findings}
+    for r in list(row_payload):
+        if r in invalidated_rows:
+            del row_payload[r]
+
+    findings.sort(key=lambda f: (f["row"], f["column"]))
+    valid = [row_payload[r] for r in sorted(row_payload)]
+    return findings, valid
+
+
+async def _create_bulk_users(valid_rows: list[dict], db: AsyncSession) -> list[User]:
+    """Phase 2 — every row already passed validation; create them all in one
+    transaction (Section 30's explicit transactional-safety requirement).
+    Password/must_change_password mirror `create_faculty` exactly (Section 7
+    — the SAME mechanism, not a new one): initial password = the user's own
+    AVFU email, hashed; `must_change_password=True` forces a reset on first
+    login."""
+    created: list[User] = []
+    for r in valid_rows:
+        u = User(
+            email=r["email"],
+            hashed_password=hash_password(r["email"]),
+            first_name=r["first_name"], middle_name=r["middle_name"], last_name=r["last_name"],
+            designation=r["designation"], role=r["role"],
+            college_id=r["college_id"], department_id=r["department_id"],
+            gender=r["gender"], mobile=r["mobile"],
+            is_active=True, is_verified=True, must_change_password=True,
+        )
+        db.add(u)
+        created.append(u)
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            409,
+            "One or more rows conflict with existing data (e.g. a duplicate AVFU Email or Employee ID). "
+            "No users were created.",
+        )
+    for u in created:
+        await db.refresh(u)
+    return created
+
+
+def _send_bulk_credential_emails(created: list[User]) -> int:
+    """Best-effort, per-user credential email — same convention and same
+    message shape as `create_faculty` above (Section 31: email delivery is
+    never a reason to leave a partially-created account; every row already
+    committed to the database before any email is attempted). Returns how
+    many sends actually succeeded, purely for the response message."""
+    ams_link = settings.origins[0] if settings.origins else ""
+    sent_count = 0
+    for u in created:
+        sent = send_email(
+            u.email,
+            "Your AVFU AMS Account",
+            f"Dear {u.full_name},\n\nAn AVFU AMS account has been created for you.\n\n"
+            f"AMS link: {ams_link}\nUsername (email): {u.email}\nInitial password: {u.email}\n\n"
+            f"Please log in and change your password immediately.\n\nAVFU Academic Office",
+        )
+        if sent:
+            sent_count += 1
+    return sent_count
+
+
+def _build_user_bulk_template_workbook() -> io.BytesIO:
+    """Shared template-generation logic (Section 26's explicit "avoid
+    duplicating the exact same template-generation logic in two unrelated
+    places" instruction) — called by BOTH the HOD and Super Admin template
+    endpoints below, so the two locations can never silently drift apart
+    into two different column sets. Mirrors orientation.py's own
+    template-download pattern (one clearly-marked, unimportable example
+    row) without sharing code with it — that feature's own template
+    generator is left untouched."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "AMS Users"
+    ws.append(_USER_BULK_COLUMNS)
+    # Marked example row — "EXAMPLE" is never a valid Role/Department/
+    # College code, so even if left in by mistake it fails validation
+    # loudly ("not a recognized role" / "was not found") rather than ever
+    # being silently imported as a real person.
+    ws.append([
+        "EXAMPLE — DELETE THIS ROW", "", "Do Not Import",
+        "example@avfu.ac.in", "<exact active Designation name>", "faculty",
+        "<exact existing College code>", "<exact existing Department code>", "", "",
+    ])
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+@router.post("/faculty/bulk-upload", status_code=201)
+async def bulk_upload_faculty(
+    file: UploadFile = File(...), db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(UserRole.HOD)),
+):
+    """HOD bulk upload (Section 8/9's explicit security rules). The
+    authenticated HOD's OWN department is authoritative for EVERY row —
+    never the Excel file's Department column, and role is always forced to
+    FACULTY — never the Excel file's Role column. Both are still validated
+    against the file's values so a mismatched row is reported clearly
+    (row/column/value/expected), but a mismatch REJECTS THE ENTIRE upload
+    rather than silently substituting the correct value, per the explicit
+    "AVFU wants the uploaded file itself to be correct" instruction — this
+    endpoint never silently corrects a wrong Department/Role."""
+    if not user.department_id:
+        raise HTTPException(400, "Your account has no department assigned; contact an administrator.")
+
+    content = await file.read()
+    if len(content) > _MAX_USER_BULK_BYTES:
+        raise HTTPException(413, f"File exceeds the {settings.MAX_FILE_SIZE_MB} MB limit.")
+
+    rows = parse_bulk_upload_file(file.filename or "", content, _USER_BULK_COLUMNS)
+    findings, valid = await _validate_user_bulk_rows(
+        rows, db, force_role=UserRole.FACULTY, force_department_id=user.department_id,
+    )
+    if findings:
+        return JSONResponse(status_code=400, content={"success": False, "imported_count": 0, "errors": findings})
+
+    created = await _create_bulk_users(valid, db)
+    sent_count = _send_bulk_credential_emails(created)
+    return {
+        "success": True, "imported_count": len(created), "filename": file.filename,
+        "emails_sent": sent_count, "emails_total": len(created),
+    }
+
+
+@router.get("/faculty/bulk-upload/template")
+async def download_faculty_bulk_upload_template(_: User = Depends(require_roles(UserRole.HOD))):
+    buf = _build_user_bulk_template_workbook()
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=ams_users_bulk_upload_template.xlsx"},
+    )
+
+
+@router.post("/users/bulk-upload", status_code=201)
+async def bulk_upload_users(
+    file: UploadFile = File(...), db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+):
+    """Super Admin / Academic Admin bulk upload — the same roles already
+    authorized for individual `create_user` above, never broadened. Unlike
+    the HOD endpoint, Role/Department/College ARE taken from the file
+    (subject to validation) — consistent with `create_user`'s own existing,
+    unrestricted cross-department/cross-role authority for this role — with
+    exactly one Excel-specific carve-out: `super_admin` can never be created
+    through bulk upload (Section 10), regardless of what already exists for
+    individual creation."""
+    content = await file.read()
+    if len(content) > _MAX_USER_BULK_BYTES:
+        raise HTTPException(413, f"File exceeds the {settings.MAX_FILE_SIZE_MB} MB limit.")
+
+    rows = parse_bulk_upload_file(file.filename or "", content, _USER_BULK_COLUMNS)
+    findings, valid = await _validate_user_bulk_rows(rows, db, force_role=None, force_department_id=None)
+    if findings:
+        return JSONResponse(status_code=400, content={"success": False, "imported_count": 0, "errors": findings})
+
+    created = await _create_bulk_users(valid, db)
+    sent_count = _send_bulk_credential_emails(created)
+    return {
+        "success": True, "imported_count": len(created), "filename": file.filename,
+        "emails_sent": sent_count, "emails_total": len(created),
+    }
+
+
+@router.get("/users/bulk-upload/template")
+async def download_users_bulk_upload_template(
+    _: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+):
+    buf = _build_user_bulk_template_workbook()
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=ams_users_bulk_upload_template.xlsx"},
+    )

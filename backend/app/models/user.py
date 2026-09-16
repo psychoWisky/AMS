@@ -101,6 +101,13 @@ class User(Base):
     employee_id: Mapped[str | None] = mapped_column(String(50), unique=True)  # faculty/staff
     student_roll: Mapped[str | None] = mapped_column(String(50), unique=True)  # students
     department_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_departments.id"))
+    # Bulk User/Faculty upload task (this revision) — College is part of the
+    # user's own profile, deliberately INDEPENDENT of `department_id` (no
+    # College<->Department relationship exists or is inferred anywhere in
+    # AMS; both are resolved separately from their own master-data tables —
+    # see the bulk-upload validation in auth.py). Nullable: every existing
+    # user predates this column and has no College recorded.
+    college_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_colleges.id"))
     program_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_programs.id", use_alter=True))
     admission_year: Mapped[int | None] = mapped_column()
     is_active: Mapped[bool]    = mapped_column(Boolean, default=True)
@@ -126,6 +133,7 @@ class User(Base):
 
     department: Mapped["Department | None"] = relationship("Department", back_populates="users", foreign_keys=[department_id])
     program: Mapped["Program | None"] = relationship("Program", foreign_keys=[program_id])
+    college: Mapped["College | None"] = relationship("College", foreign_keys=[college_id])
 
     @property
     def full_name(self) -> str:

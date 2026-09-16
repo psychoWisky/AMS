@@ -3,7 +3,8 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { toast } from "sonner";
-import { UserCog, Plus, Search, Loader2, Mail } from "lucide-react";
+import { UserCog, Plus, Search, Loader2, Mail, Upload } from "lucide-react";
+import { UserBulkUploadModal } from "@/components/ui/user-bulk-upload-modal";
 
 interface Faculty {
   id: string; email: string; full_name: string; title: string | null;
@@ -23,6 +24,7 @@ export default function FacultiesPage() {
   const qc = useQueryClient();
   const [search, setSearch] = useState("");
   const [showCreate, setShowCreate] = useState(false);
+  const [showBulkUpload, setShowBulkUpload] = useState(false);
   const [form, setForm] = useState(EMPTY_FORM);
 
   const { data: faculty = [], isLoading } = useQuery<Faculty[]>({
@@ -68,10 +70,20 @@ export default function FacultiesPage() {
           <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2"><UserCog size={24} className="text-[#0D6E6E]" />Faculties</h1>
           <p className="text-gray-700 text-base mt-1">Faculty members in your department</p>
         </div>
-        <button onClick={() => setShowCreate(true)}
-          className="flex items-center gap-2 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-xl font-semibold text-base hover:bg-[#178F8F]">
-          <Plus size={16} /> Add Faculty
-        </button>
+        <div className="flex items-center gap-2">
+          {/* Bulk Faculty/User Excel Upload task (this revision) — HOD-scoped;
+              the backend independently enforces this endpoint to HOD only
+              and forces role=FACULTY/department=this HOD's own department
+              regardless of the Excel file's contents. */}
+          <button onClick={() => setShowBulkUpload(true)}
+            className="flex items-center gap-2 px-4 py-2.5 border border-[#0D6E6E] text-[#0D6E6E] rounded-xl font-semibold text-base hover:bg-[#E6F4F4]">
+            <Upload size={16} /> Bulk Upload
+          </button>
+          <button onClick={() => setShowCreate(true)}
+            className="flex items-center gap-2 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-xl font-semibold text-base hover:bg-[#178F8F]">
+            <Plus size={16} /> Add Faculty
+          </button>
+        </div>
       </div>
 
       <div className="relative max-w-xs mb-4">
@@ -201,6 +213,23 @@ export default function FacultiesPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {showBulkUpload && (
+        <UserBulkUploadModal
+          uploadUrl="/auth/faculty/bulk-upload"
+          templateUrl="/auth/faculty/bulk-upload/template"
+          templateFilename="ams_users_bulk_upload_template.xlsx"
+          onClose={() => setShowBulkUpload(false)}
+          onSuccess={(count, sent, total) => {
+            toast.success(
+              `${count} faculty account${count === 1 ? "" : "s"} created successfully.` +
+              (total > 0 ? ` ${sent}/${total} credential email(s) sent.` : ""),
+            );
+            qc.invalidateQueries({ queryKey: ["ams-hod-faculty"] });
+            setShowBulkUpload(false);
+          }}
+        />
       )}
     </div>
   );

@@ -14,6 +14,7 @@ interface AuthUser {
   role: string;
   designation: string | null;
   department_id: string | null;
+  college_id: string | null;
   program_id: string | null;
   student_roll: string | null;
   date_of_birth: string | null;

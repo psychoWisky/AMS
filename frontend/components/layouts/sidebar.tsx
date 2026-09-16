@@ -59,6 +59,14 @@ const NAV = [
   { label: "Admissions",      icon: ClipboardCheck,  href: "/admissions",   roles: ["super_admin","academic_admin","registrar"] },
   { label: "Orientation",     icon: ClipboardCheck,  href: "/orientation",  roles: ["super_admin","academic_admin"] },
   { label: "Student Management",icon: IdCard,        href: "/student-management", roles: ["student"] },
+  // Bulk Faculty/User Excel Upload task (this revision) — a bulk-created
+  // account has no profile-editing UI anywhere today (PATCH /auth/me was
+  // already role-agnostic on the backend but had no non-student frontend
+  // consumer); "My Profile" is the minimum new page for every OTHER role to
+  // self-complete DOB/Gender/Blood Group/Father's Name/Address/ABC ID/Mobile
+  // later, exactly as AVFU asked. Deliberately excludes "student" — that
+  // role already has its own, unchanged "Student Management" page above.
+  { label: "My Profile",       icon: IdCard,         href: "/my-profile", roles: ["super_admin","academic_admin","hod","faculty","registrar","examiner","research_supervisor"] },
   { label: "PPW",              icon: FileSpreadsheet, href: "/ppw",          roles: ["student"] },
   { label: "PPW Approvals",   icon: ClipboardCheck,  href: "/ppw/approvals", roles: ["hod","faculty","research_supervisor"] },
   { label: "Users",           icon: Users,           href: "/users",        roles: ["super_admin","academic_admin"] },
