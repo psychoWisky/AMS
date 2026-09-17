@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { useRole } from "@/stores/auth.store";
 import { toast } from "sonner";
-import { Users, Plus, Search, Loader2, Pencil, KeyRound, Upload } from "lucide-react";
+import { Users, Plus, Search, Loader2, Pencil, KeyRound, Upload, ShieldCheck } from "lucide-react";
 import { ROLES, ADMIN_ROLES } from "@/lib/utils";
 import { ChangePasswordModal } from "@/components/ui/change-password-modal";
 import { UserBulkUploadModal } from "@/components/ui/user-bulk-upload-modal";
@@ -42,6 +42,11 @@ export default function UsersPage() {
   const [form, setForm] = useState(EMPTY_FORM);
   const [resetPwUser, setResetPwUser] = useState<User | null>(null);
   const [showBulkUpload, setShowBulkUpload] = useState(false);
+  // Multi-role/role-switching task — Super Admin/Academic Admin role
+  // assignment. Separate from the legacy single Role <select> above (still
+  // used for the primary/display role on create/edit); this manages the
+  // real ams_user_role_assignments rows the backend actually authorizes on.
+  const [rolesUser, setRolesUser] = useState<User | null>(null);
 
   const { data: users = [], isLoading } = useQuery<User[]>({
     queryKey: ["ams-users"],
@@ -126,6 +131,24 @@ export default function UsersPage() {
     }),
     onSuccess: () => { toast.success("User updated."); qc.invalidateQueries({ queryKey: ["ams-users"] }); setEditUser(null); setEditForm(EMPTY_EDIT_FORM); },
     onError: (e: unknown) => toast.error((e as {response?:{data?:{detail?:string}}})?.response?.data?.detail ?? "Failed to update user."),
+  });
+
+  const rolesQuery = useQuery<{ user_id: string; assigned_roles: string[] }>({
+    queryKey: ["ams-user-roles", rolesUser?.id],
+    queryFn: async () => (await api.get(`/auth/users/${rolesUser?.id}/roles`)).data,
+    enabled: !!rolesUser,
+  });
+  const assignedRoles = rolesQuery.data?.assigned_roles ?? [];
+
+  const addRole = useMutation({
+    mutationFn: (r: string) => api.post(`/auth/users/${rolesUser?.id}/roles`, { role: r }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["ams-user-roles", rolesUser?.id] }); },
+    onError: (e: unknown) => toast.error((e as {response?:{data?:{detail?:string}}})?.response?.data?.detail ?? "Could not assign role."),
+  });
+  const removeRole = useMutation({
+    mutationFn: (r: string) => api.delete(`/auth/users/${rolesUser?.id}/roles/${r}`),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["ams-user-roles", rolesUser?.id] }); },
+    onError: (e: unknown) => toast.error((e as {response?:{data?:{detail?:string}}})?.response?.data?.detail ?? "Could not remove role."),
   });
 
   const filtered = users.filter((u) =>
@@ -322,6 +345,46 @@ export default function UsersPage() {
         <ChangePasswordModal mode="admin-reset" targetUserId={resetPwUser.id} targetUserName={resetPwUser.full_name} onClose={() => setResetPwUser(null)} />
       )}
 
+      {/* Multi-role/role-switching task — Assigned Roles management. A
+          checkbox per real UserRole; toggling calls the assignment
+          endpoints directly (each change takes effect immediately — no
+          "Save" step, mirroring ChangePasswordModal's single-action style).
+          The backend independently enforces Super Admin/Academic Admin-only
+          access and every existing business rule (e.g. HOD requires a
+          department), so this UI only surfaces whatever error it returns. */}
+      {rolesUser && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
+            <h3 className="text-xl font-bold mb-1">Assigned Roles</h3>
+            <p className="text-sm text-gray-600 mb-4">{rolesUser.full_name} — {rolesUser.email}</p>
+            {rolesQuery.isLoading ? (
+              <div className="flex justify-center py-8"><Loader2 className="animate-spin text-gray-600" /></div>
+            ) : (
+              <div className="space-y-2">
+                {ROLE_OPTIONS.map((r) => {
+                  const checked = assignedRoles.includes(r);
+                  const busy = addRole.isPending || removeRole.isPending;
+                  return (
+                    <label key={r} className="flex items-center gap-2 text-base">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={busy}
+                        onChange={() => (checked ? removeRole.mutate(r) : addRole.mutate(r))}
+                      />
+                      {ROLES[r as keyof typeof ROLES] ?? r}
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+            <div className="flex gap-3 mt-5">
+              <button onClick={() => setRolesUser(null)} className="flex-1 py-2.5 border border-gray-200 rounded-xl text-base font-medium">Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showBulkUpload && (
         <UserBulkUploadModal
           uploadUrl="/auth/users/bulk-upload"
@@ -369,6 +432,10 @@ export default function UsersPage() {
                           onClick={() => setResetPwUser(u)}
                           title="Reset password"
                           className="p-1.5 text-gray-600 hover:bg-gray-100 rounded-lg"><KeyRound size={16} /></button>
+                        <button
+                          onClick={() => setRolesUser(u)}
+                          title="Manage assigned roles"
+                          className="p-1.5 text-gray-600 hover:bg-gray-100 rounded-lg"><ShieldCheck size={16} /></button>
                       </div>
                     </td>
                   )}

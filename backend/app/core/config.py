@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
     ALLOWED_ORIGINS: str = "http://localhost:3001"
+    AMS_FRONTEND_URL: str = "https://ams.avfu.ac.in"
     UPLOAD_DIR: str = "./uploads"
     MAX_FILE_SIZE_MB: int = 10
     SMTP_HOST: str = "smtp.gmail.com"

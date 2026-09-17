@@ -33,11 +33,23 @@ def create_refresh_token(subject: str) -> str:
     return _make_token({"sub": subject, "type": "refresh"},
                        timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS))
 
-def verify_token(token: str, token_type: str = "access") -> Optional[str]:
+def decode_token(token: str, token_type: str = "access") -> Optional[dict]:
+    """Multi-role/role-switching task — returns the full decoded payload
+    (not just `sub`) so callers can also read the `sid` session-pointer claim
+    (see create_access_token). Like `sub`, `sid` is never trusted as a value
+    in itself — it is only a lookup key into a fresh, server-side DB row
+    (app.core.dependencies.get_current_user); a forged `sid` requires a
+    validly-signed token in the first place, the same trust boundary `sub`
+    already relies on."""
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
         if payload.get("type") != token_type:
             return None
-        return payload.get("sub")
+        return payload
     except JWTError:
         return None
+
+
+def verify_token(token: str, token_type: str = "access") -> Optional[str]:
+    payload = decode_token(token, token_type)
+    return payload.get("sub") if payload else None

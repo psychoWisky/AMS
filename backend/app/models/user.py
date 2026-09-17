@@ -100,6 +100,18 @@ class User(Base):
     designation: Mapped[str | None] = mapped_column(String(200))
     employee_id: Mapped[str | None] = mapped_column(String(50), unique=True)  # faculty/staff
     student_roll: Mapped[str | None] = mapped_column(String(50), unique=True)  # students
+    # Multi-role/role-switching task — `role` is retained ONLY as a legacy/
+    # display "primary role" column. It is kept synchronized so it always
+    # equals one of the user's rows in `UserRoleAssignment` (never a role the
+    # user doesn't actually hold) and is used for: pre-existing business
+    # queries that look up "who is the HOD of department X" (e.g.
+    # enrollment.py/ppw.py's notification routing), the Users list's
+    # `role=` filter, and account seeding/display. It is NEVER read for
+    # authorization decisions about the CALLER — every `require_roles(...)`
+    # check and every inline `if user.role == ...` authorization branch was
+    # migrated to read the caller's active role instead (see
+    # app.core.dependencies.get_current_user's `active_role`/`assigned_roles`
+    # attributes, and `RefreshToken.active_role`).
     department_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_departments.id"))
     # Bulk User/Faculty upload task (this revision) — College is part of the
     # user's own profile, deliberately INDEPENDENT of `department_id` (no
@@ -134,6 +146,9 @@ class User(Base):
     department: Mapped["Department | None"] = relationship("Department", back_populates="users", foreign_keys=[department_id])
     program: Mapped["Program | None"] = relationship("Program", foreign_keys=[program_id])
     college: Mapped["College | None"] = relationship("College", foreign_keys=[college_id])
+    role_assignments: Mapped[list["UserRoleAssignment"]] = relationship(
+        "UserRoleAssignment", back_populates="user", foreign_keys="UserRoleAssignment.user_id", cascade="all, delete-orphan",
+    )
 
     @property
     def full_name(self) -> str:
@@ -194,4 +209,39 @@ class RefreshToken(Base):
     token_hash: Mapped[str]     = mapped_column(String(64), unique=True, index=True)
     is_revoked: Mapped[bool]    = mapped_column(Boolean, default=False)
     device_info: Mapped[str | None] = mapped_column(Text)
+    # Multi-role/role-switching task — each login/refresh issues a new
+    # RefreshToken row, which is this codebase's natural "session" unit (one
+    # per browser/device, rotated on every /auth/refresh). The access token
+    # issued alongside it carries this row's id as a "sid" pointer claim
+    # (looked up fresh from the DB on every request, exactly like the
+    # existing "sub" claim already is — never trusted as a value in itself).
+    # Storing the active role HERE, not on User, is what keeps role-switching
+    # in one browser/session from affecting any other concurrent session for
+    # the same account.
+    active_role: Mapped["UserRole | None"] = mapped_column(SAEnum(UserRole, name="ams_user_role"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class UserRoleAssignment(Base):
+    """Multi-role/role-switching task. The authoritative record of which
+    roles a user has been GRANTED by a Super Admin/Academic Admin — distinct
+    from `RefreshToken.active_role` (which role a given session is currently
+    USING). `User.role` is retained only as a legacy/display "primary role"
+    column (see User.role's own docstring) and is never itself read for
+    authorization after this task; `require_roles`/every inline role branch
+    reads the caller's active role (see app.core.dependencies), which is
+    always guaranteed to be one of these rows for that user.
+
+    Reuses the existing `UserRole` enum/Postgres type rather than inventing a
+    new vocabulary or repurposing the unrelated `ams_roles` master-data table
+    (that table remains cosmetic label data only, per its own docstring)."""
+    __tablename__ = "ams_user_role_assignments"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id", ondelete="CASCADE"), index=True)
+    role: Mapped[UserRole] = mapped_column(SAEnum(UserRole, name="ams_user_role"), nullable=False)
+    assigned_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id", ondelete="SET NULL"))
+    assigned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (UniqueConstraint("user_id", "role", name="uq_user_role_assignment"),)
+
+    user: Mapped["User"] = relationship("User", back_populates="role_assignments", foreign_keys=[user_id])

@@ -94,7 +94,7 @@ function ProfileForm({ user }: { user: NonNullable<ReturnType<typeof useUser>> }
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-5 text-sm">
           <div><p className="text-gray-500">Name</p><p className="font-semibold">{user.full_name}</p></div>
           <div><p className="text-gray-500">Email</p><p className="font-semibold break-all">{user.email}</p></div>
-          <div><p className="text-gray-500">Role</p><p className="font-semibold capitalize">{user.role?.replace(/_/g, " ")}</p></div>
+          <div><p className="text-gray-500">Active Role</p><p className="font-semibold capitalize">{(user.active_role ?? user.role)?.replace(/_/g, " ")}</p></div>
           <div><p className="text-gray-500">Designation</p><p className="font-semibold">{user.designation ?? "—"}</p></div>
         </div>
 

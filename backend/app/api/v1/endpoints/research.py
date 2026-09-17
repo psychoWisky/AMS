@@ -103,9 +103,9 @@ async def _authorize_propose_major_advisor(student_id: UUID, user: User, db: Asy
     """Stage 1: only HOD (of the student's department) or admins may propose a
     Major Advisor. This is the ONLY committee-management action HOD may take —
     fixes the confirmed conflict where HOD could previously also add members."""
-    if user.role in _ADMIN_ROLES:
+    if user.active_role in _ADMIN_ROLES:
         return
-    if user.role == UserRole.HOD:
+    if user.active_role == UserRole.HOD:
         dept_id = await _student_department_id(student_id, db)
         if dept_id and user.department_id and dept_id == user.department_id:
             return
@@ -123,7 +123,7 @@ async def _get_major_advisor_member(committee: AdvisoryCommittee, db: AsyncSessi
 async def _authorize_manage_members(committee: AdvisoryCommittee, user: User, db: AsyncSession) -> None:
     """Stage 2: only the committee's own ACCEPTED Major Advisor (or an admin) may
     add/remove other members. HOD is deliberately NOT included here (Rule 28)."""
-    if user.role in _ADMIN_ROLES:
+    if user.active_role in _ADMIN_ROLES:
         return
     ma = await _get_major_advisor_member(committee, db)
     if ma and ma.faculty_id == user.id and ma.accepted is True:
@@ -132,21 +132,21 @@ async def _authorize_manage_members(committee: AdvisoryCommittee, user: User, db
 
 
 async def _authorize_committee_view(committee: AdvisoryCommittee, user: User, db: AsyncSession) -> None:
-    if user.role in _ADMIN_ROLES:
+    if user.active_role in _ADMIN_ROLES:
         return
-    if user.role == UserRole.HOD:
+    if user.active_role == UserRole.HOD:
         dept_id = await _student_department_id(committee.student_id, db)
         if dept_id and user.department_id and dept_id == user.department_id:
             return
         raise HTTPException(403, "You can only view committees within your own department.")
-    if user.role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
+    if user.active_role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
         result = await db.execute(select(CommitteeMember).where(
             CommitteeMember.committee_id == committee.id, CommitteeMember.faculty_id == user.id,
         ))
         if result.scalar_one_or_none():
             return
         raise HTTPException(403, "You are not a member of this committee.")
-    if user.role == UserRole.STUDENT:
+    if user.active_role == UserRole.STUDENT:
         if committee.student_id == user.id:
             return
         raise HTTPException(403, "You can only view your own committee.")
@@ -479,9 +479,9 @@ async def hod_approval(
 async def list_committees(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
     q = select(AdvisoryCommittee).options(*_COMMITTEE_LOAD_OPTIONS)
 
-    if user.role in _ADMIN_ROLES:
+    if user.active_role in _ADMIN_ROLES:
         pass
-    elif user.role == UserRole.HOD:
+    elif user.active_role == UserRole.HOD:
         if not user.department_id:
             return []
         # Programme<->Department many-to-many redesign — the student's OWN
@@ -491,11 +491,11 @@ async def list_committees(db: AsyncSession = Depends(get_db), user: User = Depen
             q.join(User, AdvisoryCommittee.student_id == User.id)
              .where(User.department_id == user.department_id)
         )
-    elif user.role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
+    elif user.active_role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
         q = q.where(AdvisoryCommittee.id.in_(
             select(CommitteeMember.committee_id).where(CommitteeMember.faculty_id == user.id)
         ))
-    elif user.role == UserRole.STUDENT:
+    elif user.active_role == UserRole.STUDENT:
         q = q.where(AdvisoryCommittee.student_id == user.id)
     else:
         return []
@@ -504,7 +504,7 @@ async def list_committees(db: AsyncSession = Depends(get_db), user: User = Depen
     committees = result.scalars().all()
     data = [_committee_dict(c) for c in committees]
 
-    if user.role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
+    if user.active_role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
         for d, c in zip(data, committees):
             mine = next((m for m in c.members if m.faculty_id == user.id), None)
             d["my_role"] = mine.role if mine else None
@@ -527,7 +527,7 @@ async def get_student_committee(student_id: UUID, db: AsyncSession = Depends(get
         m_out["major_advisor_count"] = s["major_advisor_count"]
         m_out["member_count"] = s["member_count"]
     ma = await _get_major_advisor_member(c, db)
-    data["can_manage_members"] = bool(ma and ma.faculty_id == user.id and ma.accepted is True) or user.role in _ADMIN_ROLES
+    data["can_manage_members"] = bool(ma and ma.faculty_id == user.id and ma.accepted is True) or user.active_role in _ADMIN_ROLES
     data["can_propose_major_advisor"] = False
     try:
         await _authorize_propose_major_advisor(student_id, user, db)

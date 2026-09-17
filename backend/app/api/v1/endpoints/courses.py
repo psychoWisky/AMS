@@ -155,9 +155,9 @@ _MANAGE_ROLES = (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.HOD)
 
 
 def _authorize_department_manage(department_id: Optional[UUID], user: User) -> None:
-    if user.role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN):
+    if user.active_role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN):
         return
-    if user.role == UserRole.HOD:
+    if user.active_role == UserRole.HOD:
         if department_id and user.department_id and department_id == user.department_id:
             return
         raise HTTPException(403, "You can only manage courses/offerings within your own department.")
@@ -204,9 +204,9 @@ class AvailabilityIn(BaseModel):
 
 
 def _authorize_availability_manage(department_id: UUID, user: User) -> None:
-    if user.role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN):
+    if user.active_role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN):
         return
-    if user.role == UserRole.HOD:
+    if user.active_role == UserRole.HOD:
         if user.department_id and department_id == user.department_id:
             return
         raise HTTPException(403, "You can only manage course availability for your own department.")
@@ -279,14 +279,14 @@ async def list_courses(
     # used in list_all_offerings/GET /auth/users. Previously HOD had NO scoping
     # at all here (only STUDENT did), so any HOD saw the full cross-department
     # catalog by default — closed this gap.
-    if user.role == UserRole.STUDENT:
+    if user.active_role == UserRole.STUDENT:
         scope = await _resolve_student_scope(user, db)
         if not scope:
             return []
         # Course-availability task — widened from strict ownership equality to
         # ownership-OR-explicit-availability (see _course_visibility_condition).
         q = q.where(_course_visibility_condition(scope["department_id"]))
-    elif user.role == UserRole.HOD:
+    elif user.active_role == UserRole.HOD:
         if not user.department_id:
             return []
         q = q.where(Course.department_id == user.department_id)
@@ -301,7 +301,7 @@ async def create_course(
     body: CourseIn, db: AsyncSession = Depends(get_db),
     user: User = Depends(require_roles(*_MANAGE_ROLES)),
 ):
-    if user.role == UserRole.HOD and not body.department_id:
+    if user.active_role == UserRole.HOD and not body.department_id:
         raise HTTPException(400, "Department is required.")
     _authorize_department_manage(body.department_id, user)
     existing = await db.execute(select(Course).where(Course.course_number == body.course_number))
@@ -317,7 +317,7 @@ async def get_course(course_id: UUID, db: AsyncSession = Depends(get_db), user: 
     result = await db.execute(select(Course).options(selectinload(Course.department)).where(Course.id == course_id))
     c = result.scalar_one_or_none()
     if not c: raise HTTPException(404, "Course not found.")
-    if user.role == UserRole.STUDENT:
+    if user.active_role == UserRole.STUDENT:
         scope = await _resolve_student_scope(user, db)
         visible = False
         if scope:
@@ -325,10 +325,10 @@ async def get_course(course_id: UUID, db: AsyncSession = Depends(get_db), user: 
             visible = check.scalar_one_or_none() is not None
         if not visible:
             raise HTTPException(404, "Course not found.")
-    elif user.role == UserRole.HOD:
+    elif user.active_role == UserRole.HOD:
         if not (user.department_id and c.department_id and user.department_id == c.department_id):
             raise HTTPException(403, "You can only view courses within your own department.")
-    elif user.role == UserRole.FACULTY:
+    elif user.active_role == UserRole.FACULTY:
         # BUSINESS_LOGIC.md Section Q — Faculty has no generic course-catalogue
         # need; only courses they are actually assigned to teach (via some
         # CourseOffering) are visible. Mirrors get_offering's FACULTY check.
@@ -356,7 +356,7 @@ async def update_course(
     # department could still move a course to a different department via the
     # update payload, since department_id is otherwise applied unconditionally
     # below. HOD may not change department_id at all; admins are unrestricted.
-    if user.role == UserRole.HOD and body.department_id is not None and body.department_id != c.department_id:
+    if user.active_role == UserRole.HOD and body.department_id is not None and body.department_id != c.department_id:
         raise HTTPException(403, "You cannot move a course to a different department.")
     for k, v in body.model_dump(exclude_none=True).items():
         setattr(c, k, v)
@@ -501,7 +501,7 @@ async def list_all_offerings(
     if semester_id: q = q.where(CourseOffering.semester_id == semester_id)
     if calendar_id: q = q.where(CourseOffering.calendar_id == calendar_id)
 
-    if user.role == UserRole.STUDENT:
+    if user.active_role == UserRole.STUDENT:
         # Course-visibility change: a student's own department no longer
         # restricts the catalogue — they may view/enroll in published
         # offerings from ANY department now. `level` is still derived
@@ -524,25 +524,25 @@ async def list_all_offerings(
         # (enrollment.py) applied as a list filter instead of a single-offering guard.
         # The current user is always derived server-side; a client can never widen this
         # to another faculty member's assignments.
-        if user.role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR):
+        if user.active_role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR):
             pass  # unrestricted, same as _authorize_offering_management
-        elif user.role == UserRole.HOD:
+        elif user.active_role == UserRole.HOD:
             if not user.department_id:
                 return []
             q = q.where(CourseOffering.department_id == user.department_id)
-        elif user.role == UserRole.FACULTY:
+        elif user.active_role == UserRole.FACULTY:
             q = q.where(CourseOffering.id.in_(
                 select(OfferingFaculty.offering_id).where(OfferingFaculty.faculty_id == user.id)
             ))
         else:
             return []  # fail closed for roles with no defined "mine" scope
     else:
-        if user.role == UserRole.HOD and user.department_id:
+        if user.active_role == UserRole.HOD and user.department_id:
             # HOD's Offer Course / Course Management views are implicitly scoped
             # to their own department (BUSINESS_LOGIC.md L.4) — no explicit
             # department filter is part of the confirmed filter set.
             q = q.where(CourseOffering.department_id == user.department_id)
-        elif user.role == UserRole.FACULTY:
+        elif user.active_role == UserRole.FACULTY:
             # BUSINESS_LOGIC.md Section Q — Faculty has no legitimate "browse
             # all offerings" use; Teacher Courses (mine=true) is the only
             # intended Faculty course-access surface, so the default/non-mine
@@ -558,9 +558,9 @@ async def list_all_offerings(
     result = await db.execute(q)
     offerings = result.scalars().all()
 
-    if user.role == UserRole.STUDENT and offerings:
+    if user.active_role == UserRole.STUDENT and offerings:
         offerings = [o for o in offerings if o.course and o.course.program_level == scope["level"]]
-    elif level and not (user.role == UserRole.STUDENT):
+    elif level and not (user.active_role == UserRole.STUDENT):
         offerings = [o for o in offerings if o.course and o.course.program_level == level]
 
     items = []
@@ -641,7 +641,7 @@ async def get_offering(offering_id: UUID, db: AsyncSession = Depends(get_db), us
     # BUSINESS_LOGIC.md Section P (department-isolation audit) — a student
     # guessing/typing a foreign-department offering ID gets the same 404 as a
     # nonexistent one, never a 403 that would confirm the ID is valid.
-    if user.role == UserRole.STUDENT:
+    if user.active_role == UserRole.STUDENT:
         scope = await _resolve_student_scope(user, db)
         if not scope or o.department_id != scope["department_id"]:
             raise HTTPException(404, "Offering not found.")
@@ -649,10 +649,10 @@ async def get_offering(offering_id: UUID, db: AsyncSession = Depends(get_db), us
     # are actually assigned to (mirrors _authorize_offering_grading in grading.py
     # and _authorize_offering_management in enrollment.py — same principle, this
     # endpoint previously had no such check at all beyond the student branch above).
-    elif user.role == UserRole.HOD:
+    elif user.active_role == UserRole.HOD:
         if not (user.department_id and o.department_id and user.department_id == o.department_id):
             raise HTTPException(403, "You can only view offerings within your own department.")
-    elif user.role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
+    elif user.active_role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
         assigned = await db.execute(
             select(OfferingFaculty.id).where(
                 OfferingFaculty.offering_id == offering_id, OfferingFaculty.faculty_id == user.id,

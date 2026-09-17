@@ -27,16 +27,23 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     if (mounted && !isLoggedIn) router.replace("/login");
   }, [mounted, isLoggedIn, router]);
 
+  // Multi-role/role-switching task — gated on the session's ACTIVE role, not
+  // the legacy primary `role` field, so a (currently hypothetical) student
+  // who also holds another role is only gated while actually acting as a
+  // student; switching away from Student mode lifts the gate, exactly as it
+  // would for a single-role student switching back would re-apply it.
+  const activeRole = user?.active_role ?? user?.role;
+
   useEffect(() => {
     if (!mounted || !user) return;
-    if (user.role !== "student" || user.profile_complete) return;
+    if (activeRole !== "student" || user.profile_complete) return;
     if (!STUDENT_PROFILE_GATE_ALLOWLIST.some((p) => pathname.startsWith(p))) {
       router.replace("/student-management");
     }
-  }, [mounted, user, pathname, router]);
+  }, [mounted, user, activeRole, pathname, router]);
 
   if (!mounted || !isLoggedIn) return null;
-  if (user && user.role === "student" && !user.profile_complete && !STUDENT_PROFILE_GATE_ALLOWLIST.some((p) => pathname.startsWith(p))) {
+  if (user && activeRole === "student" && !user.profile_complete && !STUDENT_PROFILE_GATE_ALLOWLIST.some((p) => pathname.startsWith(p))) {
     return null;
   }
 

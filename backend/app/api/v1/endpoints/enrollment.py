@@ -158,13 +158,13 @@ async def _authorize_offering_management(offering_id: UUID, user: User, db: Asyn
     offering = await db.get(CourseOffering, offering_id)
     if not offering:
         raise HTTPException(404, "Offering not found.")
-    if user.role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR):
+    if user.active_role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR):
         return offering
-    if user.role == UserRole.HOD:
+    if user.active_role == UserRole.HOD:
         if user.department_id and offering.department_id and user.department_id == offering.department_id:
             return offering
         raise HTTPException(403, "You can only manage offerings within your own department.")
-    if user.role == UserRole.FACULTY:
+    if user.active_role == UserRole.FACULTY:
         result = await db.execute(select(OfferingFaculty).where(
             OfferingFaculty.offering_id == offering_id, OfferingFaculty.faculty_id == user.id,
         ))
@@ -175,7 +175,7 @@ async def _authorize_offering_management(offering_id: UUID, user: User, db: Asyn
 
 
 async def _authorize_major_advisor(registration: CourseRegistration, user: User, db: AsyncSession) -> None:
-    if user.role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN):
+    if user.active_role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN):
         return
     ma_id = await _get_major_advisor_id(registration.student_id, db)
     if ma_id and ma_id == user.id:
@@ -184,9 +184,9 @@ async def _authorize_major_advisor(registration: CourseRegistration, user: User,
 
 
 async def _authorize_hod_registration(registration: CourseRegistration, user: User, db: AsyncSession) -> None:
-    if user.role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN):
+    if user.active_role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN):
         return
-    if user.role == UserRole.HOD:
+    if user.active_role == UserRole.HOD:
         dept_id = await _student_department_id(registration.student_id, db)
         if dept_id and user.department_id and dept_id == user.department_id:
             return
@@ -195,13 +195,13 @@ async def _authorize_hod_registration(registration: CourseRegistration, user: Us
 
 
 async def _authorize_registration_view(registration: CourseRegistration, user: User, db: AsyncSession) -> None:
-    if user.role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR):
+    if user.active_role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR):
         return
-    if user.role == UserRole.STUDENT:
+    if user.active_role == UserRole.STUDENT:
         if registration.student_id == user.id:
             return
         raise HTTPException(403, "You can only view your own registration.")
-    if user.role == UserRole.HOD:
+    if user.active_role == UserRole.HOD:
         dept_id = await _student_department_id(registration.student_id, db)
         if dept_id and user.department_id and dept_id == user.department_id:
             return
@@ -209,7 +209,7 @@ async def _authorize_registration_view(registration: CourseRegistration, user: U
     ma_id = await _get_major_advisor_id(registration.student_id, db)
     if ma_id and ma_id == user.id:
         return
-    if user.role == UserRole.FACULTY:
+    if user.active_role == UserRole.FACULTY:
         result = await db.execute(
             select(OfferingFaculty.id)
             .join(StudentEnrollment, StudentEnrollment.offering_id == OfferingFaculty.offering_id)
@@ -997,11 +997,11 @@ async def list_registrations(
     db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user),
 ):
     q = select(CourseRegistration).options(*_REGISTRATION_LOAD_OPTIONS)
-    if user.role == UserRole.STUDENT:
+    if user.active_role == UserRole.STUDENT:
         q = q.where(CourseRegistration.student_id == user.id)
-    elif user.role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR):
+    elif user.active_role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR):
         pass  # unrestricted
-    elif user.role == UserRole.HOD:
+    elif user.active_role == UserRole.HOD:
         if not user.department_id:
             return []
         # Programme<->Department many-to-many redesign — the student's OWN
@@ -1011,7 +1011,7 @@ async def list_registrations(
             q.join(User, CourseRegistration.student_id == User.id)
              .where(User.department_id == user.department_id)
         )
-    elif user.role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
+    elif user.active_role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
         # A faculty member's registration queue = registrations where they are
         # either the student's Major Advisor, or an assigned teacher on at
         # least one selected course. Filtered in Python below (post-query) —
@@ -1025,7 +1025,7 @@ async def list_registrations(
     result = await db.execute(q.order_by(CourseRegistration.submitted_at.desc()))
     registrations = result.scalars().all()
 
-    if user.role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
+    if user.active_role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
         ma_student_ids = set((await db.execute(
             select(AdvisoryCommittee.student_id).join(
                 CommitteeMember, CommitteeMember.committee_id == AdvisoryCommittee.id

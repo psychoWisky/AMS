@@ -1,15 +1,16 @@
 "use client";
 import { usePathname, useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
-import { useRole } from "@/stores/auth.store";
-import { cn } from "@/lib/utils";
+import { useRole, useAssignedRoles, useSetUser } from "@/stores/auth.store";
+import { cn, ROLES } from "@/lib/utils";
 import {
   LayoutDashboard, CalendarDays, BookOpen, Users, ClipboardList,
-  BarChart3, FlaskConical, Bell, Settings, ChevronLeft, ChevronRight, GraduationCap, LogOut, FileText, ClipboardCheck, IdCard, UserCog, ShieldCheck, FileSpreadsheet, KeyRound,
+  BarChart3, FlaskConical, Bell, Settings, ChevronLeft, ChevronRight, GraduationCap, LogOut, FileText, ClipboardCheck, IdCard, UserCog, ShieldCheck, FileSpreadsheet, KeyRound, Repeat,
 } from "lucide-react";
 import { useAuthStore } from "@/stores/auth.store";
 import { api } from "@/services/api";
 import { useState } from "react";
+import { toast } from "sonner";
 import { ChangePasswordModal } from "@/components/ui/change-password-modal";
 
 const NAV = [
@@ -77,6 +78,8 @@ const NAV = [
 export function AMSSidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
   const pathname = usePathname();
   const role = useRole();
+  const assignedRoles = useAssignedRoles();
+  const setUser = useSetUser();
   const clearAuth = useAuthStore((s) => s.clearAuth);
   const router = useRouter();
   const qc = useQueryClient();
@@ -84,8 +87,33 @@ export function AMSSidebar({ collapsed, onToggle }: { collapsed: boolean; onTogg
   // students — surfaced here (near Logout) since it applies regardless of
   // which nav items a given role sees.
   const [showChangePw, setShowChangePw] = useState(false);
+  // Multi-role/role-switching task — only shown when the account actually
+  // has more than one assigned role (Section 24). Switching calls the
+  // backend-authoritative POST /auth/switch-role and treats its response as
+  // the sole source of truth for the new session state — this UI never
+  // grants access on its own (Section 40).
+  const [switching, setSwitching] = useState(false);
 
   const visible = NAV.filter((n) => n.roles.length === 0 || !role || n.roles.includes(role));
+
+  async function switchRole(newRole: string) {
+    if (newRole === role || switching) return;
+    setSwitching(true);
+    try {
+      const res = await api.post("/auth/switch-role", { role: newRole });
+      setUser(res.data);
+      // Role-dependent lists (offerings, registrations, gradesheets, etc.)
+      // are scoped server-side by active role — clear the cache so every
+      // page re-fetches under the new role instead of showing stale data
+      // fetched under the old one (mirrors logout's existing qc.clear()).
+      qc.clear();
+      toast.success(`Switched to ${ROLES[newRole as keyof typeof ROLES] ?? newRole} mode.`);
+    } catch (e: unknown) {
+      toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Could not switch role.");
+    } finally {
+      setSwitching(false);
+    }
+  }
 
   async function logout() {
     clearAuth();
@@ -135,6 +163,21 @@ export function AMSSidebar({ collapsed, onToggle }: { collapsed: boolean; onTogg
 
       {/* Bottom */}
       <div className="px-2 pb-3 shrink-0 space-y-1">
+        {assignedRoles.length > 1 && !collapsed && (
+          <div className="px-1 pb-1">
+            <label className="flex items-center gap-1.5 text-sm text-gray-600 mb-1"><Repeat size={13} />Active Role</label>
+            <select
+              value={role ?? ""}
+              disabled={switching}
+              onChange={(e) => switchRole(e.target.value)}
+              className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0D6E6E] disabled:opacity-60"
+            >
+              {assignedRoles.map((r) => (
+                <option key={r} value={r}>{ROLES[r as keyof typeof ROLES] ?? r}</option>
+              ))}
+            </select>
+          </div>
+        )}
         <button onClick={() => setShowChangePw(true)} title={collapsed ? "Change Password" : undefined}
           className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-gray-700 hover:bg-gray-50 hover:text-[#0D6E6E] transition-colors">
           <KeyRound size={18} className="shrink-0" />

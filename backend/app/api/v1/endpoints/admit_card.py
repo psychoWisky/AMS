@@ -126,7 +126,7 @@ async def request_otp(
     user: User = Depends(get_current_user),
 ):
     """Student requests OTP for admit card generation. Validates UID against their profile."""
-    if user.role != UserRole.STUDENT:
+    if user.active_role != UserRole.STUDENT:
         raise HTTPException(403, "Only students can request admit card OTPs.")
 
     semester = await db.get(Semester, body.semester_id)
@@ -202,7 +202,7 @@ async def generate_admit_card(
     user: User = Depends(get_current_user),
 ):
     """Verify OTP and return admit card data. Marks as downloaded — one-time only."""
-    if user.role != UserRole.STUDENT:
+    if user.active_role != UserRole.STUDENT:
         raise HTTPException(403, "Only students can generate admit cards.")
 
     result = await db.execute(
@@ -294,7 +294,7 @@ async def get_admit_card(
     if not card:
         raise HTTPException(404, "Admit card not found.")
 
-    is_admin = user.role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.EXAMINER, UserRole.REGISTRAR)
+    is_admin = user.active_role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.EXAMINER, UserRole.REGISTRAR)
     if not is_admin and card.student_id != user.id:
         raise HTTPException(403, "Access denied.")
 

@@ -62,7 +62,7 @@ export default function OrientationPage() {
   const user = useUser();
   // Bulk upload (this task's confirmed requirement) — Super Admin only,
   // enforced independently by the backend; this is only a UI convenience.
-  const isSuperAdmin = user?.role === "super_admin";
+  const isSuperAdmin = (user?.active_role ?? user?.role) === "super_admin";
   const [academicYear, setAcademicYear] = useState(String(new Date().getFullYear()));
   const [programId, setProgramId] = useState("");
   const [modalOpen, setModalOpen] = useState(false);

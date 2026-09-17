@@ -45,18 +45,18 @@ _ADMIN_ROLES = (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRA
 # duplicated _resolve_student_scope, research.py's own committee helpers).
 
 async def _authorize_student_credit_view(student_id: UUID, user: User, db: AsyncSession) -> None:
-    if user.role in _ADMIN_ROLES:
+    if user.active_role in _ADMIN_ROLES:
         return
-    if user.role == UserRole.STUDENT:
+    if user.active_role == UserRole.STUDENT:
         if student_id == user.id:
             return
         raise HTTPException(403, "You can only view your own credit details.")
-    if user.role == UserRole.HOD:
+    if user.active_role == UserRole.HOD:
         dept_id = await resolve_student_department_id(student_id, db)
         if dept_id and user.department_id and dept_id == user.department_id:
             return
         raise HTTPException(403, "You can only view students within your own department.")
-    if user.role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
+    if user.active_role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
         course_link = await db.execute(
             select(OfferingFaculty.id)
             .join(StudentEnrollment, StudentEnrollment.offering_id == OfferingFaculty.offering_id)

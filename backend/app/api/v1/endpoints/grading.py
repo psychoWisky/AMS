@@ -37,16 +37,16 @@ async def _authorize_offering_grading(offering_id: UUID, user: User, db: AsyncSe
     a bare role-name match. Mirrors the established pattern in courses.py's
     _authorize_department_manage / enrollment.py's _authorize_offering_management.
     """
-    if user.role in _GRADING_UNRESTRICTED_ROLES:
+    if user.active_role in _GRADING_UNRESTRICTED_ROLES:
         return
     offering = await db.get(CourseOffering, offering_id)
     if not offering:
         raise HTTPException(404, "Offering not found.")
-    if user.role == UserRole.HOD:
+    if user.active_role == UserRole.HOD:
         if user.department_id and offering.department_id and user.department_id == offering.department_id:
             return
         raise HTTPException(403, "You can only access gradesheets within your own department.")
-    if user.role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
+    if user.active_role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
         assigned = await db.execute(
             select(OfferingFaculty.id).where(
                 OfferingFaculty.offering_id == offering_id, OfferingFaculty.faculty_id == user.id,
@@ -67,18 +67,18 @@ async def _authorize_student_academic_view(student_id: UUID, user: User, db: Asy
     self-only, and faculty/research supervisor only via an established
     relationship (shared course assignment or advisory committee membership)
     — never a bare role check."""
-    if user.role in _ADMIN_ROLES:
+    if user.active_role in _ADMIN_ROLES:
         return
-    if user.role == UserRole.STUDENT:
+    if user.active_role == UserRole.STUDENT:
         if student_id == user.id:
             return
         raise HTTPException(403, "You can only view your own academic progress.")
-    if user.role == UserRole.HOD:
+    if user.active_role == UserRole.HOD:
         dept_id = await resolve_student_department_id(student_id, db)
         if dept_id and user.department_id and dept_id == user.department_id:
             return
         raise HTTPException(403, "You can only view students within your own department.")
-    if user.role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
+    if user.active_role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
         course_link = await db.execute(
             select(OfferingFaculty.id)
             .join(StudentEnrollment, StudentEnrollment.offering_id == OfferingFaculty.offering_id)
@@ -290,7 +290,7 @@ async def request_approval_otp(
         select(ApprovalStage).where(
             ApprovalStage.sheet_id == sheet_id,
             ApprovalStage.status == "pending",
-            ApprovalStage.role_required == user.role.value,
+            ApprovalStage.role_required == user.active_role.value,
         ).order_by(ApprovalStage.stage).limit(1)
     )
     stage = result.scalar_one_or_none()
@@ -322,7 +322,7 @@ async def approve_sheet_stage(
         select(ApprovalStage).where(
             ApprovalStage.sheet_id == sheet_id,
             ApprovalStage.status == "pending",
-            ApprovalStage.role_required == user.role.value,
+            ApprovalStage.role_required == user.active_role.value,
         ).order_by(ApprovalStage.stage).limit(1)
     )
     stage = result.scalar_one_or_none()
@@ -379,7 +379,7 @@ async def reject_sheet_stage(
         select(ApprovalStage).where(
             ApprovalStage.sheet_id == sheet_id,
             ApprovalStage.status == "pending",
-            ApprovalStage.role_required == user.role.value,
+            ApprovalStage.role_required == user.active_role.value,
         ).order_by(ApprovalStage.stage).limit(1)
     )
     stage = result.scalar_one_or_none()

@@ -190,7 +190,7 @@ async def _resolve_my_stage(p: Ppw, cycle: PpwApprovalCycle, user: User, db: Asy
             if stage.committee_member and stage.committee_member.faculty_id == user.id:
                 return stage
         elif stage.stage_type == "hod":
-            if user.role == UserRole.HOD:
+            if user.active_role == UserRole.HOD:
                 dept_id = await _student_department_id(p.student_id, db)
                 if dept_id and user.department_id and dept_id == user.department_id:
                     return stage
@@ -204,13 +204,13 @@ async def _authorize_ppw_view(p: Ppw, user: User, db: AsyncSession) -> None:
     (so past-cycle approvers retain read access to what they signed); the
     student's current-department HOD. Mirrors research.py's
     `_authorize_committee_view` join-based style — never a bare role check."""
-    if user.role in _ADMIN_ROLES:
+    if user.active_role in _ADMIN_ROLES:
         return
-    if user.role == UserRole.STUDENT:
+    if user.active_role == UserRole.STUDENT:
         if p.student_id == user.id:
             return
         raise HTTPException(404, "PPW not found.")
-    if user.role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
+    if user.active_role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
         result = await db.execute(
             select(PpwApprovalStage.id)
             .join(PpwApprovalCycle, PpwApprovalCycle.id == PpwApprovalStage.cycle_id)
@@ -221,7 +221,7 @@ async def _authorize_ppw_view(p: Ppw, user: User, db: AsyncSession) -> None:
         if result.scalar_one_or_none():
             return
         raise HTTPException(404, "PPW not found.")
-    if user.role == UserRole.HOD:
+    if user.active_role == UserRole.HOD:
         dept_id = await _student_department_id(p.student_id, db)
         if dept_id and user.department_id and dept_id == user.department_id:
             return
@@ -447,7 +447,7 @@ async def _get_owned_ppw(ppw_id: UUID, user: User, db: AsyncSession, require_dra
     p = result.scalar_one_or_none()
     if not p:
         raise HTTPException(404, "PPW not found.")
-    if user.role in _ADMIN_ROLES:
+    if user.active_role in _ADMIN_ROLES:
         return p
     if require_draft:
         _require_owner_and_draft(p, user)  # raises 404 (not owner) or 400 (not draft)
@@ -620,7 +620,7 @@ async def list_pending_approvals(
     route below (fixed-path-before-dynamic-path convention, courses.py) so
     "/ppw/pending-approvals" is never swallowed by the {ppw_id}: UUID matcher."""
     rows: list[dict] = []
-    if user.role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
+    if user.active_role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
         result = await db.execute(
             select(PpwApprovalStage, PpwApprovalCycle, Ppw)
             .join(PpwApprovalCycle, PpwApprovalCycle.id == PpwApprovalStage.cycle_id)
@@ -653,7 +653,7 @@ async def list_pending_approvals(
                 "department_name": department.name if department else None,
                 "program_name": program.name if program else None,
             })
-    elif user.role == UserRole.HOD:
+    elif user.active_role == UserRole.HOD:
         if not user.department_id:
             return []
         result = await db.execute(

@@ -1,5 +1,5 @@
 """AMS Authentication — login, refresh, me, user management."""
-import hashlib, io, random, string, smtplib
+import hashlib, io, random, string, smtplib, uuid as uuid_lib
 from email.mime.text import MIMEText
 from datetime import datetime, date, timezone, timedelta
 from typing import Optional, List, Literal
@@ -14,12 +14,15 @@ from pydantic import BaseModel, EmailStr, field_validator, model_validator
 import openpyxl
 
 from app.db.base import get_db
-from app.core.security import verify_password, hash_password, create_access_token, create_refresh_token, verify_token
-from app.core.dependencies import get_current_user, require_roles, is_profile_complete, get_missing_profile_fields
+from app.core.security import verify_password, hash_password, create_access_token, create_refresh_token, decode_token
+from app.core.dependencies import (
+    get_current_user, require_roles, is_profile_complete, get_missing_profile_fields,
+    get_assigned_roles, pick_default_role,
+)
 from app.core.config import settings
 from app.core.email import send_email
 from app.core.bulk_upload import bulk_cell_to_str, parse_bulk_upload_file
-from app.models.user import User, UserRole, RefreshToken, Designation, Department, College
+from app.models.user import User, UserRole, RefreshToken, UserRoleAssignment, Designation, Department, College
 # Programme<->Department many-to-many redesign — shared validation, whenever
 # both fields are supplied together they must form a real association.
 # Neither field becomes mandatory by importing this (Faculty/HOD keep working
@@ -167,6 +170,14 @@ class CreateFacultyRequest(BaseModel):
 
 
 def _user_dict(u: User) -> dict:
+    # Multi-role/role-switching task — `role` remains for legacy/display
+    # compatibility (see User.role's docstring); `assigned_roles`/
+    # `active_role` are the real authorization-relevant fields, populated by
+    # get_current_user/_issue_tokens onto the transient `assigned_roles`/
+    # `active_role` attributes. Falls back to `[u.role]`/`u.role` only for a
+    # caller that built a `User` without going through either of those paths.
+    assigned = getattr(u, "assigned_roles", None) or [u.role]
+    active = getattr(u, "active_role", None) or u.role
     return {
         "id": str(u.id),
         "email": u.email,
@@ -177,6 +188,8 @@ def _user_dict(u: User) -> dict:
         "last_name": u.last_name,
         "mobile": u.mobile,
         "role": u.role.value,
+        "assigned_roles": [r.value for r in assigned],
+        "active_role": active.value,
         "designation": u.designation,
         "department_id": str(u.department_id) if u.department_id else None,
         # Bulk Faculty/User Excel Upload task (this revision) — College is
@@ -197,11 +210,36 @@ def _user_dict(u: User) -> dict:
 
 
 async def _issue_tokens(user: User, request: Request, db: AsyncSession) -> TokenResponse:
-    access_token = create_access_token(str(user.id), {"role": user.role.value})
+    """Multi-role/role-switching task. The access token's old `role` claim
+    was write-only dead data (confirmed by investigation: nothing ever read
+    it back — `require_roles` always re-checked the live DB row). It is
+    replaced by a `sid` claim pointing at the RefreshToken row created here,
+    which is this app's natural per-login/per-device "session" unit; that
+    row (not the token) is where the active role actually lives, re-read
+    fresh on every request (app.core.dependencies.get_current_user) — the
+    token still proves nothing about role by itself, exactly like `sub`
+    already didn't prove account validity by itself (a revoked/deactivated
+    user's token is still rejected by that same fresh DB lookup)."""
+    assigned = await get_assigned_roles(user.id, db)
+    if not assigned:
+        # Defensive self-heal for a pre-migration/legacy account (see
+        # get_current_user's identical fallback) — persist it so it's no
+        # longer missing on the next login.
+        assigned = [user.role]
+        db.add(UserRoleAssignment(user_id=user.id, role=user.role))
+
+    initial_active = pick_default_role(assigned, user.role)
+    rt_id = uuid_lib.uuid4()
+    access_token = create_access_token(str(user.id), {"sid": str(rt_id)})
     refresh_token = create_refresh_token(str(user.id))
     token_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
-    rt = RefreshToken(user_id=user.id, token_hash=token_hash, device_info=request.headers.get("user-agent", ""))
+    rt = RefreshToken(
+        id=rt_id, user_id=user.id, token_hash=token_hash,
+        device_info=request.headers.get("user-agent", ""), active_role=initial_active,
+    )
     db.add(rt)
+    user.active_role = initial_active
+    user.assigned_roles = assigned
     return TokenResponse(access_token=access_token, refresh_token=refresh_token, user=_user_dict(user))
 
 
@@ -314,7 +352,7 @@ async def admin_reset_password(
 async def create_user(
     body: CreateUserRequest,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+    admin: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
 ):
     existing = await db.execute(select(User).where(User.email == body.email.lower()))
     if existing.scalar_one_or_none():
@@ -338,6 +376,12 @@ async def create_user(
         is_verified=True,
     )
     db.add(user)
+    await db.flush()
+    # Multi-role/role-switching task — every user must have at least one
+    # UserRoleAssignment row from the moment they exist (Section 6/41's
+    # "every existing user has at least one assigned role" invariant applies
+    # to every NEW user too, not only the migration backfill).
+    db.add(UserRoleAssignment(user_id=user.id, role=user.role, assigned_by=admin.id))
     await db.commit()
     return {"message": "User created.", "id": str(user.id)}
 
@@ -347,7 +391,7 @@ async def update_user(
     user_id: UUID,
     body: UpdateUserRequest,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+    admin: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
 ):
     target = await db.get(User, user_id)
     if not target:
@@ -410,6 +454,20 @@ async def update_user(
     for field, value in updates.items():
         setattr(target, field, value)
 
+    # Multi-role/role-switching task — this legacy single-role field remains
+    # supported (Section 32: existing single-role admin flows keep working
+    # unchanged), but setting it must never leave `User.role` pointing at a
+    # role the user isn't actually assigned (Section 7's "must not remain an
+    # independent authorization authority that can contradict assigned
+    # roles"). This is purely ADDITIVE — it never removes another role a
+    # Super Admin already granted via the new role-assignment endpoints.
+    if body.role is not None:
+        existing = await db.execute(
+            select(UserRoleAssignment).where(UserRoleAssignment.user_id == target.id, UserRoleAssignment.role == body.role)
+        )
+        if not existing.scalar_one_or_none():
+            db.add(UserRoleAssignment(user_id=target.id, role=body.role, assigned_by=admin.id))
+
     await db.commit()
     return {"message": "User updated."}
 
@@ -433,7 +491,7 @@ async def list_users(
     # BUSINESS_LOGIC.md Section N.4 — HOD is always scoped to their own
     # department, regardless of any client-supplied department_id. Other
     # roles keep their existing unrestricted behavior (unchanged).
-    if user.role == UserRole.HOD:
+    if user.active_role == UserRole.HOD:
         if not user.department_id:
             return []
         q = q.where(User.department_id == user.department_id)
@@ -446,6 +504,148 @@ async def list_users(
         d["department_name"] = u.department.name if u.department else None
         users_out.append(d)
     return users_out
+
+
+# ── Multi-role / role-switching (this revision) ─────────────────────────────
+#
+# Assigned roles (UserRoleAssignment, DB-authoritative, Super Admin/Academic
+# Admin managed) vs. active role (RefreshToken.active_role, session-scoped —
+# see app.core.dependencies.get_current_user). `require_roles(...)` and
+# every inline role branch across the backend already read `user.active_role`
+# (never `user.role`, never anything client-supplied), so a role switch here
+# takes effect on the very next request with no new token needed.
+
+class SwitchRoleRequest(BaseModel):
+    role: UserRole
+
+
+class RoleAssignmentRequest(BaseModel):
+    role: UserRole
+
+
+@router.post("/switch-role")
+async def switch_role(
+    body: SwitchRoleRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Backend-authoritative role switch (Section 9/10). Verifies the
+    requested role is actually assigned to THIS user (re-read fresh by
+    get_current_user above, never trusted from the request) before touching
+    anything — an unassigned role (including `super_admin`) is always
+    rejected with 403, regardless of what the client sends."""
+    if body.role not in user.assigned_roles:
+        raise HTTPException(status_code=403, detail="This role is not assigned to your account.")
+
+    session = getattr(user, "_active_session", None)
+    if session is None:
+        # Access token predates this feature (no `sid` claim) or its session
+        # was revoked — role switching needs a live, identifiable session to
+        # scope the change to. Short-lived access tokens make this a
+        # narrow, self-resolving window; logging in again issues one.
+        raise HTTPException(status_code=401, detail="Your session does not support role switching. Please log in again.")
+
+    session.active_role = body.role
+    user.active_role = body.role
+    await db.commit()
+    return _user_dict(user)
+
+
+@router.get("/users/{user_id}/roles")
+async def get_user_roles(
+    user_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+):
+    target = await db.get(User, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found.")
+    assigned = await get_assigned_roles(user_id, db)
+    return {"user_id": str(user_id), "assigned_roles": [r.value for r in assigned]}
+
+
+@router.post("/users/{user_id}/roles", status_code=201)
+async def add_user_role(
+    user_id: UUID,
+    body: RoleAssignmentRequest,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+):
+    """Role assignment is Super Admin/Academic Admin-only (Section 12) — the
+    same authorization already used for create_user/update_user above, never
+    self-service and never reachable by a user for their own account through
+    any other endpoint."""
+    target = await db.get(User, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    # Preserve the existing HOD-requires-a-department business rule
+    # (Section 29/30) — never silently assign a default department.
+    if body.role == UserRole.HOD and not target.department_id:
+        raise HTTPException(status_code=400, detail="Cannot assign HOD: this user has no department assigned. Assign a department first.")
+
+    existing = await db.execute(
+        select(UserRoleAssignment).where(UserRoleAssignment.user_id == user_id, UserRoleAssignment.role == body.role)
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="This role is already assigned to the user.")
+
+    db.add(UserRoleAssignment(user_id=user_id, role=body.role, assigned_by=admin.id))
+    await db.commit()
+    assigned = await get_assigned_roles(user_id, db)
+    return {"message": "Role assigned.", "assigned_roles": [r.value for r in assigned]}
+
+
+@router.delete("/users/{user_id}/roles/{role}")
+async def remove_user_role(
+    user_id: UUID,
+    role: UserRole,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+):
+    """Role removal takes effect immediately (Section 10/28): any session
+    currently active in this role self-heals to a deterministic fallback on
+    its very next request (app.core.dependencies.get_current_user — the
+    session's `active_role` is re-validated against assignments on every
+    call), never remaining authorized as the removed role merely because an
+    old token/frontend cache still names it."""
+    target = await db.get(User, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    assigned = await get_assigned_roles(user_id, db)
+    if role not in assigned:
+        raise HTTPException(status_code=404, detail="This role is not assigned to the user.")
+    if len(assigned) <= 1:
+        raise HTTPException(status_code=400, detail="Cannot remove a user's only assigned role. Assign another role first.")
+
+    if role == UserRole.SUPER_ADMIN:
+        # Mirrors update_user's existing "at least one active Super Admin
+        # must remain" invariant, but counts by ASSIGNMENT (not the legacy
+        # scalar column) so it stays correct once a Super Admin can also
+        # hold other roles.
+        count_result = await db.execute(
+            select(func.count(func.distinct(UserRoleAssignment.user_id)))
+            .select_from(UserRoleAssignment)
+            .join(User, User.id == UserRoleAssignment.user_id)
+            .where(UserRoleAssignment.role == UserRole.SUPER_ADMIN, User.is_active == True)
+        )
+        if count_result.scalar() <= 1:
+            raise HTTPException(status_code=400, detail="Cannot remove: at least one active Super Admin must remain.")
+
+    row = (await db.execute(
+        select(UserRoleAssignment).where(UserRoleAssignment.user_id == user_id, UserRoleAssignment.role == role)
+    )).scalar_one()
+    await db.delete(row)
+
+    remaining = [r for r in assigned if r != role]
+    if target.role == role:
+        # Keep the legacy display field from contradicting the assignment
+        # set it's supposed to be consistent with (Section 7).
+        target.role = pick_default_role(remaining, None)
+
+    await db.commit()
+    return {"message": "Role removed.", "assigned_roles": [r.value for r in remaining]}
 
 
 # ── HOD: Add Faculty (BUSINESS_LOGIC.md Section N.2/N.3) ──────────────────────
@@ -492,13 +692,15 @@ async def create_faculty(
     )
     db.add(faculty)
     try:
+        await db.flush()
+        db.add(UserRoleAssignment(user_id=faculty.id, role=UserRole.FACULTY, assigned_by=user.id))
         await db.commit()
     except Exception:
         await db.rollback()
         raise HTTPException(409, "This email is already registered.")
     await db.refresh(faculty)
 
-    ams_link = settings.origins[0] if settings.origins else ""
+    ams_link = settings.AMS_FRONTEND_URL
     sent = send_email(
         faculty.email,
         "Your AVFU AMS Faculty Account",
@@ -730,6 +932,9 @@ async def _create_bulk_users(valid_rows: list[dict], db: AsyncSession) -> list[U
         db.add(u)
         created.append(u)
     try:
+        await db.flush()
+        for u in created:
+            db.add(UserRoleAssignment(user_id=u.id, role=u.role))
         await db.commit()
     except IntegrityError:
         await db.rollback()
@@ -749,7 +954,7 @@ def _send_bulk_credential_emails(created: list[User]) -> int:
     never a reason to leave a partially-created account; every row already
     committed to the database before any email is attempted). Returns how
     many sends actually succeeded, purely for the response message."""
-    ams_link = settings.origins[0] if settings.origins else ""
+    ams_link = settings.AMS_FRONTEND_URL
     sent_count = 0
     for u in created:
         sent = send_email(
