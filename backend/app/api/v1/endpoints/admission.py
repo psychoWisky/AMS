@@ -234,7 +234,7 @@ async def apply_for_admission(
 # ---------------------------------------------------------------------------
 
 _admin_dep = Depends(
-    require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR)
+    require_roles(UserRole.SUPER_ADMIN)
 )
 
 
@@ -379,7 +379,7 @@ async def update_application_status(
     body: StatusUpdateBody,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(
-        require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR)
+        require_roles(UserRole.SUPER_ADMIN)
     ),
 ):
     """Update status and optional remarks on an application."""

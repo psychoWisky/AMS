@@ -97,8 +97,8 @@ function RegistrationDetailModal({ registrationId, onClose }: { registrationId: 
 export default function CourseRequestPage() {
   const role = useRole();
   const qc = useQueryClient();
-  const isFacultyLike = role === "faculty" || role === "research_supervisor" || role === "hod" || role === "super_admin" || role === "academic_admin";
-  const isHodLike = role === "hod" || role === "super_admin" || role === "academic_admin";
+  const isFacultyLike = role === "faculty" || role === "hod" || role === "super_admin";
+  const isHodLike = role === "hod" || role === "super_admin";
 
   const [calendarId, setCalendarId] = useState("");
   const [semesterId, setSemesterId] = useState("");
@@ -121,7 +121,7 @@ export default function CourseRequestPage() {
   const { data: myOfferings = [] } = useQuery<Offering[]>({
     queryKey: ["ams-my-offerings", calendarId, semesterId],
     queryFn: async () => (await api.get("/courses/offerings/all", { params: { mine: true, calendar_id: calendarId || undefined, semester_id: semesterId || undefined } })).data,
-    enabled: role === "faculty" || role === "research_supervisor",
+    enabled: role === "faculty",
   });
 
   const { data: students = [], isLoading: studentsLoading } = useQuery<EnrollmentItem[]>({
@@ -133,7 +133,7 @@ export default function CourseRequestPage() {
   const { data: maQueue = [] } = useQuery<Registration[]>({
     queryKey: ["ams-ma-queue"],
     queryFn: async () => (await api.get("/enrollment/registrations", { params: { stage: "major_advisor_pending" } })).data,
-    enabled: role === "faculty" || role === "research_supervisor",
+    enabled: role === "faculty",
   });
 
   const { data: hodQueue = [] } = useQuery<Registration[]>({
@@ -185,7 +185,7 @@ export default function CourseRequestPage() {
 
   return (
     <div className="p-6 w-full space-y-8">
-      {(role === "faculty" || role === "research_supervisor") && (
+      {role === "faculty" && (
         <div>
           <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2 mb-2"><ClipboardList size={24} className="text-[#0D6E6E]" />Course Request</h1>
           <p className="text-gray-700 text-sm mb-4">Review and approve/revert student course selections for courses assigned to you.</p>
@@ -275,7 +275,7 @@ export default function CourseRequestPage() {
         </div>
       )}
 
-      {(role === "faculty" || role === "research_supervisor") && maQueue.length > 0 && (
+      {role === "faculty" && maQueue.length > 0 && (
         <div>
           <h2 className="text-xl font-bold text-gray-900 mb-1">Registrations Awaiting Your Approval as Major Advisor</h2>
           <p className="text-gray-700 text-sm mb-4">All selected courses have cleared Course Teacher approval.</p>

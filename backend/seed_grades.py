@@ -110,9 +110,11 @@ async def run():
 
         # 2. Create grade sheets and entries
         print("\nCreating grade sheets...")
+        # Role-cleanup task: mirrors grading.py's APPROVAL_PIPELINE exactly —
+        # the registrar/examiner/academic_admin stages were dummy/testing
+        # roles and have been removed, not replaced.
         APPROVAL_PIPELINE = [
-            (1, "faculty"), (2, "hod"), (3, "registrar"),
-            (4, "examiner"), (5, "academic_admin"),
+            (1, "faculty"), (2, "hod"),
         ]
 
         for oid in OFFERING_IDS:

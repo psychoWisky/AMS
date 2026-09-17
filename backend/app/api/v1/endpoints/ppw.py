@@ -7,10 +7,10 @@ preview. NO approval workflow, NO signing, NO notifications are implemented
 here — see the model file's docstring and this task's investigation report
 for the full reasoning.
 
-RBAC: student self-only (create/view/edit/submit their own PPW); admin roles
-(SUPER_ADMIN/ACADEMIC_ADMIN) get unrestricted read, consistent with every
-other module's existing convention. No HOD/Faculty/committee endpoints exist
-yet — Phase 1 explicitly excludes the approval chain.
+RBAC: student self-only (create/view/edit/submit their own PPW); SUPER_ADMIN
+gets unrestricted read, consistent with every other module's existing
+convention. No HOD/Faculty/committee endpoints exist yet — Phase 1
+explicitly excludes the approval chain.
 """
 import logging
 import random, string
@@ -57,8 +57,8 @@ from app.core.classification import (
 router = APIRouter(prefix="/ppw", tags=["PPW"])
 logger = logging.getLogger(__name__)
 
-_ADMIN_ROLES = (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)
-_APPROVER_ROLES = (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR, UserRole.HOD)
+_ADMIN_ROLES = (UserRole.SUPER_ADMIN,)
+_APPROVER_ROLES = (UserRole.FACULTY, UserRole.HOD)
 
 # Dev/test-only OTP convenience (this task's explicit requirement) — accepted
 # ONLY when settings.ENVIRONMENT != "production" (see _is_dev_mode below).
@@ -210,7 +210,7 @@ async def _authorize_ppw_view(p: Ppw, user: User, db: AsyncSession) -> None:
         if p.student_id == user.id:
             return
         raise HTTPException(404, "PPW not found.")
-    if user.active_role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
+    if user.active_role == UserRole.FACULTY:
         result = await db.execute(
             select(PpwApprovalStage.id)
             .join(PpwApprovalCycle, PpwApprovalCycle.id == PpwApprovalStage.cycle_id)
@@ -620,7 +620,7 @@ async def list_pending_approvals(
     route below (fixed-path-before-dynamic-path convention, courses.py) so
     "/ppw/pending-approvals" is never swallowed by the {ppw_id}: UUID matcher."""
     rows: list[dict] = []
-    if user.active_role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
+    if user.active_role == UserRole.FACULTY:
         result = await db.execute(
             select(PpwApprovalStage, PpwApprovalCycle, Ppw)
             .join(PpwApprovalCycle, PpwApprovalCycle.id == PpwApprovalStage.cycle_id)

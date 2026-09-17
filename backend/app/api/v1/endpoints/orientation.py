@@ -4,11 +4,12 @@ Incharge Academic Cell -> Orientation -> Present/Absent -> Select ->
 roll number -> student account -> credential email -> student login.
 
 RBAC NOTE: the confirmed business role "Incharge Academic Cell" does not exist
-in the current UserRole enum (Section 11/28.19 of the plan). Per that section's
-documented demo mitigation, this module is temporarily gated to
-SUPER_ADMIN/ACADEMIC_ADMIN. This is an explicit, isolated, documented
-substitution — not a silent permanent mapping — and should be replaced with a
-real Incharge Academic Cell role check the moment that role is added (Phase 0).
+in the current UserRole enum (Section 11/28.19 of the plan), which — per the
+role-cleanup task's business decision — now contains only SUPER_ADMIN, HOD,
+FACULTY, STUDENT. `ACADEMIC_ADMIN` (previously used as this module's demo
+substitution) was a dummy/testing role and has been removed entirely; this
+module is gated to SUPER_ADMIN only. Replace `_INCHARGE_ROLES` with a real
+Incharge Academic Cell role check the moment AVFU defines that role.
 """
 import csv
 import io
@@ -48,8 +49,10 @@ router = APIRouter(prefix="/orientation", tags=["Orientation"])
 # supplied externally now, never generated from the candidate's name.
 _AVFU_EMAIL_DOMAIN = "avfu.ac.in"
 
-# Demo substitution for "Incharge Academic Cell" — see module docstring.
-_INCHARGE_ROLES = (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)
+# "Incharge Academic Cell" is a future/undefined AVFU role (BUSINESS_LOGIC.md)
+# — Orientation candidate management is Super Admin only under the current
+# four-role architecture, same as every other Academic Admin-only screen.
+_INCHARGE_ROLES = (UserRole.SUPER_ADMIN,)
 # Bulk upload (this task's confirmed requirement) — deliberately narrower than
 # the general Orientation roles above: Section 4 restricts this specific
 # capability to Super Admin only, independent of the frontend's own gating.

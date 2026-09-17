@@ -69,8 +69,8 @@ class ApprovalStage(Base):
     __tablename__ = "ams_approval_stages"
     id: Mapped[uuid.UUID]          = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     sheet_id: Mapped[uuid.UUID]    = mapped_column(UUID(as_uuid=True), ForeignKey("ams_grade_sheets.id", ondelete="CASCADE"))
-    stage: Mapped[int]             = mapped_column(Integer, nullable=False)  # 1–5
-    role_required: Mapped[str]     = mapped_column(String(50))  # faculty / hod / registrar / examiner / academic_admin
+    stage: Mapped[int]             = mapped_column(Integer, nullable=False)  # 1–2 (see grading.py's APPROVAL_PIPELINE)
+    role_required: Mapped[str]     = mapped_column(String(50))  # faculty / hod — free-text, not a FK to UserRole
     approver_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id"))
     status: Mapped[str]            = mapped_column(String(20), default="pending")  # pending / approved / rejected / skipped
     remarks: Mapped[str | None]    = mapped_column(Text)

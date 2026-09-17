@@ -263,9 +263,9 @@ async def my_admit_cards(
 async def all_admit_cards(
     semester_id: UUID | None = None,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.EXAMINER, UserRole.REGISTRAR)),
+    _: User = Depends(require_roles(UserRole.SUPER_ADMIN)),
 ):
-    """Admin/Examiner views all generated admit cards."""
+    """Admin views all generated admit cards."""
     q = (
         select(AdmitCard)
         .options(selectinload(AdmitCard.student), selectinload(AdmitCard.semester))
@@ -294,7 +294,7 @@ async def get_admit_card(
     if not card:
         raise HTTPException(404, "Admit card not found.")
 
-    is_admin = user.active_role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.EXAMINER, UserRole.REGISTRAR)
+    is_admin = user.active_role == UserRole.SUPER_ADMIN
     if not is_admin and card.student_id != user.id:
         raise HTTPException(403, "Access denied.")
 

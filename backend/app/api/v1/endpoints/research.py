@@ -14,13 +14,12 @@ deliberately excluded from `_can_manage_members` — the prior implementation le
 HOD do both steps, which the confirmed business rule does not permit.
 
 SCOPE NOTE: I/C Academic Cell and DPGS stages are NOT implemented in this
-revision. Orientation's Incharge-Academic-Cell demo substitution
-(SUPER_ADMIN/ACADEMIC_ADMIN) is specific to that module's documented mitigation;
-no equivalent demo mitigation is documented anywhere for Advisory Committee's
-Incharge/DPGS stages, and none is invented here (BUSINESS_LOGIC.md Open Question
-11, STUDENT_SIDE_IMPLEMENTATION_PLAN.md Section 32 Phase F-5). A committee's
-workflow terminates at `hod_approved` in this revision — a documented, honest
-P0 stopping point, not a silent omission.
+revision — both remain undefined future AVFU roles under the current
+four-role architecture (SUPER_ADMIN/HOD/FACULTY/STUDENT only; ACADEMIC_ADMIN
+was a dummy/testing role, removed entirely). No demo substitution is invented
+here (BUSINESS_LOGIC.md Open Question 11, STUDENT_SIDE_IMPLEMENTATION_PLAN.md
+Section 32 Phase F-5). A committee's workflow terminates at `hod_approved` in
+this revision — a documented, honest P0 stopping point, not a silent omission.
 
 CAPACITY ASSUMPTION (BUSINESS_LOGIC.md Rule 30, Open Question 38 — "passes out"
 has no confirmed system trigger): this implementation treats a committee's
@@ -50,7 +49,7 @@ from app.core.student_scope import resolve_student_department_id as _student_dep
 
 router = APIRouter(prefix="/research", tags=["Research"])
 
-_ADMIN_ROLES = (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR)
+_ADMIN_ROLES = (UserRole.SUPER_ADMIN,)
 
 # The 5 confirmed PG/PhD Research Committee member types (BUSINESS_LOGIC.md M.5,
 # Rule 29). "major_advisor" is set only by create_committee/reassign — never a
@@ -139,7 +138,7 @@ async def _authorize_committee_view(committee: AdvisoryCommittee, user: User, db
         if dept_id and user.department_id and dept_id == user.department_id:
             return
         raise HTTPException(403, "You can only view committees within your own department.")
-    if user.active_role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
+    if user.active_role == UserRole.FACULTY:
         result = await db.execute(select(CommitteeMember).where(
             CommitteeMember.committee_id == committee.id, CommitteeMember.faculty_id == user.id,
         ))
@@ -251,7 +250,7 @@ _COMMITTEE_LOAD_OPTIONS = (
 @router.post("/committees", status_code=201)
 async def create_committee(
     body: CommitteeIn, db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.HOD)),
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HOD)),
 ):
     await _authorize_propose_major_advisor(body.student_id, user, db)
     existing = await db.execute(select(AdvisoryCommittee).where(AdvisoryCommittee.student_id == body.student_id))
@@ -274,7 +273,7 @@ async def create_committee(
 @router.patch("/committees/{committee_id}/major-advisor-response")
 async def major_advisor_response(
     committee_id: UUID, body: MajorAdvisorResponse, db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR, UserRole.HOD)),
+    user: User = Depends(require_roles(UserRole.FACULTY, UserRole.HOD)),
 ):
     c = await db.get(AdvisoryCommittee, committee_id)
     if not c: raise HTTPException(404, "Committee not found.")
@@ -304,7 +303,7 @@ async def major_advisor_response(
 @router.post("/committees/{committee_id}/reassign-major-advisor")
 async def reassign_major_advisor(
     committee_id: UUID, body: ReassignMajorAdvisorIn, db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.HOD)),
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HOD)),
 ):
     c = await db.get(AdvisoryCommittee, committee_id)
     if not c: raise HTTPException(404, "Committee not found.")
@@ -330,16 +329,15 @@ async def list_eligible_faculty(
     """Faculty directory for the Add Member modal, scoped to whoever is
     actually allowed to manage THIS committee's members (admin or this
     committee's own accepted Major Advisor) — reuses `_authorize_manage_members`
-    unchanged. Fixes the Major Advisor (role=FACULTY/RESEARCH_SUPERVISOR) being
-    unable to see a faculty list at all, since the general-purpose
-    `GET /auth/users` directory is intentionally admin/HOD-only and is not
-    being widened here."""
+    unchanged. Fixes the Major Advisor (role=FACULTY) being unable to see a
+    faculty list at all, since the general-purpose `GET /auth/users`
+    directory is intentionally admin/HOD-only and is not being widened here."""
     c = await db.get(AdvisoryCommittee, committee_id)
     if not c: raise HTTPException(404, "Committee not found.")
     await _authorize_manage_members(c, user, db)
     result = await db.execute(
         select(User).options(selectinload(User.department))
-        .where(User.role.in_([UserRole.FACULTY, UserRole.HOD, UserRole.RESEARCH_SUPERVISOR]), User.is_active == True)
+        .where(User.role.in_([UserRole.FACULTY, UserRole.HOD]), User.is_active == True)
         .order_by(User.first_name)
     )
     return [{
@@ -352,8 +350,7 @@ async def list_eligible_faculty(
 async def add_member(
     committee_id: UUID, body: MemberIn, db: AsyncSession = Depends(get_db),
     user: User = Depends(require_roles(
-        UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR,
-        UserRole.HOD, UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR,
+        UserRole.SUPER_ADMIN, UserRole.HOD, UserRole.FACULTY,
     )),
 ):
     c = await db.get(AdvisoryCommittee, committee_id)
@@ -382,8 +379,7 @@ async def add_member(
 async def remove_member(
     committee_id: UUID, member_id: UUID, db: AsyncSession = Depends(get_db),
     user: User = Depends(require_roles(
-        UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR,
-        UserRole.HOD, UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR,
+        UserRole.SUPER_ADMIN, UserRole.HOD, UserRole.FACULTY,
     )),
 ):
     """Corrective action after a member decline (Stage 3 revert) — lets the Major
@@ -415,7 +411,7 @@ async def accept_membership(
     committee_id: UUID, member_id: UUID,
     accepted: bool, remark: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR)),
+    user: User = Depends(require_roles(UserRole.FACULTY)),
 ):
     m = await db.get(CommitteeMember, member_id)
     if not m or m.committee_id != committee_id or m.faculty_id != user.id:
@@ -452,7 +448,7 @@ async def accept_membership(
 @router.patch("/committees/{committee_id}/hod-approval")
 async def hod_approval(
     committee_id: UUID, body: HodApprovalIn, db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.HOD)),
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HOD)),
 ):
     c = await db.get(AdvisoryCommittee, committee_id)
     if not c: raise HTTPException(404, "Committee not found.")
@@ -491,7 +487,7 @@ async def list_committees(db: AsyncSession = Depends(get_db), user: User = Depen
             q.join(User, AdvisoryCommittee.student_id == User.id)
              .where(User.department_id == user.department_id)
         )
-    elif user.active_role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
+    elif user.active_role == UserRole.FACULTY:
         q = q.where(AdvisoryCommittee.id.in_(
             select(CommitteeMember.committee_id).where(CommitteeMember.faculty_id == user.id)
         ))
@@ -504,7 +500,7 @@ async def list_committees(db: AsyncSession = Depends(get_db), user: User = Depen
     committees = result.scalars().all()
     data = [_committee_dict(c) for c in committees]
 
-    if user.active_role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
+    if user.active_role == UserRole.FACULTY:
         for d, c in zip(data, committees):
             mine = next((m for m in c.members if m.faculty_id == user.id), None)
             d["my_role"] = mine.role if mine else None
@@ -547,7 +543,7 @@ async def get_advisor_capacity(faculty_id: UUID, db: AsyncSession = Depends(get_
 @router.patch("/committees/{committee_id}/lock")
 async def lock_committee(
     committee_id: UUID, db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+    _: User = Depends(require_roles(UserRole.SUPER_ADMIN)),
 ):
     c = await db.get(AdvisoryCommittee, committee_id)
     if not c: raise HTTPException(404, "Committee not found.")

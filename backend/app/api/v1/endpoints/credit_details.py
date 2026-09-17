@@ -35,7 +35,7 @@ from app.core.student_scope import resolve_student_department_id
 
 router = APIRouter(prefix="/credit-details", tags=["Student Credit Details"])
 
-_ADMIN_ROLES = (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR)
+_ADMIN_ROLES = (UserRole.SUPER_ADMIN,)
 
 
 # ── Authorization ────────────────────────────────────────────────────────────
@@ -56,7 +56,7 @@ async def _authorize_student_credit_view(student_id: UUID, user: User, db: Async
         if dept_id and user.department_id and dept_id == user.department_id:
             return
         raise HTTPException(403, "You can only view students within your own department.")
-    if user.active_role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
+    if user.active_role == UserRole.FACULTY:
         course_link = await db.execute(
             select(OfferingFaculty.id)
             .join(StudentEnrollment, StudentEnrollment.offering_id == OfferingFaculty.offering_id)

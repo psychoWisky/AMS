@@ -122,7 +122,7 @@ export default function CoursesPage() {
     // scope server-side for HOD regardless of what's requested here.
     queryKey: ["ams-faculty", isHod ? user?.department_id : "all"],
     queryFn: async () => (await api.get("/auth/users", { params: isHod ? { department_id: user?.department_id } : {} }))
-      .data.filter((u: { role: string }) => ["faculty","hod","research_supervisor"].includes(u.role)),
+      .data.filter((u: { role: string }) => ["faculty","hod"].includes(u.role)),
     enabled: showOfferingCreate,
   });
 

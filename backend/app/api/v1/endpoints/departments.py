@@ -18,12 +18,11 @@ from app.models.user import User, UserRole, Department, Program, ProgramDepartme
 router = APIRouter(prefix="/departments", tags=["Departments"])
 admin_router = APIRouter(prefix="/admin", tags=["Admin — Master Data"])
 
-_MASTER_DATA_ROLES = (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)
-# Designation management is deliberately narrower than the general master-data
-# roles above — Section 5 of the designation-management task explicitly scopes
-# create/edit/deactivate to SUPER_ADMIN only (ACADEMIC_ADMIN is NOT included,
-# unlike Department/Program/College). Reading (for HOD's Add Faculty dropdown)
-# uses the same unrestricted get_current_user pattern as College/Department.
+_MASTER_DATA_ROLES = (UserRole.SUPER_ADMIN,)
+# Designation management is Super Admin only, same as every master-data role
+# above now that the four-role architecture no longer has a second admin
+# role to distinguish it from. Reading (for HOD's Add Faculty dropdown) uses
+# the same unrestricted get_current_user pattern as College/Department.
 _DESIGNATION_MANAGE_ROLES = (UserRole.SUPER_ADMIN,)
 # Role master-data management (role-management task) — Super Admin only, same
 # reasoning as Designations: not broadened to Academic Admin.

@@ -22,12 +22,12 @@ from app.core.student_scope import resolve_student_department_id
 
 router = APIRouter(prefix="/grading", tags=["Grading"])
 
-_ADMIN_ROLES = (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR)
-# Roles that see/approve every gradesheet regardless of department/offering —
-# REGISTRAR and EXAMINER are university-wide approval stages in APPROVAL_PIPELINE
-# (not department-scoped), consistent with how they're treated as unrestricted
-# elsewhere in this codebase (e.g. enrollment.py's "mine" scoping).
-_GRADING_UNRESTRICTED_ROLES = (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR, UserRole.EXAMINER)
+_ADMIN_ROLES = (UserRole.SUPER_ADMIN,)
+# Role-cleanup task: REGISTRAR/EXAMINER/ACADEMIC_ADMIN were dummy/testing
+# university-wide approval-stage roles (see APPROVAL_PIPELINE below) and have
+# been removed entirely — they are not real AVFU roles and were never
+# reintroduced elsewhere. SUPER_ADMIN remains unrestricted, as it already was.
+_GRADING_UNRESTRICTED_ROLES = (UserRole.SUPER_ADMIN,)
 
 
 async def _authorize_offering_grading(offering_id: UUID, user: User, db: AsyncSession) -> None:
@@ -46,7 +46,7 @@ async def _authorize_offering_grading(offering_id: UUID, user: User, db: AsyncSe
         if user.department_id and offering.department_id and user.department_id == offering.department_id:
             return
         raise HTTPException(403, "You can only access gradesheets within your own department.")
-    if user.active_role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
+    if user.active_role == UserRole.FACULTY:
         assigned = await db.execute(
             select(OfferingFaculty.id).where(
                 OfferingFaculty.offering_id == offering_id, OfferingFaculty.faculty_id == user.id,
@@ -64,9 +64,9 @@ async def _authorize_student_academic_view(student_id: UUID, user: User, db: Asy
     enrollment.py's _authorize_offering_management: admins unrestricted, HOD via
     the student's OWN department_id (Programme<->Department many-to-many
     redesign — never inferred via Program.department_id anymore), student
-    self-only, and faculty/research supervisor only via an established
-    relationship (shared course assignment or advisory committee membership)
-    — never a bare role check."""
+    self-only, and faculty only via an established relationship (shared
+    course assignment or advisory committee membership) — never a bare role
+    check."""
     if user.active_role in _ADMIN_ROLES:
         return
     if user.active_role == UserRole.STUDENT:
@@ -78,7 +78,7 @@ async def _authorize_student_academic_view(student_id: UUID, user: User, db: Asy
         if dept_id and user.department_id and dept_id == user.department_id:
             return
         raise HTTPException(403, "You can only view students within your own department.")
-    if user.active_role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
+    if user.active_role == UserRole.FACULTY:
         course_link = await db.execute(
             select(OfferingFaculty.id)
             .join(StudentEnrollment, StudentEnrollment.offering_id == OfferingFaculty.offering_id)
@@ -99,12 +99,19 @@ async def _authorize_student_academic_view(student_id: UUID, user: User, db: Asy
     raise HTTPException(403, "Insufficient permissions.")
 
 
+# Role-cleanup task: this pipeline previously had 5 stages
+# (faculty -> hod -> registrar -> examiner -> academic_admin). The last three
+# were dummy/testing roles with no real AVFU business definition and have
+# been removed — NOT replaced with super_admin or any other role, per the
+# explicit instruction not to invent a replacement approval authority. A
+# gradesheet under the current four-role architecture is fully approved once
+# both real, department-scoped stages below sign off. A genuine university-
+# wide final-approval stage (Registrar/Examiner/Controller-of-Exams-
+# equivalent) is real, undefined future AVFU business requirement — see
+# BUSINESS_LOGIC.md's grading section — not something to fabricate here.
 APPROVAL_PIPELINE = [
     (1, "faculty"),
     (2, "hod"),
-    (3, "registrar"),
-    (4, "examiner"),
-    (5, "academic_admin"),
 ]
 
 
@@ -153,7 +160,7 @@ def _send_notification_email(to: str, subject: str, body: str):
 async def create_sheet(
     offering_id: UUID, sheet_type: str = "final",
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(UserRole.FACULTY, UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+    user: User = Depends(require_roles(UserRole.FACULTY, UserRole.SUPER_ADMIN)),
 ):
     await _authorize_offering_grading(offering_id, user, db)
     existing = await db.execute(
@@ -229,7 +236,7 @@ async def sheets_for_offering(
 @router.put("/sheets/{sheet_id}/entries")
 async def save_grades(
     sheet_id: UUID, body: BulkGradeIn, db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(UserRole.FACULTY, UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+    user: User = Depends(require_roles(UserRole.FACULTY, UserRole.SUPER_ADMIN)),
 ):
     result = await db.execute(
         select(GradeSheet).options(selectinload(GradeSheet.offering).selectinload(CourseOffering.course)).where(GradeSheet.id == sheet_id)
@@ -264,7 +271,7 @@ async def save_grades(
 @router.patch("/sheets/{sheet_id}/submit")
 async def submit_sheet(
     sheet_id: UUID, db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(UserRole.FACULTY, UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+    user: User = Depends(require_roles(UserRole.FACULTY, UserRole.SUPER_ADMIN)),
 ):
     sheet = await db.get(GradeSheet, sheet_id)
     if not sheet: raise HTTPException(404, "Sheet not found.")
@@ -401,7 +408,7 @@ async def reject_sheet_stage(
 @router.patch("/sheets/{sheet_id}/publish")
 async def publish_sheet(
     sheet_id: UUID, db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR)),
+    _: User = Depends(require_roles(UserRole.SUPER_ADMIN)),
 ):
     sheet = await db.get(GradeSheet, sheet_id)
     if not sheet: raise HTTPException(404, "Sheet not found.")

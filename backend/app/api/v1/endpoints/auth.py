@@ -329,7 +329,7 @@ async def admin_reset_password(
     user_id: UUID,
     body: AdminResetPasswordRequest,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+    _: User = Depends(require_roles(UserRole.SUPER_ADMIN)),
 ):
     """Administrative password reset (Issue 6): Super Admin / Academic Admin
     sets a new password for another user without knowing or being shown the
@@ -352,7 +352,7 @@ async def admin_reset_password(
 async def create_user(
     body: CreateUserRequest,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+    admin: User = Depends(require_roles(UserRole.SUPER_ADMIN)),
 ):
     existing = await db.execute(select(User).where(User.email == body.email.lower()))
     if existing.scalar_one_or_none():
@@ -391,7 +391,7 @@ async def update_user(
     user_id: UUID,
     body: UpdateUserRequest,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+    admin: User = Depends(require_roles(UserRole.SUPER_ADMIN)),
 ):
     target = await db.get(User, user_id)
     if not target:
@@ -477,7 +477,7 @@ async def list_users(
     role: Optional[str] = None,
     department_id: Optional[UUID] = None,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR, UserRole.HOD, UserRole.EXAMINER)),
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HOD)),
 ):
     # .options(selectinload(User.department)) eager-loads the department in
     # the same query (one extra batched SELECT, not one per row) so the
@@ -555,7 +555,7 @@ async def switch_role(
 async def get_user_roles(
     user_id: UUID,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+    _: User = Depends(require_roles(UserRole.SUPER_ADMIN)),
 ):
     target = await db.get(User, user_id)
     if not target:
@@ -569,7 +569,7 @@ async def add_user_role(
     user_id: UUID,
     body: RoleAssignmentRequest,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+    admin: User = Depends(require_roles(UserRole.SUPER_ADMIN)),
 ):
     """Role assignment is Super Admin/Academic Admin-only (Section 12) — the
     same authorization already used for create_user/update_user above, never
@@ -601,7 +601,7 @@ async def remove_user_role(
     user_id: UUID,
     role: UserRole,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+    admin: User = Depends(require_roles(UserRole.SUPER_ADMIN)),
 ):
     """Role removal takes effect immediately (Section 10/28): any session
     currently active in this role self-heals to a deterministic fallback on
@@ -1046,7 +1046,7 @@ async def download_faculty_bulk_upload_template(_: User = Depends(require_roles(
 @router.post("/users/bulk-upload", status_code=201)
 async def bulk_upload_users(
     file: UploadFile = File(...), db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN)),
 ):
     """Super Admin / Academic Admin bulk upload — the same roles already
     authorized for individual `create_user` above, never broadened. Unlike
@@ -1075,7 +1075,7 @@ async def bulk_upload_users(
 
 @router.get("/users/bulk-upload/template")
 async def download_users_bulk_upload_template(
-    _: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+    _: User = Depends(require_roles(UserRole.SUPER_ADMIN)),
 ):
     buf = _build_user_bulk_template_workbook()
     return StreamingResponse(

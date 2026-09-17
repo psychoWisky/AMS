@@ -151,11 +151,11 @@ class OfferingOut(BaseModel):
 # research.py's _authorize_propose_major_advisor, per this project's convention
 # of per-file, hand-written authorization helpers.
 
-_MANAGE_ROLES = (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.HOD)
+_MANAGE_ROLES = (UserRole.SUPER_ADMIN, UserRole.HOD)
 
 
 def _authorize_department_manage(department_id: Optional[UUID], user: User) -> None:
-    if user.active_role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN):
+    if user.active_role == UserRole.SUPER_ADMIN:
         return
     if user.active_role == UserRole.HOD:
         if department_id and user.department_id and department_id == user.department_id:
@@ -204,7 +204,7 @@ class AvailabilityIn(BaseModel):
 
 
 def _authorize_availability_manage(department_id: UUID, user: User) -> None:
-    if user.active_role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN):
+    if user.active_role == UserRole.SUPER_ADMIN:
         return
     if user.active_role == UserRole.HOD:
         if user.department_id and department_id == user.department_id:
@@ -216,7 +216,7 @@ def _authorize_availability_manage(department_id: UUID, user: User) -> None:
 @router.get("/search")
 async def search_courses(
     q: Optional[str] = None, db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.HOD)),
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HOD)),
 ):
     """Deliberately NOT department-scoped — HOD/Admin only. This is the narrow,
     explicitly-authorized cross-department discovery surface a receiving HOD
@@ -235,11 +235,11 @@ async def search_courses(
 @router.get("/available-to-me")
 async def list_courses_available_to_my_department(
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.HOD)),
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HOD)),
 ):
     """Courses NOT owned by the caller's department but explicitly made
     available to it — the "Courses available to your department" list
-    (Section 5). For SUPER_ADMIN/ACADEMIC_ADMIN (no home department), this is
+    (Section 5). For SUPER_ADMIN (no home department), this is
     intentionally empty rather than an error — there is no meaningful "my
     department" for those roles; use GET /courses/{id}/availability instead."""
     if not user.department_id:
@@ -393,7 +393,7 @@ async def update_course_status(
 @router.get("/{course_id}/availability")
 async def list_course_availability(
     course_id: UUID, db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.HOD)),
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HOD)),
 ):
     c = await db.get(Course, course_id)
     if not c: raise HTTPException(404, "Course not found.")
@@ -410,7 +410,7 @@ async def list_course_availability(
 @router.post("/{course_id}/availability", status_code=201)
 async def add_course_availability(
     course_id: UUID, body: AvailabilityIn, db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.HOD)),
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HOD)),
 ):
     c = await db.get(Course, course_id)
     if not c: raise HTTPException(404, "Course not found.")
@@ -442,7 +442,7 @@ async def add_course_availability(
 @router.delete("/{course_id}/availability/{department_id}", status_code=204)
 async def remove_course_availability(
     course_id: UUID, department_id: UUID, db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.HOD)),
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HOD)),
 ):
     _authorize_availability_manage(department_id, user)
     result = await db.execute(
@@ -524,7 +524,7 @@ async def list_all_offerings(
         # (enrollment.py) applied as a list filter instead of a single-offering guard.
         # The current user is always derived server-side; a client can never widen this
         # to another faculty member's assignments.
-        if user.active_role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR):
+        if user.active_role == UserRole.SUPER_ADMIN:
             pass  # unrestricted, same as _authorize_offering_management
         elif user.active_role == UserRole.HOD:
             if not user.department_id:
@@ -645,14 +645,14 @@ async def get_offering(offering_id: UUID, db: AsyncSession = Depends(get_db), us
         scope = await _resolve_student_scope(user, db)
         if not scope or o.department_id != scope["department_id"]:
             raise HTTPException(404, "Offering not found.")
-    # HOD: own department only. FACULTY/RESEARCH_SUPERVISOR: only offerings they
-    # are actually assigned to (mirrors _authorize_offering_grading in grading.py
-    # and _authorize_offering_management in enrollment.py — same principle, this
+    # HOD: own department only. FACULTY: only offerings they are actually
+    # assigned to (mirrors _authorize_offering_grading in grading.py and
+    # _authorize_offering_management in enrollment.py — same principle, this
     # endpoint previously had no such check at all beyond the student branch above).
     elif user.active_role == UserRole.HOD:
         if not (user.department_id and o.department_id and user.department_id == o.department_id):
             raise HTTPException(403, "You can only view offerings within your own department.")
-    elif user.active_role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
+    elif user.active_role == UserRole.FACULTY:
         assigned = await db.execute(
             select(OfferingFaculty.id).where(
                 OfferingFaculty.offering_id == offering_id, OfferingFaculty.faculty_id == user.id,

@@ -38,9 +38,6 @@ USERS = [
     # Previously every user was hardcoded to AGRO regardless of role, which
     # made HOD/faculty/student department scoping untestable against seed data.
     ("superadmin@avfu.ac.in",  "Admin@123", "Super",    "Admin",   "super_admin",    "System Administrator",     "EMP001", None, "AGRO"),
-    ("academic@avfu.ac.in",    "Admin@123", "Academic", "Officer", "academic_admin", "Academic Cell Officer",    "EMP002", None, "AGRO"),
-    ("registrar@avfu.ac.in",   "Admin@123", "Dr. R.K.", "Sharma",  "registrar",      "University Registrar",     "EMP003", None, "AGRO"),
-    ("examiner@avfu.ac.in",    "Admin@123", "Dr. S.",   "Patel",   "examiner",       "Controller of Exams",      "EMP004", None, "AGRO"),
     ("hod.agro@avfu.ac.in",    "Admin@123", "Dr. A.",   "Kumar",   "hod",            "Head of Dept - Agronomy",  "EMP005", None, "AGRO"),
     ("hod.vet@avfu.ac.in",     "Admin@123", "Dr. P.",   "Nair",    "hod",            "Head of Dept - Veterinary","EMP006", None, "VETM"),
     ("faculty1@avfu.ac.in",    "Admin@123", "Dr. M.",   "Rao",     "faculty",        "Assistant Professor",      "EMP007", None, "AGRO"),
@@ -50,8 +47,11 @@ USERS = [
     ("student2@avfu.ac.in",    "Test@123",  "Priya",    "Sharma",  "student",        "B.Sc. Agriculture Yr-2",   None, "AVFU/2023/BSCAG/002", "AGRO"),
     ("student3@avfu.ac.in",    "Test@123",  "Amit",     "Joshi",   "student",        "M.Sc. Agriculture Yr-1",   None, "AVFU/2024/MSCAG/001", "AGRO"),
     ("student4@avfu.ac.in",    "Test@123",  "Sunita",   "Devi",    "student",        "B.V.Sc & A.H. Yr-3",       None, "AVFU/2022/BVSC/001", "VETM"),
-    ("researcher1@avfu.ac.in", "Test@123",  "Dr. V.",   "Mishra",  "research_supervisor", "Senior Research Fellow", "EMP010", None, "AGRO"),
 ]
+# Role-cleanup task: removed the academic@/registrar@/examiner@/researcher1@
+# dummy seed accounts (academic_admin/registrar/examiner/research_supervisor)
+# — these roles are no longer part of UserRole and re-running this seed must
+# never recreate them.
 
 # Development-data only: maps each seeded STUDENT email to their Program code
 # (PROGRAMS above), so User.program_id -> Program.department_id resolves

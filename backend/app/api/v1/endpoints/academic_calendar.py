@@ -65,7 +65,7 @@ async def list_calendars(db: AsyncSession = Depends(get_db), _: User = Depends(g
 @router.post("/calendars", response_model=CalendarOut, status_code=201)
 async def create_calendar(
     body: CalendarIn, db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN)),
 ):
     cal = AcademicCalendar(**body.model_dump(), created_by=user.id)
     db.add(cal); await db.commit(); await db.refresh(cal)
@@ -82,7 +82,7 @@ async def get_calendar(cal_id: UUID, db: AsyncSession = Depends(get_db), _: User
 @router.patch("/calendars/{cal_id}/status")
 async def update_calendar_status(
     cal_id: UUID, status: str, db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+    _: User = Depends(require_roles(UserRole.SUPER_ADMIN)),
 ):
     cal = await db.get(AcademicCalendar, cal_id)
     if not cal: raise HTTPException(404, "Calendar not found.")
@@ -93,7 +93,7 @@ async def update_calendar_status(
 @router.put("/calendars/{cal_id}")
 async def update_calendar(
     cal_id: UUID, body: CalendarIn, db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+    _: User = Depends(require_roles(UserRole.SUPER_ADMIN)),
 ):
     cal = await db.get(AcademicCalendar, cal_id)
     if not cal: raise HTTPException(404, "Calendar not found.")
@@ -105,7 +105,7 @@ async def update_calendar(
 @router.delete("/calendars/{cal_id}", status_code=204)
 async def delete_calendar(
     cal_id: UUID, db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+    _: User = Depends(require_roles(UserRole.SUPER_ADMIN)),
 ):
     """Delete an Academic Year (Calendar) — only while it is still DRAFT
     (this task's confirmed requirement). Enforced here regardless of what the
@@ -159,7 +159,7 @@ async def list_semesters(cal_id: UUID, db: AsyncSession = Depends(get_db), _: Us
 @router.post("/semesters", response_model=SemesterOut, status_code=201)
 async def create_semester(
     body: SemesterIn, db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+    _: User = Depends(require_roles(UserRole.SUPER_ADMIN)),
 ):
     sem = Semester(**body.model_dump())
     db.add(sem); await db.commit(); await db.refresh(sem)
@@ -176,7 +176,7 @@ async def get_semester(sem_id: UUID, db: AsyncSession = Depends(get_db), _: User
 @router.put("/semesters/{sem_id}")
 async def update_semester(
     sem_id: UUID, body: SemesterIn, db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+    _: User = Depends(require_roles(UserRole.SUPER_ADMIN)),
 ):
     sem = await db.get(Semester, sem_id)
     if not sem: raise HTTPException(404, "Semester not found.")
@@ -188,7 +188,7 @@ async def update_semester(
 @router.delete("/semesters/{sem_id}", status_code=204)
 async def delete_semester(
     sem_id: UUID, db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+    _: User = Depends(require_roles(UserRole.SUPER_ADMIN)),
 ):
     """Delete a Semester (Academic Year/Semester administration task, this
     revision) — mirrors `delete_calendar`'s exact safety pattern (same roles,
@@ -222,7 +222,7 @@ async def delete_semester(
 @router.patch("/semesters/{sem_id}/status")
 async def update_semester_status(
     sem_id: UUID, status: str, db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+    _: User = Depends(require_roles(UserRole.SUPER_ADMIN)),
 ):
     sem = await db.get(Semester, sem_id)
     if not sem: raise HTTPException(404, "Semester not found.")

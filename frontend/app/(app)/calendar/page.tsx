@@ -11,17 +11,15 @@ import { CalendarDays, Plus, ChevronDown, ChevronRight, Clock, BookOpen, Loader2
 interface Calendar { id: string; name: string; academic_year: string; start_date: string; end_date: string; status: string; description: string | null; }
 interface Semester { id: string; calendar_id: string; name: string; sem_type: string; start_date: string; end_date: string; status: string; registration_start: string | null; registration_end: string | null; exam_start: string | null; exam_end: string | null; result_declaration: string | null; }
 
-// Academic Year/Semester administration task (this revision) — the backend
+// Academic Year/Semester administration task — the backend
 // (`academic_calendar.py`) restricts every create/edit/delete/status-change
-// operation on Calendar/Semester to SUPER_ADMIN + ACADEMIC_ADMIN only; the
-// page previously gated its buttons behind the much broader, shared
-// `ADMIN_ROLES` (which also includes registrar/examiner/hod) — those roles
-// could see Create/Delete/status controls here and get a 403 on click. This
-// page-local constant matches the backend's actual `require_roles(...)`
+// operation on Calendar/Semester to SUPER_ADMIN only (role-cleanup task:
+// ACADEMIC_ADMIN was a dummy/testing role and has been removed entirely).
+// This page-local constant matches the backend's actual `require_roles(...)`
 // exactly, so a control is only ever shown to a role that can actually use
 // it; `ADMIN_ROLES` itself is intentionally left untouched (other pages
 // legitimately rely on its broader membership).
-const CALENDAR_ADMIN_ROLES = ["super_admin", "academic_admin"];
+const CALENDAR_ADMIN_ROLES = ["super_admin"];
 
 const STATUS_COLOR: Record<string, string> = {
   draft: "bg-gray-100 text-gray-700",

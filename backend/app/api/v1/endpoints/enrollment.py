@@ -152,13 +152,13 @@ async def _get_major_advisor_id(student_id: UUID, db: AsyncSession) -> Optional[
 
 async def _authorize_offering_management(offering_id: UUID, user: User, db: AsyncSession) -> CourseOffering:
     """Faculty/HOD/admin authorization for managing enrollments of a given offering.
-    SUPER_ADMIN / ACADEMIC_ADMIN / REGISTRAR: unrestricted.
+    SUPER_ADMIN: unrestricted.
     HOD: department-wide (current_user.department_id == offering.department_id), no OfferingFaculty needed.
     FACULTY: only if an OfferingFaculty row exists for (offering_id, user.id)."""
     offering = await db.get(CourseOffering, offering_id)
     if not offering:
         raise HTTPException(404, "Offering not found.")
-    if user.active_role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR):
+    if user.active_role == UserRole.SUPER_ADMIN:
         return offering
     if user.active_role == UserRole.HOD:
         if user.department_id and offering.department_id and user.department_id == offering.department_id:
@@ -175,7 +175,7 @@ async def _authorize_offering_management(offering_id: UUID, user: User, db: Asyn
 
 
 async def _authorize_major_advisor(registration: CourseRegistration, user: User, db: AsyncSession) -> None:
-    if user.active_role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN):
+    if user.active_role == UserRole.SUPER_ADMIN:
         return
     ma_id = await _get_major_advisor_id(registration.student_id, db)
     if ma_id and ma_id == user.id:
@@ -184,7 +184,7 @@ async def _authorize_major_advisor(registration: CourseRegistration, user: User,
 
 
 async def _authorize_hod_registration(registration: CourseRegistration, user: User, db: AsyncSession) -> None:
-    if user.active_role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN):
+    if user.active_role == UserRole.SUPER_ADMIN:
         return
     if user.active_role == UserRole.HOD:
         dept_id = await _student_department_id(registration.student_id, db)
@@ -195,7 +195,7 @@ async def _authorize_hod_registration(registration: CourseRegistration, user: Us
 
 
 async def _authorize_registration_view(registration: CourseRegistration, user: User, db: AsyncSession) -> None:
-    if user.active_role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR):
+    if user.active_role == UserRole.SUPER_ADMIN:
         return
     if user.active_role == UserRole.STUDENT:
         if registration.student_id == user.id:
@@ -952,7 +952,7 @@ async def request_withdrawal(
 async def decide_withdrawal_request(
     request_id: UUID, body: WithdrawalDecisionIn, db: AsyncSession = Depends(get_db),
     user: User = Depends(require_roles(
-        UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.HOD, UserRole.FACULTY, UserRole.REGISTRAR,
+        UserRole.SUPER_ADMIN, UserRole.HOD, UserRole.FACULTY,
     )),
 ):
     """Approve/reject an approved-course withdrawal request. Reuses
@@ -999,7 +999,7 @@ async def list_registrations(
     q = select(CourseRegistration).options(*_REGISTRATION_LOAD_OPTIONS)
     if user.active_role == UserRole.STUDENT:
         q = q.where(CourseRegistration.student_id == user.id)
-    elif user.active_role in (UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.REGISTRAR):
+    elif user.active_role == UserRole.SUPER_ADMIN:
         pass  # unrestricted
     elif user.active_role == UserRole.HOD:
         if not user.department_id:
@@ -1011,7 +1011,7 @@ async def list_registrations(
             q.join(User, CourseRegistration.student_id == User.id)
              .where(User.department_id == user.department_id)
         )
-    elif user.active_role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
+    elif user.active_role == UserRole.FACULTY:
         # A faculty member's registration queue = registrations where they are
         # either the student's Major Advisor, or an assigned teacher on at
         # least one selected course. Filtered in Python below (post-query) —
@@ -1025,7 +1025,7 @@ async def list_registrations(
     result = await db.execute(q.order_by(CourseRegistration.submitted_at.desc()))
     registrations = result.scalars().all()
 
-    if user.active_role in (UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR):
+    if user.active_role == UserRole.FACULTY:
         ma_student_ids = set((await db.execute(
             select(AdvisoryCommittee.student_id).join(
                 CommitteeMember, CommitteeMember.committee_id == AdvisoryCommittee.id
@@ -1259,8 +1259,7 @@ async def offering_enrollments(
     offering_id: UUID, status: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_roles(
-        UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.HOD,
-        UserRole.FACULTY, UserRole.REGISTRAR,
+        UserRole.SUPER_ADMIN, UserRole.HOD, UserRole.FACULTY,
     )),
 ):
     await _authorize_offering_management(offering_id, user, db)
@@ -1374,7 +1373,7 @@ async def process_enrollment(
     remarks: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_roles(
-        UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.HOD, UserRole.FACULTY, UserRole.REGISTRAR,
+        UserRole.SUPER_ADMIN, UserRole.HOD, UserRole.FACULTY,
     )),
 ):
     e = await db.get(StudentEnrollment, enrollment_id)
@@ -1391,7 +1390,7 @@ async def process_enrollment(
 async def bulk_approve(
     offering_id: UUID, body: BulkApproveRequest, db: AsyncSession = Depends(get_db),
     user: User = Depends(require_roles(
-        UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.HOD, UserRole.FACULTY, UserRole.REGISTRAR,
+        UserRole.SUPER_ADMIN, UserRole.HOD, UserRole.FACULTY,
     )),
 ):
     """Finding 2 fix: now routes every row through `_apply_enrollment_decision`
@@ -1426,7 +1425,7 @@ async def bulk_approve(
 async def major_advisor_approval(
     registration_id: UUID, body: StageDecisionIn, db: AsyncSession = Depends(get_db),
     user: User = Depends(require_roles(
-        UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR,
+        UserRole.SUPER_ADMIN, UserRole.FACULTY,
     )),
 ):
     r = await db.get(CourseRegistration, registration_id)
@@ -1459,7 +1458,7 @@ async def major_advisor_approval(
 @router.patch("/registrations/{registration_id}/hod-approval")
 async def hod_registration_approval(
     registration_id: UUID, body: StageDecisionIn, db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN, UserRole.HOD)),
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HOD)),
 ):
     r = await db.get(CourseRegistration, registration_id)
     if not r: raise HTTPException(404, "Registration not found.")

@@ -8,14 +8,19 @@ from app.db.base import Base
 
 
 class UserRole(str, Enum):
-    SUPER_ADMIN        = "super_admin"
-    ACADEMIC_ADMIN     = "academic_admin"
-    HOD                = "hod"
-    FACULTY            = "faculty"
-    STUDENT            = "student"
-    REGISTRAR          = "registrar"
-    EXAMINER           = "examiner"
-    RESEARCH_SUPERVISOR = "research_supervisor"
+    """AMS's current, intentional role set (business decision — see
+    BUSINESS_LOGIC.md's role-architecture section). `ACADEMIC_ADMIN`,
+    `REGISTRAR`, `EXAMINER`, and `RESEARCH_SUPERVISOR` were early-development
+    dummy/testing roles and were removed entirely (migration
+    `0015_remove_legacy_roles`) — not hidden, not kept as legacy-compatible
+    values. Add a future role here only once AVFU defines an actual business
+    requirement for it; the multi-role assignment/switching system (see
+    UserRoleAssignment, RefreshToken.active_role) already supports any
+    number of roles generically, so no other code needs to change to add one."""
+    SUPER_ADMIN = "super_admin"
+    HOD         = "hod"
+    FACULTY     = "faculty"
+    STUDENT     = "student"
 
 
 class Department(Base):

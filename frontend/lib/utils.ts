@@ -23,18 +23,18 @@ export function formatDate(iso: string, style: "long" | "short" | "relative" = "
   return d.toLocaleDateString("en-IN", { ...opts, day: "2-digit", month: "long", year: "numeric" });
 }
 
+// Role-cleanup task: academic_admin/registrar/examiner/research_supervisor
+// were dummy/testing roles, never real AVFU roles, and have been removed
+// entirely (backend UserRole enum, ams_user_role Postgres enum, and here).
+// The current, intentional role set is exactly these four.
 export const ROLES = {
   super_admin: "Super Admin",
-  academic_admin: "Academic Admin",
   hod: "Head of Department",
   faculty: "Faculty",
   student: "Student",
-  registrar: "Registrar",
-  examiner: "Examiner",
-  research_supervisor: "Research Supervisor",
 };
 
-export const ADMIN_ROLES = ["super_admin", "academic_admin", "registrar", "examiner", "hod"];
+export const ADMIN_ROLES = ["super_admin", "hod"];
 
 // Centralized labels for CommitteeMember.role (BUSINESS_LOGIC.md M.5, Rule 29 —
 // the 5 confirmed PG/PhD Research Committee member types). `co_major_advisor` and

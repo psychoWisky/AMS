@@ -42,7 +42,7 @@ const STAGE_STYLE: Record<string, string> = {
   reverted: "bg-red-100 text-red-700",
 };
 // Roles allowed to call GET /auth/users (must match auth.py's list_users RBAC).
-const USER_LOOKUP_ROLES = ["super_admin", "academic_admin", "registrar", "hod", "examiner"];
+const USER_LOOKUP_ROLES = ["super_admin", "hod"];
 
 function StatusBadge({ stage, label }: { stage: string; label: string }) {
   return <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-semibold ${STAGE_STYLE[stage] ?? "bg-gray-100 text-gray-600"}`}>{label}</span>;
@@ -182,7 +182,7 @@ function StaffCommitteeView() {
   const role = useRole();
   const currentUser = useUser();
   const qc = useQueryClient();
-  const canPropose = ["super_admin", "academic_admin", "hod"].includes(role ?? "");
+  const canPropose = ["super_admin", "hod"].includes(role ?? "");
   const canLookupUsers = USER_LOOKUP_ROLES.includes(role ?? "");
 
   const [showPropose, setShowPropose] = useState(false);
@@ -211,8 +211,8 @@ function StaffCommitteeView() {
     enabled: canPropose || canLookupUsers,
   });
 
-  // Fix: a Major Advisor with role=FACULTY/RESEARCH_SUPERVISOR has no access
-  // to the general /auth/users directory (admin/HOD-only) and previously saw
+  // Fix: a Major Advisor with role=FACULTY has no access to the general
+  // /auth/users directory (admin/HOD-only) and previously saw
   // "Faculty lookup requires admin or HOD access" when trying to add committee
   // members despite being allowed to manage them. This committee-scoped
   // endpoint is authorized the same way add_member itself is (accepted Major
@@ -230,7 +230,7 @@ function StaffCommitteeView() {
   });
 
   const students = allUsers.filter((u) => u.role === "student");
-  const facultyOptions = allUsers.filter((u) => ["faculty", "hod", "research_supervisor"].includes(u.role));
+  const facultyOptions = allUsers.filter((u) => ["faculty", "hod"].includes(u.role));
   // Add Member modal only: admin/HOD keep using the full directory above;
   // a non-admin accepted Major Advisor uses the committee-scoped list instead.
   const addMemberFacultyOptions = canLookupUsers ? facultyOptions : eligibleFaculty;

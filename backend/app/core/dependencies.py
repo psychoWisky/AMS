@@ -19,9 +19,7 @@ bearer = HTTPBearer()
 # way"). `user.role` (the legacy/primary field) is always preferred first
 # when it is still one of the user's assigned roles.
 _ROLE_PRIORITY: list[UserRole] = [
-    UserRole.STUDENT, UserRole.FACULTY, UserRole.RESEARCH_SUPERVISOR,
-    UserRole.EXAMINER, UserRole.REGISTRAR, UserRole.HOD,
-    UserRole.ACADEMIC_ADMIN, UserRole.SUPER_ADMIN,
+    UserRole.STUDENT, UserRole.FACULTY, UserRole.HOD, UserRole.SUPER_ADMIN,
 ]
 
 

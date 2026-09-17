@@ -15,7 +15,7 @@ import { ChangePasswordModal } from "@/components/ui/change-password-modal";
 
 const NAV = [
   { label: "Dashboard",       icon: LayoutDashboard, href: "/dashboard",    roles: [] },
-  { label: "Academic Calendar",icon: CalendarDays,   href: "/calendar",     roles: ["super_admin","academic_admin","registrar","hod","faculty","student","examiner"] },
+  { label: "Academic Calendar",icon: CalendarDays,   href: "/calendar",     roles: ["super_admin","hod","faculty","student"] },
   // "faculty" deliberately excluded here (BUSINESS_LOGIC.md Section N — Faculty
   // has no need for a generic all-courses catalog; their course-relevant view
   // is "Teacher Courses" (their own assigned offerings) below.
@@ -24,13 +24,13 @@ const NAV = [
   // module (absent from BUSINESS_LOGIC.md K.7); students see eligible
   // offered courses via Course Registration and their own history via My
   // Courses. The `GET /courses`/`GET /courses/offerings/all` backend
-  // endpoints and this route are UNCHANGED — Super Admin/Academic
-  // Admin/HOD still need them for Course Management exactly as before.
-  { label: "Courses",         icon: BookOpen,        href: "/courses",      roles: ["super_admin","academic_admin","hod"] },
+  // endpoints and this route are UNCHANGED — Super Admin/HOD still need
+  // them for Course Management exactly as before.
+  { label: "Courses",         icon: BookOpen,        href: "/courses",      roles: ["super_admin","hod"] },
   // "hod" deliberately excluded here (BUSINESS_LOGIC.md Section N.1) — HOD's
   // course-offering management already lives at Courses -> Offer Course;
   // this page is instructor-assigned "my courses" and does not apply to HOD.
-  { label: "Teacher Courses", icon: BookOpen,        href: "/teacher-courses", roles: ["super_admin","academic_admin","faculty","registrar"] },
+  { label: "Teacher Courses", icon: BookOpen,        href: "/teacher-courses", roles: ["super_admin","faculty"] },
   { label: "Faculties",       icon: UserCog,         href: "/faculties",    roles: ["hod"] },
   // "student" deliberately excluded here — Course Registration is now the
   // single student-facing course selection/enrollment workflow; this page
@@ -40,25 +40,25 @@ const NAV = [
   // revision) — this legacy, non-registration-stage-aware view is fully
   // superseded for Faculty by "Course Request" below (the confirmed module
   // per BUSINESS_LOGIC.md M.9, already correctly scoped to the faculty's own
-  // assigned offerings). Kept for Super Admin/Academic Admin/HOD/Registrar,
-  // who may still legitimately use it as a cross-department administrative
-  // tool — the route/page/backend are unchanged.
-  { label: "Enrollment",      icon: ClipboardList,   href: "/enrollment",   roles: ["super_admin","academic_admin","hod","registrar"] },
+  // assigned offerings). Kept for Super Admin/HOD, who may still
+  // legitimately use it as a cross-department administrative tool — the
+  // route/page/backend are unchanged.
+  { label: "Enrollment",      icon: ClipboardList,   href: "/enrollment",   roles: ["super_admin","hod"] },
   // My Courses task (this revision) — same route (`/enrollment`), a
   // separate nav entry so students see the confirmed "My Courses" label
   // (BUSINESS_LOGIC.md K.7) instead of the staff-facing "Enrollment" label;
   // the route itself branches on role internally, unchanged.
   { label: "My Courses",      icon: BookOpen,        href: "/enrollment",   roles: ["student"] },
   { label: "Course Registration",icon: ClipboardCheck,href: "/course-registration", roles: ["student"] },
-  { label: "Course Request",  icon: ClipboardList,   href: "/course-request", roles: ["super_admin","academic_admin","hod","faculty","research_supervisor"] },
-  { label: "Academic Progress",icon: GraduationCap,  href: "/academic-progress", roles: ["super_admin","academic_admin","hod","faculty","student","registrar","research_supervisor"] },
-  { label: "Grading",         icon: BarChart3,       href: "/grading",      roles: ["super_admin","academic_admin","hod","faculty","registrar","examiner"] },
-  { label: "Admit Card",      icon: FileText,        href: "/admit-card",   roles: ["super_admin","academic_admin","hod","registrar","examiner","student"] },
+  { label: "Course Request",  icon: ClipboardList,   href: "/course-request", roles: ["super_admin","hod","faculty"] },
+  { label: "Academic Progress",icon: GraduationCap,  href: "/academic-progress", roles: ["super_admin","hod","faculty","student"] },
+  { label: "Grading",         icon: BarChart3,       href: "/grading",      roles: ["super_admin","hod","faculty"] },
+  { label: "Admit Card",      icon: FileText,        href: "/admit-card",   roles: ["super_admin","hod","student"] },
   // Advisory Committee naming task (this revision) — visible label only;
   // the route (/research), page component, and API endpoints are unchanged.
-  { label: "Advisory Committee", icon: FlaskConical,  href: "/research",     roles: ["super_admin","academic_admin","hod","faculty","student","research_supervisor"] },
-  { label: "Admissions",      icon: ClipboardCheck,  href: "/admissions",   roles: ["super_admin","academic_admin","registrar"] },
-  { label: "Orientation",     icon: ClipboardCheck,  href: "/orientation",  roles: ["super_admin","academic_admin"] },
+  { label: "Advisory Committee", icon: FlaskConical,  href: "/research",     roles: ["super_admin","hod","faculty","student"] },
+  { label: "Admissions",      icon: ClipboardCheck,  href: "/admissions",   roles: ["super_admin"] },
+  { label: "Orientation",     icon: ClipboardCheck,  href: "/orientation",  roles: ["super_admin"] },
   { label: "Student Management",icon: IdCard,        href: "/student-management", roles: ["student"] },
   // Bulk Faculty/User Excel Upload task (this revision) — a bulk-created
   // account has no profile-editing UI anywhere today (PATCH /auth/me was
@@ -67,11 +67,11 @@ const NAV = [
   // self-complete DOB/Gender/Blood Group/Father's Name/Address/ABC ID/Mobile
   // later, exactly as AVFU asked. Deliberately excludes "student" — that
   // role already has its own, unchanged "Student Management" page above.
-  { label: "My Profile",       icon: IdCard,         href: "/my-profile", roles: ["super_admin","academic_admin","hod","faculty","registrar","examiner","research_supervisor"] },
+  { label: "My Profile",       icon: IdCard,         href: "/my-profile", roles: ["super_admin","hod","faculty"] },
   { label: "PPW",              icon: FileSpreadsheet, href: "/ppw",          roles: ["student"] },
-  { label: "PPW Approvals",   icon: ClipboardCheck,  href: "/ppw/approvals", roles: ["hod","faculty","research_supervisor"] },
-  { label: "Users",           icon: Users,           href: "/users",        roles: ["super_admin","academic_admin"] },
-  { label: "Administration",  icon: ShieldCheck,     href: "/admin",        roles: ["super_admin","academic_admin"] },
+  { label: "PPW Approvals",   icon: ClipboardCheck,  href: "/ppw/approvals", roles: ["hod","faculty"] },
+  { label: "Users",           icon: Users,           href: "/users",        roles: ["super_admin"] },
+  { label: "Administration",  icon: ShieldCheck,     href: "/admin",        roles: ["super_admin"] },
   { label: "Notifications",   icon: Bell,            href: "/notifications",roles: [] },
 ];
 

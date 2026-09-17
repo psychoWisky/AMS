@@ -50,7 +50,7 @@ async def mark_all_read(db: AsyncSession = Depends(get_db), user: User = Depends
 async def audit_logs(
     entity_type: Optional[str] = None, user_id: Optional[UUID] = None, limit: int = 100,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ACADEMIC_ADMIN)),
+    _: User = Depends(require_roles(UserRole.SUPER_ADMIN)),
 ):
     q = select(AuditLog).order_by(AuditLog.created_at.desc())
     if entity_type: q = q.where(AuditLog.entity_type == entity_type)

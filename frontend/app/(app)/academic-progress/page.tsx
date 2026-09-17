@@ -30,7 +30,7 @@ const ENROLLMENT_STATUS_COLOR: Record<string, string> = {
   rejected: "bg-red-100 text-red-700", withdrawn: "bg-gray-100 text-gray-600",
 };
 // Roles that can call GET /auth/users (must match auth.py's list_users RBAC).
-const USER_LOOKUP_ROLES = ["super_admin", "academic_admin", "registrar", "hod", "examiner"];
+const USER_LOOKUP_ROLES = ["super_admin", "hod"];
 
 export default function AcademicProgressPage() {
   const role = useRole();
@@ -120,7 +120,7 @@ export default function AcademicProgressPage() {
 
       {!isStudent && !canLookupUsers && !pickedStudentId && (
         <div className="bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-xl p-4 mb-5">
-          Student lookup requires admin/HOD/registrar/examiner access. Open this page from a student&apos;s row in Teacher Courses or Enrollment to view their progress.
+          Student lookup requires Super Admin/HOD access. Open this page from a student&apos;s row in Teacher Courses or Enrollment to view their progress.
         </div>
       )}
 
