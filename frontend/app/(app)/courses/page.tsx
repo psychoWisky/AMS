@@ -5,8 +5,9 @@ import { api } from "@/services/api";
 import { useRole, useUser } from "@/stores/auth.store";
 import { toast } from "sonner";
 import { ADMIN_ROLES, COURSE_CATEGORY_LABELS, CREDIT_TYPE_LABELS } from "@/lib/utils";
-import { BookOpen, Plus, Search, Loader2, Globe, EyeOff, Pencil, Trash2, X, Crown, UserPlus } from "lucide-react";
+import { BookOpen, Plus, Search, Loader2, Globe, EyeOff, Pencil, Trash2, X, Crown, UserPlus, Upload } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { UserBulkUploadModal } from "@/components/ui/user-bulk-upload-modal";
 
 interface Course {
   id: string; course_number: string; title: string; credit_structure: string;
@@ -61,6 +62,10 @@ export default function CoursesPage() {
   const [editCourse, setEditCourse] = useState<Course | null>(null);
   const [form, setForm] = useState(EMPTY_COURSE_FORM);
   const [confirm, setConfirm] = useState<{ action: () => void; title: string; message: string; confirmLabel: string; confirmClassName?: string } | null>(null);
+  // Bulk Course Upload task (this revision) — HOD/Super Admin only, same
+  // `canManage` gate as the individual Add Course button; the backend
+  // independently enforces the identical SUPER_ADMIN/HOD authorization.
+  const [showBulkUpload, setShowBulkUpload] = useState(false);
 
   // Offer Course state
   const [offerCalendarId, setOfferCalendarId] = useState("");
@@ -295,10 +300,16 @@ export default function CoursesPage() {
           </p>
         </div>
         {canManage && tab === "courses" && (
-          <button onClick={openCreate}
-            className="flex items-center gap-2 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-xl font-semibold text-base hover:bg-[#178F8F]">
-            <Plus size={16} /> Add Course
-          </button>
+          <div className="flex items-center gap-2">
+            <button onClick={() => setShowBulkUpload(true)}
+              className="flex items-center gap-2 px-4 py-2.5 border border-[#0D6E6E] text-[#0D6E6E] rounded-xl font-semibold text-base hover:bg-[#E6F4F4]">
+              <Upload size={16} /> Bulk Upload
+            </button>
+            <button onClick={openCreate}
+              className="flex items-center gap-2 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-xl font-semibold text-base hover:bg-[#178F8F]">
+              <Plus size={16} /> Add Course
+            </button>
+          </div>
         )}
         {canManage && tab === "offerings" && (
           <button onClick={() => setShowOfferingCreate(true)}
@@ -383,6 +394,27 @@ export default function CoursesPage() {
             )}
           </div>
         </>
+      )}
+
+      {/* Bulk Course Upload modal (this revision) */}
+      {showBulkUpload && (
+        <UserBulkUploadModal
+          uploadUrl="/courses/bulk-upload"
+          templateUrl="/courses/bulk-upload/template"
+          templateFilename="ams_courses_bulk_upload_template.xlsx"
+          title="Bulk Upload Courses"
+          description={
+            <>Upload an <span className="font-semibold">.xlsx</span> or <span className="font-semibold">.csv</span> file with columns:
+              Course Number, Course Title, Programme (UG/PG/PhD), Course Type, Credit Type, Theory Credit, Practical Credit, Status, Department.
+              {isHod ? " Department must match your own department." : " Department is matched by its exact existing code."} Use <span className="font-semibold">Download Template</span> below to get the exact format.</>
+          }
+          onClose={() => setShowBulkUpload(false)}
+          onSuccess={(count) => {
+            toast.success(`${count} course${count === 1 ? "" : "s"} created successfully.`);
+            qc.invalidateQueries({ queryKey: ["ams-courses"] });
+            setShowBulkUpload(false);
+          }}
+        />
       )}
 
       {/* Add/Edit Course Modal */}

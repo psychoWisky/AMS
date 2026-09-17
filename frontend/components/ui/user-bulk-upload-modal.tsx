@@ -25,12 +25,26 @@ interface BulkUploadResult {
 
 export function UserBulkUploadModal({
   uploadUrl, templateUrl, templateFilename, onClose, onSuccess,
+  title = "Bulk Upload Users",
+  description = (
+    <>Upload an <span className="font-semibold">.xlsx</span> or <span className="font-semibold">.csv</span> file with columns:
+      First name, Middle name (optional), Last name, AVFU email, Designation, Role, College, Department, Gender (optional), Mobile (optional).
+      College and Department are matched by their exact existing code. Use <span className="font-semibold">Download Template</span> below to get the exact format.</>
+  ),
 }: {
   uploadUrl: string;
   templateUrl: string;
   templateFilename: string;
   onClose: () => void;
   onSuccess: (importedCount: number, emailsSent: number, emailsTotal: number) => void;
+  // Bulk Course Upload task (this revision) — this modal's file-upload/
+  // template-download/error-table UI is entirely generic (row/column/value/
+  // error findings, same shared shape), so it's reused as-is for Courses
+  // rather than duplicating the component; only the header copy differs,
+  // which these two optional props override. Defaults preserve the exact
+  // existing Faculty/User text byte-for-byte for the two existing callers.
+  title?: string;
+  description?: React.ReactNode;
 }) {
   const [file, setFile] = useState<File | null>(null);
   const [result, setResult] = useState<BulkUploadResult | null>(null);
@@ -97,14 +111,10 @@ export function UserBulkUploadModal({
     <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl p-6 max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-bold text-gray-900">Bulk Upload Users</h3>
+          <h3 className="text-lg font-bold text-gray-900">{title}</h3>
           <button onClick={close}><X size={20} className="text-gray-400 hover:text-gray-700" /></button>
         </div>
-        <p className="text-sm text-gray-600 mb-3">
-          Upload an <span className="font-semibold">.xlsx</span> or <span className="font-semibold">.csv</span> file with columns:
-          First name, Middle name (optional), Last name, AVFU email, Designation, Role, College, Department, Gender (optional), Mobile (optional).
-          College and Department are matched by their exact existing code. Use <span className="font-semibold">Download Template</span> below to get the exact format.
-        </p>
+        <p className="text-sm text-gray-600 mb-3">{description}</p>
         <button onClick={() => downloadTemplate.mutate()} disabled={downloadTemplate.isPending}
           className="flex items-center gap-2 px-3 py-2 border border-gray-300 text-gray-700 rounded-xl text-sm font-semibold hover:bg-gray-50 disabled:opacity-50 mb-3">
           <Download size={14} /> Download Template

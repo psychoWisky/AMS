@@ -23,15 +23,20 @@ per instruction not to silently invent open-question answers):
 """
 from typing import Optional, List
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException
+import io
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel, model_validator
+import openpyxl
 
 from app.db.base import get_db
 from app.core.dependencies import get_current_user, require_roles
+from app.core.config import settings
+from app.core.bulk_upload import parse_bulk_upload_file
 from app.models.user import User, UserRole, Program, Department
 from app.models.course import Course, CourseOffering, OfferingFaculty, CourseAvailability
 # Programme<->Department many-to-many redesign — single shared student-scope
@@ -388,6 +393,313 @@ async def update_course_status(
     _authorize_department_manage(c.department_id, user)
     c.status = status; await db.commit()
     return {"message": f"Status set to {status}."}
+
+
+# ── Bulk Course Upload (this revision) ──────────────────────────────────────
+#
+# Reuses the shared structural parser (app/core/bulk_upload.py) already used
+# by the Faculty/User bulk upload — only file-format/header parsing lives
+# there; all Course-specific business validation lives here, mirroring
+# auth.py's own bulk-upload split exactly.
+#
+# Security (Section 13's explicit requirement): the SAME authorization
+# helper used by the individual create_course endpoint governs bulk upload —
+# HOD's own department is validated-and-rejected-on-mismatch (never silently
+# forced), exactly like `_authorize_department_manage`/create_course already
+# do. This is deliberately the "validate and reject" convention already
+# established by create_course, not the "force and ignore" convention used
+# by create_faculty's bulk upload — chosen because it is what THIS
+# endpoint's own individual counterpart already does, per the instruction to
+# match existing Course-creation behavior exactly rather than importing a
+# different endpoint's convention.
+_COURSE_BULK_COLUMNS = [
+    "Course Number", "Course Title", "Programme", "Course Type", "Credit Type",
+    "Theory Credit", "Practical Credit", "Status", "Department",
+]
+# Programme/Course Type/Credit Type/Theory Credit/Practical Credit/Status may
+# be left blank — a blank cell falls back to the same default the individual
+# CourseIn schema already uses (program_level="UG", category=None,
+# credit_type=None, credit_theory=0, credit_practical=0, status="active").
+# Course Number/Course Title/Department must always be supplied — Department
+# is mandatory for bulk upload (unlike Super Admin's optional department on
+# the individual form) since every bulk-created course must resolve to a
+# real department to be associated with here.
+_COURSE_BULK_REQUIRED_COLUMNS = ["Course Number", "Course Title", "Department"]
+_MAX_COURSE_BULK_BYTES = settings.MAX_FILE_SIZE_MB * 1024 * 1024
+
+_PROGRAM_LEVEL_VALUES = ("UG", "PG", "PhD")
+_COURSE_STATUS_VALUES = ("active", "inactive")
+
+
+def _normalize_course_number(raw: str) -> str:
+    """Case-insensitive Excel input -> canonical uppercase storage (Section 5's
+    explicit requirement). Only case is changed — internal spaces/punctuation
+    (e.g. "LPM 601*") are preserved exactly, never stripped beyond the
+    surrounding-whitespace trim."""
+    return raw.strip().upper()
+
+
+def _resolve_program_level(raw: str) -> Optional[str]:
+    return {"ug": "UG", "pg": "PG", "phd": "PhD"}.get(raw.strip().lower())
+
+
+def _normalize_label_key(raw: str) -> str:
+    """Case/whitespace/separator-tolerant comparison key — lets a human label
+    like "Mandatory MBA" and the canonical value "mandatory_mba" resolve to
+    the same key without hardcoding a separate synonym list per value."""
+    return " ".join(raw.strip().lower().replace("-", " ").replace("_", " ").split())
+
+
+# Built directly from the EXISTING CATEGORY_VALUES/CREDIT_TYPE_VALUES
+# constants (Section 8/9's explicit "reuse existing constants, do not create
+# a second independent definition") — never duplicated or hand-typed.
+_CATEGORY_LABEL_MAP = {_normalize_label_key(v.replace("_", " ")): v for v in CATEGORY_VALUES}
+_CREDIT_TYPE_LABEL_MAP = {_normalize_label_key(v.replace("_", " ")): v for v in CREDIT_TYPE_VALUES}
+
+
+def _resolve_category(raw: str) -> Optional[str]:
+    return _CATEGORY_LABEL_MAP.get(_normalize_label_key(raw))
+
+
+def _resolve_credit_type(raw: str) -> Optional[str]:
+    return _CREDIT_TYPE_LABEL_MAP.get(_normalize_label_key(raw))
+
+
+def _resolve_course_status(raw: str) -> Optional[str]:
+    # Bulk upload deliberately supports only the two values the individual
+    # Add Course UI actually offers (Section 11) — "archived" is a
+    # documented-but-never-exposed model value and is NOT accepted here,
+    # per the explicit instruction not to introduce it without confirmation.
+    key = raw.strip().lower()
+    return key if key in _COURSE_STATUS_VALUES else None
+
+
+async def _validate_course_bulk_rows(
+    rows: list[dict], db: AsyncSession, *, force_department_id: Optional[UUID],
+) -> tuple[list[dict], list[dict]]:
+    """All-or-nothing validation — no database write happens here. Returns
+    (findings, valid_row_data); any non-empty `findings` means the caller
+    must create nothing at all, mirroring auth.py's bulk-upload philosophy
+    exactly. Duplicate course-number detection runs BEFORE any insert is
+    attempted (Section 6), both against the live database and within the
+    uploaded file itself, always compared on the normalized (uppercased)
+    form — never relying solely on the Postgres unique constraint."""
+    department_rows = (await db.execute(select(Department.id, Department.code, Department.name))).all()
+    department_by_code = {code.strip().lower(): did for did, code, name in department_rows}
+    department_names = {did: name for did, code, name in department_rows}
+    hod_department_label = department_names.get(force_department_id) if force_department_id else None
+
+    existing_numbers = {n.upper() for n in (await db.execute(select(Course.course_number))).scalars().all()}
+
+    findings: list[dict] = []
+    seen_numbers: dict[str, int] = {}
+    row_payload: dict[int, dict] = {}
+
+    for entry in rows:
+        row_no = entry["row"]
+        v = entry["values"]
+        row_findings: list[dict] = []
+
+        def add(column: str, value: str, error: str) -> None:
+            row_findings.append({"row": row_no, "column": column, "value": value, "error": error})
+
+        for col in _COURSE_BULK_REQUIRED_COLUMNS:
+            if not v.get(col):
+                add(col, v.get(col, ""), f"{col} is required.")
+
+        raw_number = v.get("Course Number", "")
+        course_number: Optional[str] = _normalize_course_number(raw_number) if raw_number else None
+
+        title = v.get("Course Title", "").strip()
+
+        program_level = "UG"
+        raw_level = v.get("Programme", "")
+        if raw_level:
+            resolved_level = _resolve_program_level(raw_level)
+            if resolved_level is None:
+                add("Programme", raw_level, f"Invalid Programme. Allowed values: {', '.join(_PROGRAM_LEVEL_VALUES)}.")
+            else:
+                program_level = resolved_level
+
+        category: Optional[str] = None
+        raw_category = v.get("Course Type", "")
+        if raw_category:
+            resolved_category = _resolve_category(raw_category)
+            if resolved_category is None:
+                add("Course Type", raw_category, f"Invalid Course Type. Allowed values: {', '.join(CATEGORY_VALUES)}.")
+            else:
+                category = resolved_category
+
+        credit_type: Optional[str] = None
+        raw_credit_type = v.get("Credit Type", "")
+        if raw_credit_type:
+            resolved_credit_type = _resolve_credit_type(raw_credit_type)
+            if resolved_credit_type is None:
+                add("Credit Type", raw_credit_type, f"Invalid Credit Type. Allowed values: {', '.join(CREDIT_TYPE_VALUES)}.")
+            else:
+                credit_type = resolved_credit_type
+
+        credit_theory = 0
+        raw_theory = v.get("Theory Credit", "")
+        if raw_theory:
+            try:
+                credit_theory = int(float(raw_theory))
+                if credit_theory < 0:
+                    add("Theory Credit", raw_theory, "Credit must be >= 0.")
+            except ValueError:
+                add("Theory Credit", raw_theory, "Theory Credit must be a whole number.")
+
+        credit_practical = 0
+        raw_practical = v.get("Practical Credit", "")
+        if raw_practical:
+            try:
+                credit_practical = int(float(raw_practical))
+                if credit_practical < 0:
+                    add("Practical Credit", raw_practical, "Credit must be >= 0.")
+            except ValueError:
+                add("Practical Credit", raw_practical, "Practical Credit must be a whole number.")
+
+        status = "active"
+        raw_status = v.get("Status", "")
+        if raw_status:
+            resolved_status = _resolve_course_status(raw_status)
+            if resolved_status is None:
+                add("Status", raw_status, "Invalid Status. Allowed values: Active, Inactive.")
+            else:
+                status = resolved_status
+
+        department_id_value: Optional[UUID] = None
+        raw_dept = v.get("Department", "")
+        if raw_dept:
+            resolved_dept = department_by_code.get(raw_dept.strip().lower())
+            if not resolved_dept:
+                add("Department", raw_dept, f"Department '{raw_dept}' was not found.")
+            elif force_department_id is not None and resolved_dept != force_department_id:
+                suffix = f" (expected: {hod_department_label})" if hod_department_label else ""
+                add("Department", raw_dept, f"Department does not match the authenticated HOD's department{suffix}.")
+            else:
+                department_id_value = resolved_dept
+
+        if course_number:
+            if course_number in existing_numbers:
+                add("Course Number", raw_number, "Course number already exists.")
+            elif course_number in seen_numbers:
+                other = seen_numbers[course_number]
+                add("Course Number", raw_number, f"Duplicate course number within the uploaded file (also row {other}).")
+                findings.append({
+                    "row": other, "column": "Course Number", "value": raw_number,
+                    "error": f"Duplicate course number within the uploaded file (also row {row_no}).",
+                })
+            else:
+                seen_numbers[course_number] = row_no
+
+        if row_findings:
+            findings.extend(row_findings)
+        elif course_number and title and department_id_value:
+            course_type = "both" if (credit_theory > 0 and credit_practical > 0) else ("practical" if credit_practical > 0 else "theory")
+            row_payload[row_no] = {
+                "course_number": course_number, "title": title, "program_level": program_level,
+                "category": category, "credit_type": credit_type,
+                "credit_theory": credit_theory, "credit_practical": credit_practical,
+                "course_type": course_type, "status": status, "department_id": department_id_value,
+            }
+
+    # A row that looked valid in isolation may have been retroactively
+    # invalidated once a LATER duplicate course number was found above — drop
+    # it from the create list (mirrors auth.py's identical handling).
+    invalidated_rows = {f["row"] for f in findings}
+    for r in list(row_payload):
+        if r in invalidated_rows:
+            del row_payload[r]
+
+    findings.sort(key=lambda f: (f["row"], f["column"]))
+    valid = [row_payload[r] for r in sorted(row_payload)]
+    return findings, valid
+
+
+async def _create_bulk_courses(valid_rows: list[dict], db: AsyncSession, user: User) -> list[Course]:
+    """Phase 2 — every row already passed validation; create them all in one
+    transaction (Section 16's explicit all-or-nothing requirement — no row is
+    ever committed while validation is still in progress)."""
+    created: list[Course] = []
+    for r in valid_rows:
+        c = Course(
+            course_number=r["course_number"], title=r["title"], program_level=r["program_level"],
+            category=r["category"], credit_type=r["credit_type"],
+            credit_theory=r["credit_theory"], credit_practical=r["credit_practical"],
+            course_type=r["course_type"], status=r["status"], department_id=r["department_id"],
+            created_by=user.id,
+        )
+        db.add(c)
+        created.append(c)
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            409,
+            "One or more rows conflict with existing data (e.g. a duplicate Course Number). "
+            "No courses were created.",
+        )
+    for c in created:
+        await db.refresh(c, attribute_names=["department"])
+    return created
+
+
+def _build_course_bulk_template_workbook() -> io.BytesIO:
+    """Mirrors auth.py's `_build_user_bulk_template_workbook` exactly — one
+    clearly-marked, unimportable example row ("EXAMPLE" is never a real
+    Department code, so even if left in by mistake it fails validation
+    loudly rather than being silently imported as a real course)."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "AMS Courses"
+    ws.append(_COURSE_BULK_COLUMNS)
+    ws.append([
+        "EXAMPLE — DELETE THIS ROW", "Do Not Import", "UG", "Core", "Credit",
+        "3", "0", "Active", "<exact existing Department code>",
+    ])
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+@router.post("/bulk-upload", status_code=201)
+async def bulk_upload_courses(
+    file: UploadFile = File(...), db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(*_MANAGE_ROLES)),
+):
+    """SUPER_ADMIN/HOD only (Section 15 — same `_MANAGE_ROLES` gate as the
+    individual create_course endpoint; Faculty/Student are rejected before
+    this function body ever runs). HOD's own department is validated against
+    every row (never silently forced) — a single mismatched row rejects the
+    ENTIRE file, exactly like create_course's own `_authorize_department_manage`."""
+    if user.active_role == UserRole.HOD and not user.department_id:
+        raise HTTPException(400, "Your account has no department assigned; contact an administrator.")
+
+    content = await file.read()
+    if len(content) > _MAX_COURSE_BULK_BYTES:
+        raise HTTPException(413, f"File exceeds the {settings.MAX_FILE_SIZE_MB} MB limit.")
+
+    rows = parse_bulk_upload_file(file.filename or "", content, _COURSE_BULK_COLUMNS)
+    force_department_id = user.department_id if user.active_role == UserRole.HOD else None
+    findings, valid = await _validate_course_bulk_rows(rows, db, force_department_id=force_department_id)
+    if findings:
+        return JSONResponse(status_code=400, content={"success": False, "imported_count": 0, "errors": findings})
+
+    created = await _create_bulk_courses(valid, db, user)
+    return {"success": True, "imported_count": len(created), "filename": file.filename}
+
+
+@router.get("/bulk-upload/template")
+async def download_course_bulk_upload_template(_: User = Depends(require_roles(*_MANAGE_ROLES))):
+    buf = _build_course_bulk_template_workbook()
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=ams_courses_bulk_upload_template.xlsx"},
+    )
 
 
 @router.get("/{course_id}/availability")
