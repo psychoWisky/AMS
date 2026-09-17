@@ -16,11 +16,21 @@ class UserRole(str, Enum):
     values. Add a future role here only once AVFU defines an actual business
     requirement for it; the multi-role assignment/switching system (see
     UserRoleAssignment, RefreshToken.active_role) already supports any
-    number of roles generically, so no other code needs to change to add one."""
-    SUPER_ADMIN = "super_admin"
-    HOD         = "hod"
-    FACULTY     = "faculty"
-    STUDENT     = "student"
+    number of roles generically, so no other code needs to change to add one.
+
+    Incharge Academic Cell / DPGS task (this revision) — two new GLOBAL,
+    departmentless roles sitting above HOD in the confirmed hierarchy
+    (SUPER_ADMIN > DPGS > INCHARGE_ACADEMIC_CELL > HOD > FACULTY > STUDENT).
+    Neither is seeded/assigned by any code in this repository — a Super
+    Admin must manually assign each one exactly once via the existing
+    role-assignment endpoints (see auth.py's `add_user_role`, which enforces
+    "at most one active holder" for both — see `0016_incharge_dpgs_roles`)."""
+    SUPER_ADMIN            = "super_admin"
+    DPGS                   = "dpgs"
+    INCHARGE_ACADEMIC_CELL = "incharge_academic_cell"
+    HOD                    = "hod"
+    FACULTY                = "faculty"
+    STUDENT                = "student"
 
 
 class Department(Base):

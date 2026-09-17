@@ -58,7 +58,12 @@ router = APIRouter(prefix="/ppw", tags=["PPW"])
 logger = logging.getLogger(__name__)
 
 _ADMIN_ROLES = (UserRole.SUPER_ADMIN,)
-_APPROVER_ROLES = (UserRole.FACULTY, UserRole.HOD)
+# Incharge Academic Cell / DPGS task (this revision) — both are global roles
+# with unrestricted PPW view access, same as Super Admin (Section 19/20:
+# "view PPWs across departments"). Approval actions themselves are still
+# gated per-stage by `_resolve_my_stage`, never by this tuple alone.
+_GLOBAL_VIEW_ROLES = (UserRole.SUPER_ADMIN, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS)
+_APPROVER_ROLES = (UserRole.FACULTY, UserRole.HOD, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS)
 
 # Dev/test-only OTP convenience (this task's explicit requirement) — accepted
 # ONLY when settings.ENVIRONMENT != "production" (see _is_dev_mode below).
@@ -79,6 +84,8 @@ _PHASE_FOR_STAGE_TYPE = {
     "major_advisor": "major_advisor_pending",
     "committee_member": "committee_pending",
     "hod": "hod_pending",
+    "incharge_academic_cell": "incharge_pending",
+    "dpgs": "dpgs_pending",
 }
 
 # Fixed Advisory Committee endorsement rows for the PPW document (this task's
@@ -194,17 +201,25 @@ async def _resolve_my_stage(p: Ppw, cycle: PpwApprovalCycle, user: User, db: Asy
                 dept_id = await _student_department_id(p.student_id, db)
                 if dept_id and user.department_id and dept_id == user.department_id:
                     return stage
+        elif stage.stage_type == "incharge_academic_cell":
+            # Global role — no department match required (Section 19).
+            if user.active_role == UserRole.INCHARGE_ACADEMIC_CELL:
+                return stage
+        elif stage.stage_type == "dpgs":
+            if user.active_role == UserRole.DPGS:
+                return stage
     raise HTTPException(403, "You have no pending PPW approval action.")
 
 
 async def _authorize_ppw_view(p: Ppw, user: User, db: AsyncSession) -> None:
-    """Who may READ a PPW: admins (unrestricted, existing convention); the
-    owning student; any faculty/research-supervisor who is the exact
-    CommitteeMember behind ANY approval stage ever created for this PPW
-    (so past-cycle approvers retain read access to what they signed); the
-    student's current-department HOD. Mirrors research.py's
-    `_authorize_committee_view` join-based style — never a bare role check."""
-    if user.active_role in _ADMIN_ROLES:
+    """Who may READ a PPW: admins + the two global roles (unrestricted,
+    Incharge Academic Cell task); the owning student; any faculty/research-
+    supervisor who is the exact CommitteeMember behind ANY approval stage
+    ever created for this PPW (so past-cycle approvers retain read access to
+    what they signed); the student's current-department HOD. Mirrors
+    research.py's `_authorize_committee_view` join-based style — never a
+    bare role check."""
+    if user.active_role in _GLOBAL_VIEW_ROLES:
         return
     if user.active_role == UserRole.STUDENT:
         if p.student_id == user.id:
@@ -302,6 +317,38 @@ def _hod_status(p: Ppw, cycle: Optional[PpwApprovalCycle]) -> dict:
         "approver_name": stage.approver.full_name if stage.approver else None,
         "department_name": stage.approver.department.name if stage.approver and stage.approver.department else None,
         "signed_at": stage.signed_at.isoformat() if stage.signed_at else None,
+        "is_current_stage": stage.status == "pending" and _PHASE_FOR_STAGE_TYPE.get(stage.stage_type) == p.status,
+        "remark": stage.remark,
+    }
+
+
+def _dpgs_status(p: Ppw, cycle: Optional[PpwApprovalCycle]) -> dict:
+    """Mirrors `_hod_status` for the DPGS stage. DPGS IS a document signatory
+    (Section 20) — `signed_at`/`approver_name` here are what the PPW document
+    template's DPGS cell renders, replacing its previous "Not Yet
+    Implemented" placeholder."""
+    stage = next((s for s in cycle.stages if s.stage_type == "dpgs"), None) if cycle else None
+    if not stage:
+        return {"status": "not_submitted", "approver_name": None, "signed_at": None, "is_current_stage": False, "remark": None}
+    return {
+        "status": stage.status,
+        "approver_name": stage.approver.full_name if stage.approver else None,
+        "signed_at": stage.signed_at.isoformat() if stage.signed_at else None,
+        "is_current_stage": stage.status == "pending" and _PHASE_FOR_STAGE_TYPE.get(stage.stage_type) == p.status,
+        "remark": stage.remark,
+    }
+
+
+def _incharge_status(p: Ppw, cycle: Optional[PpwApprovalCycle]) -> dict:
+    """Incharge Academic Cell is workflow-approval-only, never a document
+    signatory (Section 19) — deliberately has no `signed_at` and feeds the
+    JSON API only; ppw_document.html has no Incharge cell at all."""
+    stage = next((s for s in cycle.stages if s.stage_type == "incharge_academic_cell"), None) if cycle else None
+    if not stage:
+        return {"status": "not_submitted", "approver_name": None, "is_current_stage": False, "remark": None}
+    return {
+        "status": stage.status,
+        "approver_name": stage.approver.full_name if stage.approver else None,
         "is_current_stage": stage.status == "pending" and _PHASE_FOR_STAGE_TYPE.get(stage.stage_type) == p.status,
         "remark": stage.remark,
     }
@@ -590,10 +637,12 @@ async def _full_ppw_dict(p: Ppw, db: AsyncSession, viewer: User) -> dict:
     cycle = await _latest_cycle(p.id, db)
     data["committee"] = await _committee_rows(p, cycle, db)
     data["hod_approval"] = _hod_status(p, cycle)
-    # Section 10: the old static {"head": "pending", "dpgs": "pending"} placeholder
-    # no longer pretends HOD is static — "head"/HOD now reflects real state.
-    # DPGS remains explicitly not-implemented this phase (not fabricated).
-    data["signatures"] = {"head": data["hod_approval"]["status"], "dpgs": "not_implemented"}
+    # Incharge Academic Cell task (this revision) — Incharge is approval-only
+    # (never a signature); DPGS is now the real final signatory, replacing
+    # the previous "not_implemented" placeholder.
+    data["incharge_approval"] = _incharge_status(p, cycle)
+    data["dpgs_approval"] = _dpgs_status(p, cycle)
+    data["signatures"] = {"head": data["hod_approval"]["status"], "dpgs": data["dpgs_approval"]["status"]}
     data["is_editable"] = p.status in _EDITABLE_STATUSES and p.student_id == viewer.id
     return data
 
@@ -675,6 +724,40 @@ async def list_pending_approvals(
                 # inferred via their Programme's department anymore, since a
                 # Programme can have many Departments).
                 User.department_id == user.department_id,
+            )
+        )
+        for stage, cycle, p in result.all():
+            student = p.student
+            program = student.program if student else None
+            department = student.department if student else None
+            rows.append({
+                "ppw_id": str(p.id), "student_name": student.full_name if student else None,
+                "student_roll": student.student_roll if student else None,
+                "student_email": student.email if student else None,
+                "research_title": p.research_title, "status": p.status,
+                "stage_type": stage.stage_type, "submitted_at": cycle.submitted_at.isoformat(),
+                "department_name": department.name if department else None,
+                "program_name": program.name if program else None,
+            })
+    elif user.active_role in (UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS):
+        # Incharge Academic Cell / DPGS task — global roles, so unlike HOD's
+        # branch above there is no department filter at all: every PPW
+        # currently at this caller's own stage_type, across every department.
+        stage_type = "incharge_academic_cell" if user.active_role == UserRole.INCHARGE_ACADEMIC_CELL else "dpgs"
+        expected_status = _PHASE_FOR_STAGE_TYPE[stage_type]
+        result = await db.execute(
+            select(PpwApprovalStage, PpwApprovalCycle, Ppw)
+            .join(PpwApprovalCycle, PpwApprovalCycle.id == PpwApprovalStage.cycle_id)
+            .join(Ppw, Ppw.id == PpwApprovalCycle.ppw_id)
+            .options(
+                selectinload(Ppw.student).selectinload(User.program),
+                selectinload(Ppw.student).selectinload(User.department),
+            )
+            .where(
+                PpwApprovalCycle.status == "active",
+                PpwApprovalStage.status == "pending",
+                PpwApprovalStage.stage_type == stage_type,
+                Ppw.status == expected_status,
             )
         )
         for stage, cycle, p in result.all():
@@ -913,6 +996,13 @@ async def submit_ppw(
         db.add(PpwApprovalStage(cycle_id=cycle.id, sequence=sequence, stage_type="committee_member", committee_member_id=m.id))
         sequence += 1
     db.add(PpwApprovalStage(cycle_id=cycle.id, sequence=sequence, stage_type="hod", approver_id=hod_id))
+    sequence += 1
+    # Incharge Academic Cell / DPGS task — both are global roles, so unlike
+    # the HOD stage there is no department-resolved approver to seed here;
+    # `_resolve_my_stage` matches them purely by active_role (Section 19/20).
+    db.add(PpwApprovalStage(cycle_id=cycle.id, sequence=sequence, stage_type="incharge_academic_cell"))
+    sequence += 1
+    db.add(PpwApprovalStage(cycle_id=cycle.id, sequence=sequence, stage_type="dpgs"))
 
     p.status = "major_advisor_pending"
     p.submitted_at = now
@@ -927,7 +1017,12 @@ async def submit_ppw(
 # ── Phase 2: Advisory Committee approval workflow ───────────────────────────
 
 class ApproveIn(BaseModel):
-    otp: str
+    # Optional: Incharge Academic Cell approval is a workflow action, never a
+    # document signature (Section 19), so it never requires an OTP. Every
+    # other stage type (major_advisor/committee_member/hod/dpgs) still
+    # requires one — enforced in approve_ppw_stage, not here, since the
+    # requirement depends on which stage the caller actually holds.
+    otp: Optional[str] = None
 
 class RevertIn(BaseModel):
     remark: str
@@ -1010,12 +1105,22 @@ async def approve_ppw_stage(
     cycle = await _get_active_cycle(p.id, db)
     stage = await _resolve_my_stage(p, cycle, user, db)
 
-    await _verify_and_consume_otp(stage, user, body.otp, request, db)
-
     now = datetime.now(timezone.utc)
-    stage.status = "approved"
-    stage.approver_id = user.id
-    stage.signed_at = now
+    # Incharge Academic Cell task (Section 19/22) — Incharge approval is an
+    # AMS workflow action only, never a document signature: no OTP is
+    # required and `signed_at` is deliberately left NULL so it can never be
+    # mistaken for a signing event (see `_incharge_status`/the PPW document
+    # template, which has no Incharge cell at all). Every other stage type
+    # (major_advisor/committee_member/hod/dpgs) is unchanged — still a real,
+    # OTP-verified signature.
+    if stage.stage_type == "incharge_academic_cell":
+        stage.status = "approved"
+        stage.approver_id = user.id
+    else:
+        await _verify_and_consume_otp(stage, user, body.otp or "", request, db)
+        stage.status = "approved"
+        stage.approver_id = user.id
+        stage.signed_at = now
     await db.flush()
 
     # Lock the cycle row for the remainder of this transaction so a
@@ -1037,7 +1142,13 @@ async def approve_ppw_stage(
         if all(s.status == "approved" for s in committee_stages):
             p.status = "hod_pending"
     elif stage.stage_type == "hod":
-        p.status = "hod_approved"
+        # Incharge Academic Cell task — HOD approval no longer terminates the
+        # cycle; it now continues to the two global roles above HOD.
+        p.status = "incharge_pending"
+    elif stage.stage_type == "incharge_academic_cell":
+        p.status = "dpgs_pending"
+    elif stage.stage_type == "dpgs":
+        p.status = "dpgs_approved"
         cycle_row = await db.get(PpwApprovalCycle, cycle.id)
         cycle_row.status = "approved"
         cycle_row.completed_at = now
@@ -1171,6 +1282,7 @@ async def _build_document_context(p: Ppw, db: AsyncSession, viewer: User) -> dic
     for row in data["committee"]["rows"]:
         row["signed_at"] = _pretty_timestamp(row["signed_at"])
     data["hod_approval"]["signed_at"] = _pretty_timestamp(data["hod_approval"]["signed_at"])
+    data["dpgs_approval"]["signed_at"] = _pretty_timestamp(data["dpgs_approval"]["signed_at"])
     academic = await _current_academic_context(db)
 
     from app.utils.pdf import get_logo_data_uri

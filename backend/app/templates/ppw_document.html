@@ -252,7 +252,18 @@
       <p style="font-weight:600; margin-top:6px;">Signature of the Head</p>
     </div>
     <div class="signature-cell">
-      <span class="sig-na">Not Yet Implemented</span>
+      {% if ppw.dpgs_approval.status == "approved" %}
+        <span class="sig-approved">&#10003; Signed</span>
+        {% if ppw.dpgs_approval.approver_name %}<div class="signed-meta">{{ ppw.dpgs_approval.approver_name }}</div>{% endif %}
+        {% if ppw.dpgs_approval.signed_at %}<div class="signed-meta">{{ ppw.dpgs_approval.signed_at }}</div>{% endif %}
+      {% elif ppw.dpgs_approval.status == "pending" %}
+        <span class="sig-pending">Pending</span>
+      {% elif ppw.dpgs_approval.status == "reverted" %}
+        <span class="sig-reverted">&#10007; Reverted</span>
+        {% if ppw.dpgs_approval.remark %}<div class="remark-line">Remark: {{ ppw.dpgs_approval.remark }}</div>{% endif %}
+      {% else %}
+        <span class="sig-none">&mdash;</span>
+      {% endif %}
       <p style="font-weight:600; margin-top:6px;">Signature of the D.P.G.S</p>
     </div>
   </div>

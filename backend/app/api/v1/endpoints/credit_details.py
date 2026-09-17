@@ -35,7 +35,10 @@ from app.core.student_scope import resolve_student_department_id
 
 router = APIRouter(prefix="/credit-details", tags=["Student Credit Details"])
 
-_ADMIN_ROLES = (UserRole.SUPER_ADMIN,)
+# Incharge Academic Cell / DPGS task (Section 34) — both are global,
+# read-only here, same as Super Admin (this file has no mutation endpoints
+# at all — view-only credit details, so no ownership concern to preserve).
+_ADMIN_ROLES = (UserRole.SUPER_ADMIN, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS)
 
 
 # ── Authorization ────────────────────────────────────────────────────────────

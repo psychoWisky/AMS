@@ -28,6 +28,9 @@ const STAGE_STYLE: Record<string, string> = {
   major_advisor_pending: "bg-blue-100 text-blue-700",
   hod_pending: "bg-purple-100 text-purple-700",
   hod_approved: "bg-green-100 text-green-700",
+  incharge_pending: "bg-indigo-100 text-indigo-700",
+  dpgs_pending: "bg-teal-100 text-teal-700",
+  dpgs_approved: "bg-green-100 text-green-700",
   reverted: "bg-red-100 text-red-700",
 };
 const ITEM_STATUS_STYLE: Record<string, string> = {
@@ -97,14 +100,20 @@ function RegistrationDetailModal({ registrationId, onClose }: { registrationId: 
 export default function CourseRequestPage() {
   const role = useRole();
   const qc = useQueryClient();
-  const isFacultyLike = role === "faculty" || role === "hod" || role === "super_admin";
+  const isFacultyLike = role === "faculty" || role === "hod" || role === "super_admin" || role === "incharge_academic_cell" || role === "dpgs";
   const isHodLike = role === "hod" || role === "super_admin";
+  // Incharge Academic Cell / DPGS task (this revision) — both are global
+  // roles that approve Course Registration Cards after HOD (Section 8/12).
+  // Super Admin can already see the HOD queue above for the same reason it
+  // can act as HOD elsewhere — extended here identically for consistency.
+  const isInchargeLike = role === "incharge_academic_cell" || role === "super_admin";
+  const isDpgsLike = role === "dpgs" || role === "super_admin";
 
   const [calendarId, setCalendarId] = useState("");
   const [semesterId, setSemesterId] = useState("");
   const [offeringId, setOfferingId] = useState("");
   const [detailId, setDetailId] = useState<string | null>(null);
-  const [remarkFor, setRemarkFor] = useState<{ kind: "item" | "ma" | "hod"; id: string } | null>(null);
+  const [remarkFor, setRemarkFor] = useState<{ kind: "item" | "ma" | "hod" | "incharge" | "dpgs"; id: string } | null>(null);
   const [confirm, setConfirm] = useState<{ action: () => void; title: string; message: string; confirmLabel?: string; confirmClassName?: string } | null>(null);
 
   const { data: calendars = [] } = useQuery<Calendar[]>({
@@ -142,10 +151,24 @@ export default function CourseRequestPage() {
     enabled: isHodLike,
   });
 
+  const { data: inchargeQueue = [] } = useQuery<Registration[]>({
+    queryKey: ["ams-incharge-queue"],
+    queryFn: async () => (await api.get("/enrollment/registrations", { params: { stage: "incharge_pending" } })).data,
+    enabled: isInchargeLike,
+  });
+
+  const { data: dpgsQueue = [] } = useQuery<Registration[]>({
+    queryKey: ["ams-dpgs-queue"],
+    queryFn: async () => (await api.get("/enrollment/registrations", { params: { stage: "dpgs_pending" } })).data,
+    enabled: isDpgsLike,
+  });
+
   function invalidateAll() {
     qc.invalidateQueries({ queryKey: ["ams-offering-students"] });
     qc.invalidateQueries({ queryKey: ["ams-ma-queue"] });
     qc.invalidateQueries({ queryKey: ["ams-hod-queue"] });
+    qc.invalidateQueries({ queryKey: ["ams-incharge-queue"] });
+    qc.invalidateQueries({ queryKey: ["ams-dpgs-queue"] });
   }
 
   const processItem = useMutation({
@@ -169,6 +192,25 @@ export default function CourseRequestPage() {
     onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed."),
   });
 
+  // Incharge Academic Cell / DPGS task (this revision) — Incharge approval
+  // is workflow-only ("Approve"/"Revert", never signing language, Section
+  // 39); DPGS approval is the Registration Card's final, signed approval —
+  // the backend derives the signatory from the authenticated user, never
+  // from anything sent here.
+  const inchargeDecision = useMutation({
+    mutationFn: ({ id, approved, remark }: { id: string; approved: boolean; remark?: string }) =>
+      api.patch(`/enrollment/registrations/${id}/incharge-approval`, { approved, remark }),
+    onSuccess: () => { toast.success("Recorded."); invalidateAll(); },
+    onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed."),
+  });
+
+  const dpgsDecision = useMutation({
+    mutationFn: ({ id, approved, remark }: { id: string; approved: boolean; remark?: string }) =>
+      api.patch(`/enrollment/registrations/${id}/dpgs-approval`, { approved, remark }),
+    onSuccess: () => { toast.success("Recorded."); invalidateAll(); },
+    onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed."),
+  });
+
   // Withdrawal-request task (this revision) — reuses the same authorization
   // (_authorize_offering_management) the item approve/revert actions above
   // already use; no second, incompatible authorization mechanism.
@@ -180,7 +222,7 @@ export default function CourseRequestPage() {
   });
 
   if (!isFacultyLike) {
-    return <div className="p-6 max-w-3xl mx-auto text-gray-600">Course Request is available to Faculty, HOD, and Admin roles.</div>;
+    return <div className="p-6 max-w-3xl mx-auto text-gray-600">Course Request is available to Faculty, HOD, Incharge Academic Cell, DPGS, and Admin roles.</div>;
   }
 
   return (
@@ -327,6 +369,62 @@ export default function CourseRequestPage() {
         </div>
       )}
 
+      {isInchargeLike && (
+        <div>
+          <h2 className="text-xl font-bold text-gray-900 mb-1">Registrations Awaiting Incharge Academic Cell Approval</h2>
+          <p className="text-gray-700 text-sm mb-4">Approved by HOD — global queue, across all departments.</p>
+          {inchargeQueue.length === 0 ? (
+            <div className="bg-white rounded-2xl border border-gray-200 text-center py-10 text-gray-500">No registrations awaiting Incharge Academic Cell approval.</div>
+          ) : (
+            <div className="space-y-2">
+              {inchargeQueue.map((r) => (
+                <div key={r.id} className="bg-white rounded-2xl border border-gray-200 p-4 flex items-center justify-between">
+                  <div>
+                    <p className="font-semibold text-gray-900">{r.student_name} <span className="text-gray-500 font-mono text-sm">({r.student_roll})</span></p>
+                    <p className="text-sm text-gray-600">{r.program_name} — {r.items.map((it) => it.course_number).join(", ")}</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => setDetailId(r.id)} className="text-sm font-semibold text-[#0D6E6E] hover:underline mr-2">View</button>
+                    <button onClick={() => setConfirm({ action: () => inchargeDecision.mutate({ id: r.id, approved: true }), title: "Approve Registration", message: `Approve ${r.student_name}'s registration as Incharge Academic Cell?` })}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white text-sm font-semibold rounded-lg hover:bg-green-700"><CheckCircle2 size={14} /> Approve</button>
+                    <button onClick={() => setRemarkFor({ kind: "incharge", id: r.id })}
+                      className="flex items-center gap-1.5 px-3 py-1.5 border border-red-300 text-red-700 text-sm font-semibold rounded-lg hover:bg-red-50"><XCircle size={14} /> Revert</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {isDpgsLike && (
+        <div>
+          <h2 className="text-xl font-bold text-gray-900 mb-1">Registrations Awaiting DPGS Approval</h2>
+          <p className="text-gray-700 text-sm mb-4">Final approval and signature — global queue, across all departments.</p>
+          {dpgsQueue.length === 0 ? (
+            <div className="bg-white rounded-2xl border border-gray-200 text-center py-10 text-gray-500">No registrations awaiting DPGS approval.</div>
+          ) : (
+            <div className="space-y-2">
+              {dpgsQueue.map((r) => (
+                <div key={r.id} className="bg-white rounded-2xl border border-gray-200 p-4 flex items-center justify-between">
+                  <div>
+                    <p className="font-semibold text-gray-900">{r.student_name} <span className="text-gray-500 font-mono text-sm">({r.student_roll})</span></p>
+                    <p className="text-sm text-gray-600">{r.program_name} — {r.items.map((it) => it.course_number).join(", ")}</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => setDetailId(r.id)} className="text-sm font-semibold text-[#0D6E6E] hover:underline mr-2">View</button>
+                    <button onClick={() => setConfirm({ action: () => dpgsDecision.mutate({ id: r.id, approved: true }), title: "Approve & Sign", message: `Approve and sign ${r.student_name}'s registration as DPGS? This is the final approval.` })}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white text-sm font-semibold rounded-lg hover:bg-green-700"><CheckCircle2 size={14} /> Approve &amp; Sign</button>
+                    <button onClick={() => setRemarkFor({ kind: "dpgs", id: r.id })}
+                      className="flex items-center gap-1.5 px-3 py-1.5 border border-red-300 text-red-700 text-sm font-semibold rounded-lg hover:bg-red-50"><XCircle size={14} /> Revert</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {detailId && <RegistrationDetailModal registrationId={detailId} onClose={() => setDetailId(null)} />}
 
       {remarkFor && (
@@ -337,6 +435,8 @@ export default function CourseRequestPage() {
             if (remarkFor.kind === "item") processItem.mutate({ id: remarkFor.id, status: "reverted", remarks: remark });
             if (remarkFor.kind === "ma") maDecision.mutate({ id: remarkFor.id, approved: false, remark });
             if (remarkFor.kind === "hod") hodDecision.mutate({ id: remarkFor.id, approved: false, remark });
+            if (remarkFor.kind === "incharge") inchargeDecision.mutate({ id: remarkFor.id, approved: false, remark });
+            if (remarkFor.kind === "dpgs") dpgsDecision.mutate({ id: remarkFor.id, approved: false, remark });
             setRemarkFor(null);
           }}
         />

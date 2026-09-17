@@ -109,6 +109,12 @@ _REGISTRATION_STAGE_LABELS = {
     "major_advisor_pending": "Major Advisor Approval Pending",
     "hod_pending": "HOD Approval Pending",
     "hod_approved": "HOD Approved",
+    # Incharge Academic Cell / DPGS task (this revision) — HOD approval no
+    # longer terminates the chain (Section 12); it continues through the two
+    # global roles above HOD.
+    "incharge_pending": "Incharge Academic Cell Approval Pending",
+    "dpgs_pending": "DPGS Approval Pending",
+    "dpgs_approved": "DPGS Approved (Final)",
     "reverted": "Reverted",
 }
 _ENROLLMENT_STATUS_LABELS = {
@@ -195,7 +201,7 @@ async def _authorize_hod_registration(registration: CourseRegistration, user: Us
 
 
 async def _authorize_registration_view(registration: CourseRegistration, user: User, db: AsyncSession) -> None:
-    if user.active_role == UserRole.SUPER_ADMIN:
+    if user.active_role in (UserRole.SUPER_ADMIN, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS):
         return
     if user.active_role == UserRole.STUDENT:
         if registration.student_id == user.id:
@@ -219,6 +225,26 @@ async def _authorize_registration_view(registration: CourseRegistration, user: U
         if result.scalar_one_or_none():
             return
     raise HTTPException(403, "You are not authorized to view this registration.")
+
+
+async def _revert_registration_to_student(r: CourseRegistration, remark: str, db: AsyncSession) -> None:
+    """Incharge Academic Cell / DPGS task (Section 15/16) — a revert from
+    EITHER global stage returns the registration all the way to the very
+    first stage (never "one level back", unlike the pre-existing Major-
+    Advisor/HOD reverts), resetting every selected course exactly like the
+    existing Major Advisor revert already does, so a resubmission always
+    replays the identical original approval chain (Course Teacher -> Major
+    Advisor -> HOD -> Incharge -> DPGS) — never a shortcut back to DPGS.
+    Clears `dpgs_approved_by`/`dpgs_approved_at` so a prior cycle's
+    signature can never be mistaken for the new cycle's (Section 17)."""
+    r.stage = "teacher_pending"
+    r.revert_remark = remark
+    r.reverted_at = datetime.now(timezone.utc)
+    r.dpgs_approved_by = None
+    r.dpgs_approved_at = None
+    items = (await db.execute(select(StudentEnrollment).where(StudentEnrollment.registration_id == r.id))).scalars().all()
+    for item in items:
+        item.status = "pending"; item.processed_by = None; item.processed_at = None; item.remarks = None
 
 
 def _ensure_registration_editable(registration: CourseRegistration) -> None:
@@ -999,8 +1025,8 @@ async def list_registrations(
     q = select(CourseRegistration).options(*_REGISTRATION_LOAD_OPTIONS)
     if user.active_role == UserRole.STUDENT:
         q = q.where(CourseRegistration.student_id == user.id)
-    elif user.active_role == UserRole.SUPER_ADMIN:
-        pass  # unrestricted
+    elif user.active_role in (UserRole.SUPER_ADMIN, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS):
+        pass  # unrestricted — global roles, Section 12/13
     elif user.active_role == UserRole.HOD:
         if not user.department_id:
             return []
@@ -1176,12 +1202,18 @@ async def _build_registration_card_context(r: CourseRegistration, db: AsyncSessi
         classifications.append({"label": _CATEGORY_LABELS.get(cat, cat.replace("_", " ").title()), "courses": rows})
 
     # HOD signature status is derived the same way _authorize_hod_registration
-    # resolves the student's HOD — live, never a stored/cached value.
+    # resolves the student's HOD — live, never a stored/cached value. HOD is
+    # not a persisted signatory (unchanged by this task — see model docstring).
     hod_dept_id = await _student_department_id(r.student_id, db)
     hod = None
     if hod_dept_id:
         hod_result = await db.execute(select(User).where(User.role == UserRole.HOD, User.department_id == hod_dept_id, User.is_active == True).limit(1))
         hod = hod_result.scalar_one_or_none()
+
+    # DPGS IS the final, persisted signatory (Section 17) — the ACTUAL
+    # authenticated user who approved, never a live "whoever holds DPGS
+    # right now" lookup (deliberately unlike the HOD lookup above).
+    dpgs_approver = await db.get(User, r.dpgs_approved_by) if r.dpgs_approved_by else None
 
     from app.utils.pdf import get_logo_data_uri
     return {
@@ -1199,6 +1231,12 @@ async def _build_registration_card_context(r: CourseRegistration, db: AsyncSessi
         "academic_year": calendar.academic_year if calendar else None,
         "major_advisor_name": major_advisor.full_name if major_advisor else None,
         "hod_name": hod.full_name if hod else None,
+        # Incharge Academic Cell is workflow-approval-only and deliberately
+        # has NO field here at all (Section 13 — never a signatory). DPGS is
+        # the final signatory; both fields are None until the actual DPGS
+        # approval event has happened.
+        "dpgs_name": dpgs_approver.full_name if dpgs_approver else None,
+        "dpgs_signed_at": r.dpgs_approved_at.isoformat() if r.dpgs_approved_at else None,
         "classifications": classifications,
         "total_credits": total_credits,
         "logo_data_uri": get_logo_data_uri(),
@@ -1467,7 +1505,9 @@ async def hod_registration_approval(
         raise HTTPException(400, "This registration is not awaiting HOD approval.")
 
     if body.approved:
-        r.stage = "hod_approved"
+        # Incharge Academic Cell / DPGS task — HOD approval no longer
+        # terminates the chain; it continues to Incharge Academic Cell.
+        r.stage = "incharge_pending"
         r.revert_remark = None; r.reverted_at = None
         await db.commit()
         return {"message": "Approved by HOD.", "stage": r.stage, "status_label": _REGISTRATION_STAGE_LABELS[r.stage]}
@@ -1478,3 +1518,67 @@ async def hod_registration_approval(
     r.revert_remark = body.remark; r.reverted_at = datetime.now(timezone.utc)
     await db.commit()
     return {"message": "Reverted to Major Advisor stage.", "stage": r.stage, "status_label": _REGISTRATION_STAGE_LABELS[r.stage]}
+
+
+# ── Incharge Academic Cell stage (global — Incharge Academic Cell/DPGS task) ──
+
+@router.patch("/registrations/{registration_id}/incharge-approval")
+async def incharge_registration_approval(
+    registration_id: UUID, body: StageDecisionIn, db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.INCHARGE_ACADEMIC_CELL)),
+):
+    """Global role — no department match (Section 9/13): any Incharge
+    Academic Cell holder may act on any department's registration. Approval
+    is workflow-only, never a signature (Section 13) — no approver identity
+    is persisted, mirroring the existing HOD stage's own behavior."""
+    r = await db.get(CourseRegistration, registration_id)
+    if not r: raise HTTPException(404, "Registration not found.")
+    if r.stage != "incharge_pending":
+        raise HTTPException(400, "This registration is not awaiting Incharge Academic Cell approval.")
+
+    if body.approved:
+        r.stage = "dpgs_pending"
+        r.revert_remark = None; r.reverted_at = None
+        await db.commit()
+        return {"message": "Approved by Incharge Academic Cell.", "stage": r.stage, "status_label": _REGISTRATION_STAGE_LABELS[r.stage]}
+
+    if not body.remark:
+        raise HTTPException(400, "A remark is required when reverting.")
+    # Section 15/16 — Incharge/DPGS revert goes ALL THE WAY back to the
+    # student (never one level back, unlike every earlier stage in this
+    # workflow), so a resubmission always replays the identical original
+    # approval chain from the very first stage.
+    await _revert_registration_to_student(r, body.remark, db)
+    await db.commit()
+    return {"message": "Reverted to the student for correction.", "stage": r.stage, "status_label": _REGISTRATION_STAGE_LABELS[r.stage]}
+
+
+# ── DPGS stage (global, final signatory — Incharge Academic Cell/DPGS task) ──
+
+@router.patch("/registrations/{registration_id}/dpgs-approval")
+async def dpgs_registration_approval(
+    registration_id: UUID, body: StageDecisionIn, db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.DPGS)),
+):
+    """DPGS is the Registration Card's final signatory (Section 14/17) — the
+    approver identity/timestamp are persisted on the registration itself
+    (`dpgs_approved_by`/`dpgs_approved_at`), derived ONLY from the
+    authenticated user, never a client-supplied id."""
+    r = await db.get(CourseRegistration, registration_id)
+    if not r: raise HTTPException(404, "Registration not found.")
+    if r.stage != "dpgs_pending":
+        raise HTTPException(400, "This registration is not awaiting DPGS approval.")
+
+    if body.approved:
+        r.stage = "dpgs_approved"
+        r.dpgs_approved_by = user.id
+        r.dpgs_approved_at = datetime.now(timezone.utc)
+        r.revert_remark = None; r.reverted_at = None
+        await db.commit()
+        return {"message": "Approved and signed by DPGS.", "stage": r.stage, "status_label": _REGISTRATION_STAGE_LABELS[r.stage]}
+
+    if not body.remark:
+        raise HTTPException(400, "A remark is required when reverting.")
+    await _revert_registration_to_student(r, body.remark, db)
+    await db.commit()
+    return {"message": "Reverted to the student for correction.", "stage": r.stage, "status_label": _REGISTRATION_STAGE_LABELS[r.stage]}

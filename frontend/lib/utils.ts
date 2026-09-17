@@ -26,15 +26,26 @@ export function formatDate(iso: string, style: "long" | "short" | "relative" = "
 // Role-cleanup task: academic_admin/registrar/examiner/research_supervisor
 // were dummy/testing roles, never real AVFU roles, and have been removed
 // entirely (backend UserRole enum, ams_user_role Postgres enum, and here).
-// The current, intentional role set is exactly these four.
+// Incharge Academic Cell / DPGS task (this revision) — two new GLOBAL roles
+// added above HOD (SUPER_ADMIN > DPGS > INCHARGE_ACADEMIC_CELL > HOD >
+// FACULTY > STUDENT), matching the backend `UserRole` enum's actual values
+// exactly (never guessed).
 export const ROLES = {
   super_admin: "Super Admin",
+  dpgs: "DPGS",
+  incharge_academic_cell: "Incharge Academic Cell",
   hod: "Head of Department",
   faculty: "Faculty",
   student: "Student",
 };
 
 export const ADMIN_ROLES = ["super_admin", "hod"];
+
+// Incharge Academic Cell / DPGS task — the two new global roles, for pages
+// that need to grant them the same cross-department view access Super Admin
+// already has (never user-management/role-assignment powers — those remain
+// SUPER_ADMIN-only, matched by the backend exactly).
+export const GLOBAL_ROLES = ["super_admin", "incharge_academic_cell", "dpgs"];
 
 // Centralized labels for CommitteeMember.role (BUSINESS_LOGIC.md M.5, Rule 29 —
 // the 5 confirmed PG/PhD Research Committee member types). `co_major_advisor` and

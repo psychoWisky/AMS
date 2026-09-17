@@ -22,7 +22,14 @@ from app.core.student_scope import resolve_student_department_id
 
 router = APIRouter(prefix="/grading", tags=["Grading"])
 
-_ADMIN_ROLES = (UserRole.SUPER_ADMIN,)
+# Incharge Academic Cell / DPGS task (Section 34) — `_ADMIN_ROLES` here gates
+# ONLY `_authorize_student_academic_view` (read-only GPA/academic-progress
+# viewing) — safe to extend directly. Deliberately NOT added to
+# `_GRADING_UNRESTRICTED_ROLES` below, which also gates gradesheet
+# create/edit/submit/approval (mutation) — global roles must not
+# automatically gain Faculty/HOD grading mutation rights (Section 34's
+# explicit "do not automatically give them faculty grading mutation rights").
+_ADMIN_ROLES = (UserRole.SUPER_ADMIN, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS)
 # Role-cleanup task: REGISTRAR/EXAMINER/ACADEMIC_ADMIN were dummy/testing
 # university-wide approval-stage roles (see APPROVAL_PIPELINE below) and have
 # been removed entirely — they are not real AVFU roles and were never

@@ -34,10 +34,27 @@ class CourseRegistration(Base):
     `card_pending` to `major_advisor_pending`, at which point the registration
     is permanently locked from the student's side for this cycle.
 
-    I/C Academic Cell and DPGS stages are deliberately NOT modeled here — no
-    documented demo-role mitigation exists for either (same reasoning as
-    Advisory Committee P0's identical omission) — `hod_approved` is the honest
-    P0 terminal state for this phase.
+    Incharge Academic Cell / DPGS task (this revision) — the chain now
+    continues past `hod_approved`:
+
+        hod_approved -> incharge_pending -> incharge_approved -> dpgs_pending -> dpgs_approved
+
+    Incharge Academic Cell is workflow-approval-only (never a document
+    signatory — no field is added for it, mirroring how the pre-existing
+    HOD stage itself stores no persisted approver identity either). DPGS IS
+    the Registration Card's final signatory, so — unlike every other stage
+    in this model — its approval event is explicitly persisted
+    (`dpgs_approved_by`/`dpgs_approved_at`), since the document must reflect
+    the ACTUAL authenticated DPGS who approved, never a live "whoever holds
+    DPGS right now" lookup (the pre-existing bug this task fixes — see
+    `enrollment.py::_build_registration_card_context`'s old `hod` lookup,
+    left unchanged since HOD is still not a persisted signatory). Both
+    `Incharge`/`DPGS` reverts return the registration all the way to
+    `teacher_pending` (Section 15/16 — NOT one level back, unlike every
+    earlier revert in this model) so a resubmission always replays the
+    identical original approval chain; `dpgs_approved_by`/`_at` are cleared
+    on any such revert so a stale prior-cycle approval can never be
+    mistaken for the new cycle's signature.
     """
     __tablename__ = "ams_course_registrations"
     id: Mapped[uuid.UUID]          = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -47,6 +64,13 @@ class CourseRegistration(Base):
     stage: Mapped[str]             = mapped_column(String(30), default="teacher_pending")
     revert_remark: Mapped[str | None] = mapped_column(Text)
     reverted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # DPGS final-signatory persistence (Section 17) — the only approval
+    # identity/timestamp stored anywhere on this model, since DPGS is the
+    # only stage that is an actual document signature, not just a workflow
+    # approval. Never trusted from the client — always set server-side from
+    # the authenticated user in the DPGS approval endpoint.
+    dpgs_approved_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id"))
+    dpgs_approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     # Registration Card task (this revision) — distinct from `submitted_at`
     # (which marks when this batch/row was first CREATED, i.e. the student's
@@ -61,6 +85,7 @@ class CourseRegistration(Base):
     __table_args__ = (UniqueConstraint("student_id", "semester_id", name="uq_course_registration"),)
 
     student: Mapped["User"] = relationship("User", foreign_keys=[student_id])
+    dpgs_approver: Mapped["User | None"] = relationship("User", foreign_keys=[dpgs_approved_by])
     items: Mapped[list["StudentEnrollment"]] = relationship("StudentEnrollment", back_populates="registration")
 
 

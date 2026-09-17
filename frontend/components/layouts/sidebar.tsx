@@ -50,13 +50,19 @@ const NAV = [
   // the route itself branches on role internally, unchanged.
   { label: "My Courses",      icon: BookOpen,        href: "/enrollment",   roles: ["student"] },
   { label: "Course Registration",icon: ClipboardCheck,href: "/course-registration", roles: ["student"] },
-  { label: "Course Request",  icon: ClipboardList,   href: "/course-request", roles: ["super_admin","hod","faculty"] },
-  { label: "Academic Progress",icon: GraduationCap,  href: "/academic-progress", roles: ["super_admin","hod","faculty","student"] },
+  // Incharge Academic Cell / DPGS task (this revision) — both are global
+  // roles that approve Course Registration Cards after HOD (Section 12);
+  // this page hosts their approval queue exactly like it already does for
+  // HOD/Faculty.
+  { label: "Course Request",  icon: ClipboardList,   href: "/course-request", roles: ["super_admin","hod","faculty","incharge_academic_cell","dpgs"] },
+  { label: "Academic Progress",icon: GraduationCap,  href: "/academic-progress", roles: ["super_admin","hod","faculty","student","incharge_academic_cell","dpgs"] },
   { label: "Grading",         icon: BarChart3,       href: "/grading",      roles: ["super_admin","hod","faculty"] },
   { label: "Admit Card",      icon: FileText,        href: "/admit-card",   roles: ["super_admin","hod","student"] },
   // Advisory Committee naming task (this revision) — visible label only;
   // the route (/research), page component, and API endpoints are unchanged.
-  { label: "Advisory Committee", icon: FlaskConical,  href: "/research",     roles: ["super_admin","hod","faculty","student"] },
+  // Incharge Academic Cell / DPGS task — both approve committees after HOD
+  // (Section 23/25/26), global (no department restriction).
+  { label: "Advisory Committee", icon: FlaskConical,  href: "/research",     roles: ["super_admin","hod","faculty","student","incharge_academic_cell","dpgs"] },
   { label: "Admissions",      icon: ClipboardCheck,  href: "/admissions",   roles: ["super_admin"] },
   { label: "Orientation",     icon: ClipboardCheck,  href: "/orientation",  roles: ["super_admin"] },
   { label: "Student Management",icon: IdCard,        href: "/student-management", roles: ["student"] },
@@ -67,9 +73,11 @@ const NAV = [
   // self-complete DOB/Gender/Blood Group/Father's Name/Address/ABC ID/Mobile
   // later, exactly as AVFU asked. Deliberately excludes "student" — that
   // role already has its own, unchanged "Student Management" page above.
-  { label: "My Profile",       icon: IdCard,         href: "/my-profile", roles: ["super_admin","hod","faculty"] },
+  { label: "My Profile",       icon: IdCard,         href: "/my-profile", roles: ["super_admin","hod","faculty","incharge_academic_cell","dpgs"] },
   { label: "PPW",              icon: FileSpreadsheet, href: "/ppw",          roles: ["student"] },
-  { label: "PPW Approvals",   icon: ClipboardCheck,  href: "/ppw/approvals", roles: ["hod","faculty"] },
+  // Incharge Academic Cell / DPGS task — both approve PPWs after HOD
+  // (Section 19/20), global (no department restriction).
+  { label: "PPW Approvals",   icon: ClipboardCheck,  href: "/ppw/approvals", roles: ["hod","faculty","incharge_academic_cell","dpgs"] },
   { label: "Users",           icon: Users,           href: "/users",        roles: ["super_admin"] },
   { label: "Administration",  icon: ShieldCheck,     href: "/admin",        roles: ["super_admin"] },
   { label: "Notifications",   icon: Bell,            href: "/notifications",roles: [] },

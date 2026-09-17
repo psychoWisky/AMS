@@ -50,6 +50,14 @@ from app.core.student_scope import resolve_student_department_id as _student_dep
 router = APIRouter(prefix="/research", tags=["Research"])
 
 _ADMIN_ROLES = (UserRole.SUPER_ADMIN,)
+# Incharge Academic Cell / DPGS task (this revision) — global VIEW access
+# only (Section 25/26: "view committees across all departments"). Deliberately
+# a SEPARATE tuple from `_ADMIN_ROLES`, never used by
+# `_authorize_propose_major_advisor`/`_authorize_manage_members`/
+# `can_manage_members` — global roles must never gain Major-Advisor/member
+# ownership merely because they can see everything (Section 29's explicit
+# "do not bypass Major Advisor ownership").
+_GLOBAL_VIEW_ROLES = (UserRole.SUPER_ADMIN, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS)
 
 # The 5 confirmed PG/PhD Research Committee member types (BUSINESS_LOGIC.md M.5,
 # Rule 29). "major_advisor" is set only by create_committee/reassign — never a
@@ -66,6 +74,13 @@ _STAGE_LABELS = {
     "members_pending": "Member Approval Pending",
     "hod_pending": "HOD Approval Pending",
     "hod_approved": "HOD Approved",
+    # Incharge Academic Cell / DPGS task (this revision) — HOD approval no
+    # longer terminates the workflow (Section 23); it continues through the
+    # two global roles above HOD. Neither is a document signatory (Section
+    # 24) — both are plain approval-state labels, same as HOD's own.
+    "incharge_pending": "Incharge Academic Cell Approval Pending",
+    "dpgs_pending": "DPGS Approval Pending",
+    "dpgs_approved": "DPGS Approved (Final)",
     "reverted": "Reverted",
 }
 
@@ -131,7 +146,7 @@ async def _authorize_manage_members(committee: AdvisoryCommittee, user: User, db
 
 
 async def _authorize_committee_view(committee: AdvisoryCommittee, user: User, db: AsyncSession) -> None:
-    if user.active_role in _ADMIN_ROLES:
+    if user.active_role in _GLOBAL_VIEW_ROLES:
         return
     if user.active_role == UserRole.HOD:
         dept_id = await _student_department_id(committee.student_id, db)
@@ -309,7 +324,16 @@ async def reassign_major_advisor(
     if not c: raise HTTPException(404, "Committee not found.")
     await _authorize_propose_major_advisor(c.student_id, user, db)
     ma = await _get_major_advisor_member(c, db)
-    if c.status != "reverted" or not ma or ma.accepted is not False:
+    # Incharge Academic Cell / DPGS task (Section 28) — HOD may now also
+    # change the Major Advisor when the committee has been returned to
+    # `hod_pending` by an Incharge/DPGS revert (distinguished from the
+    # NORMAL first-pass arrival at `hod_pending`, via `accept_membership`,
+    # by `reverted_at` being set — a revert always sets it, the normal path
+    # never does). This is IN ADDITION TO the pre-existing path (Stage 1
+    # Major Advisor decline, `status == "reverted"`), never a replacement of it.
+    declined_flow = c.status == "reverted" and ma and ma.accepted is False
+    returned_from_higher_revert = c.status == "hod_pending" and c.reverted_at is not None
+    if not (declined_flow or returned_from_higher_revert):
         raise HTTPException(400, "This committee is not awaiting Major Advisor reassignment.")
     await _check_advisor_capacity(body.major_advisor_id, db)
 
@@ -457,7 +481,12 @@ async def hod_approval(
         raise HTTPException(400, "This committee is not awaiting HOD approval.")
 
     if body.approved:
-        c.status = "hod_approved"; c.formed_at = datetime.now(timezone.utc)
+        # Incharge Academic Cell / DPGS task — HOD approval no longer
+        # terminates the workflow (Section 23); it continues to Incharge
+        # Academic Cell. `formed_at` is still set here (unchanged meaning —
+        # "the committee, as HOD-approved, was formed at this time").
+        c.status = "incharge_pending"; c.formed_at = datetime.now(timezone.utc)
+        c.revert_remark = None; c.reverted_at = None
         await db.commit()
         return {"message": "Committee approved by HOD.", "stage": c.status}
 
@@ -469,13 +498,76 @@ async def hod_approval(
     return {"message": "Committee reverted to the member stage.", "stage": c.status}
 
 
+# ── Incharge Academic Cell stage (global — Incharge Academic Cell/DPGS task) ─
+
+@router.patch("/committees/{committee_id}/incharge-approval")
+async def incharge_committee_approval(
+    committee_id: UUID, body: HodApprovalIn, db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.INCHARGE_ACADEMIC_CELL)),
+):
+    """Global role — no department match (Section 25). Approval only, never
+    a signature (Advisory Committee has no downloadable document at all,
+    Section 24) — no separate signing mechanism is introduced."""
+    c = await db.get(AdvisoryCommittee, committee_id)
+    if not c: raise HTTPException(404, "Committee not found.")
+    if c.status != "incharge_pending":
+        raise HTTPException(400, "This committee is not awaiting Incharge Academic Cell approval.")
+
+    if body.approved:
+        c.status = "dpgs_pending"
+        c.revert_remark = None; c.reverted_at = None
+        await db.commit()
+        return {"message": "Committee approved by Incharge Academic Cell.", "stage": c.status}
+
+    if not body.remark:
+        raise HTTPException(400, "A remark is required when reverting.")
+    # Section 27 — Incharge/DPGS revert goes back to HOD, NEVER to the
+    # student, and NEVER "one level back" to members_pending — this is a
+    # deliberately different revert target from every earlier stage in this
+    # workflow (and from Course Registration/PPW's revert-to-student rule).
+    c.status = "hod_pending"
+    c.revert_remark = body.remark; c.reverted_at = datetime.now(timezone.utc)
+    await db.commit()
+    return {"message": "Committee reverted to HOD.", "stage": c.status}
+
+
+# ── DPGS stage (global, final approval — Incharge Academic Cell/DPGS task) ───
+
+@router.patch("/committees/{committee_id}/dpgs-approval")
+async def dpgs_committee_approval(
+    committee_id: UUID, body: HodApprovalIn, db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.DPGS)),
+):
+    """Final approval — Advisory Committee has no downloadable/signable
+    document (Section 24), so unlike Course Registration/PPW's DPGS stage,
+    NO signature/approver-identity field is added here; this is a plain
+    approval-state transition, same shape as every other committee stage."""
+    c = await db.get(AdvisoryCommittee, committee_id)
+    if not c: raise HTTPException(404, "Committee not found.")
+    if c.status != "dpgs_pending":
+        raise HTTPException(400, "This committee is not awaiting DPGS approval.")
+
+    if body.approved:
+        c.status = "dpgs_approved"
+        c.revert_remark = None; c.reverted_at = None
+        await db.commit()
+        return {"message": "Committee given final approval by DPGS.", "stage": c.status}
+
+    if not body.remark:
+        raise HTTPException(400, "A remark is required when reverting.")
+    c.status = "hod_pending"
+    c.revert_remark = body.remark; c.reverted_at = datetime.now(timezone.utc)
+    await db.commit()
+    return {"message": "Committee reverted to HOD.", "stage": c.status}
+
+
 # ── Listing / detail / lock (largely unchanged) ─────────────────────────────────
 
 @router.get("/committees")
 async def list_committees(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
     q = select(AdvisoryCommittee).options(*_COMMITTEE_LOAD_OPTIONS)
 
-    if user.active_role in _ADMIN_ROLES:
+    if user.active_role in _GLOBAL_VIEW_ROLES:
         pass
     elif user.active_role == UserRole.HOD:
         if not user.department_id:

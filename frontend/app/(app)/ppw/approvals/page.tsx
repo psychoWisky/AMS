@@ -20,6 +20,12 @@ interface HodApproval {
   status: string; approver_name: string | null; department_name: string | null;
   signed_at: string | null; is_current_stage: boolean; remark: string | null;
 }
+// Incharge Academic Cell / DPGS task (this revision) — Incharge has no
+// `department_name`/`signed_at` at all (global, never a signatory);
+// DPGS mirrors HodApproval's shape exactly (it IS a signatory).
+interface InchargeApproval {
+  status: string; approver_name: string | null; is_current_stage: boolean; remark: string | null;
+}
 interface PpwDetail {
   id: string; status: string;
   field_of_investigation: string | null; minor_field: string | null;
@@ -27,10 +33,13 @@ interface PpwDetail {
   header: { student_name: string; student_roll: string | null; program_name: string | null; department_name: string | null };
   committee: { rows: CommitteeRow[] };
   hod_approval: HodApproval;
+  incharge_approval: InchargeApproval;
+  dpgs_approval: HodApproval;
 }
 
 const STAGE_LABELS: Record<string, string> = {
   major_advisor: "Major Advisor", committee_member: "Advisory Committee Member", hod: "HOD",
+  incharge_academic_cell: "Incharge Academic Cell", dpgs: "DPGS",
 };
 
 function SignatureBadge({ status }: { status: string }) {
@@ -206,11 +215,40 @@ export default function PpwApprovalsPage() {
                 <span>HOD{detail.hod_approval.approver_name ? ` — ${detail.hod_approval.approver_name}` : ""}</span>
                 <SignatureBadge status={detail.hod_approval.status} />
               </div>
+              {/* Incharge Academic Cell task (this revision) — shown here for
+                  reviewer transparency only; this is an internal workflow
+                  summary, NOT the printed PPW document (ppw_document.html
+                  has no Incharge cell at all, Section 19). */}
+              <div className="flex items-center justify-between px-3 py-1.5 bg-gray-50 rounded-lg text-sm mt-1.5">
+                <span>Incharge Academic Cell{detail.incharge_approval.approver_name ? ` — ${detail.incharge_approval.approver_name}` : ""}</span>
+                <SignatureBadge status={detail.incharge_approval.status} />
+              </div>
+              <div className="flex items-center justify-between px-3 py-1.5 bg-gray-50 rounded-lg text-sm mt-1.5">
+                <span>DPGS{detail.dpgs_approval.approver_name ? ` — ${detail.dpgs_approval.approver_name}` : ""}</span>
+                <SignatureBadge status={detail.dpgs_approval.status} />
+              </div>
             </div>
 
             {selectedRow && (
               <div className="border-t border-gray-100 mt-4 pt-4">
                 {!showRevert ? (
+                  // Incharge Academic Cell task (Section 19/39) — Incharge's
+                  // action is a plain AMS approval, never a signature: no
+                  // OTP step, no "Sign" wording, unlike every other stage
+                  // type here (Major Advisor/Committee Member/HOD/DPGS all
+                  // remain OTP-verified signatures, unchanged).
+                  selectedRow.stage_type === "incharge_academic_cell" ? (
+                    <>
+                      <p className="text-sm font-semibold text-[#0D6E6E] mb-3">Approve — Incharge Academic Cell</p>
+                      <div className="flex gap-2">
+                        <button onClick={() => approve.mutate()} disabled={approve.isPending}
+                          className="px-4 py-2 bg-green-600 text-white rounded-xl text-sm font-semibold hover:bg-green-700 disabled:opacity-60 flex items-center gap-1.5">
+                          <CheckCircle2 size={14} /> {approve.isPending ? "Approving…" : "Approve"}
+                        </button>
+                        <button onClick={() => setShowRevert(true)} className="px-4 py-2 border border-red-300 text-red-600 rounded-xl text-sm font-semibold hover:bg-red-50">Revert</button>
+                      </div>
+                    </>
+                  ) : (
                   <>
                     <p className="text-sm font-semibold text-[#0D6E6E] mb-3">Sign &amp; Approve — {STAGE_LABELS[selectedRow.stage_type] ?? selectedRow.stage_type}</p>
                     {!otpSent ? (
@@ -233,6 +271,7 @@ export default function PpwApprovalsPage() {
                       </div>
                     )}
                   </>
+                  )
                 ) : (
                   <>
                     <p className="text-sm font-semibold text-red-700 mb-2">Revert with remark (required)</p>

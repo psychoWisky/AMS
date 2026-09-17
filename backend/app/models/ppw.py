@@ -128,10 +128,11 @@ class PpwCourse(Base):
 PPW_CYCLE_STATUSES = ("active", "approved", "reverted")
 
 # Stage-level types, in the confirmed fixed order: Major Advisor first, then
-# all applicable committee members (unordered among themselves), then HOD.
-# Co-Major Advisor and Incharge Academic Cell/DPGS are deliberately absent —
-# not implemented in this phase.
-PPW_STAGE_TYPES = ("major_advisor", "committee_member", "hod")
+# all applicable committee members (unordered among themselves), then HOD,
+# then the two global roles above HOD (Incharge Academic Cell task, this
+# revision). Co-Major Advisor remains deliberately absent — not a confirmed
+# stage type.
+PPW_STAGE_TYPES = ("major_advisor", "committee_member", "hod", "incharge_academic_cell", "dpgs")
 PPW_STAGE_STATUSES = ("pending", "approved", "reverted")
 
 # CommitteeMember.role values eligible to become a PPW committee-member stage

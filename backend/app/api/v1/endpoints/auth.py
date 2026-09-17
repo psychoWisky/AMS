@@ -37,6 +37,19 @@ router = APIRouter(prefix="/auth", tags=["Auth"])
 _AVFU_STAFF_EMAIL_DOMAIN = "avfu.ac.in"
 _FACULTY_TITLES = ("Dr.", "Mr", "Mrs", "Miss")
 
+# Incharge Academic Cell / DPGS task (this revision) — Section 3.1/8's
+# confirmed business rule: exactly one active holder of EACH of these two
+# roles at a time (the same user MAY hold both simultaneously — that is a
+# different constraint, not enforced here). See migration
+# `0016_incharge_dpgs_roles` for the database-level partial unique index
+# that is the actual source of truth; the check in add_user_role() below is
+# a friendly pre-flight only.
+_SINGLE_HOLDER_ROLES = (UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS)
+_ROLE_DISPLAY_NAMES = {
+    UserRole.INCHARGE_ACADEMIC_CELL: "Incharge Academic Cell",
+    UserRole.DPGS: "DPGS",
+}
+
 
 class LoginRequest(BaseModel):
     email: EmailStr
@@ -358,6 +371,26 @@ async def create_user(
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Email already registered.")
     await validate_program_department_pair(body.program_id, body.department_id, db)
+
+    # Incharge Academic Cell / DPGS task (Section 3.1/8) — this legacy
+    # create-with-a-single-role path must honor the SAME "exactly one active
+    # holder" invariant as the dedicated add_user_role endpoint; checked
+    # BEFORE any row is created so a rejection never leaves a half-created
+    # user behind. The database's own partial unique index (migration 0016)
+    # remains the race-condition-safe backstop for both paths.
+    if body.role in _SINGLE_HOLDER_ROLES:
+        other = (await db.execute(
+            select(UserRoleAssignment).where(UserRoleAssignment.role == body.role)
+        )).scalar_one_or_none()
+        if other:
+            holder = await db.get(User, other.user_id)
+            raise HTTPException(
+                status_code=409,
+                detail=f"{_ROLE_DISPLAY_NAMES.get(body.role, body.role.value)} is already assigned to "
+                       f"{holder.full_name if holder else 'another user'}"
+                       f"{f' ({holder.email})' if holder else ''}. Remove that assignment first.",
+            )
+
     user = User(
         email=body.email.lower(),
         hashed_password=hash_password(body.password),
@@ -382,7 +415,15 @@ async def create_user(
     # "every existing user has at least one assigned role" invariant applies
     # to every NEW user too, not only the migration backfill).
     db.add(UserRoleAssignment(user_id=user.id, role=user.role, assigned_by=admin.id))
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=f"{_ROLE_DISPLAY_NAMES.get(body.role, body.role.value)} was just assigned to another user. Please try again."
+            if body.role in _SINGLE_HOLDER_ROLES else "Could not create user (a conflicting record already exists).",
+        )
     return {"message": "User created.", "id": str(user.id)}
 
 
@@ -466,9 +507,33 @@ async def update_user(
             select(UserRoleAssignment).where(UserRoleAssignment.user_id == target.id, UserRoleAssignment.role == body.role)
         )
         if not existing.scalar_one_or_none():
+            # Incharge Academic Cell / DPGS task (Section 3.1/8) — same
+            # "exactly one active holder" invariant as add_user_role, applied
+            # here too since this legacy single-role field can also grant a
+            # NEW assignment (see the comment above).
+            if body.role in _SINGLE_HOLDER_ROLES:
+                other = (await db.execute(
+                    select(UserRoleAssignment).where(UserRoleAssignment.role == body.role)
+                )).scalar_one_or_none()
+                if other and other.user_id != target.id:
+                    holder = await db.get(User, other.user_id)
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"{_ROLE_DISPLAY_NAMES.get(body.role, body.role.value)} is already assigned to "
+                               f"{holder.full_name if holder else 'another user'}"
+                               f"{f' ({holder.email})' if holder else ''}. Remove that assignment first.",
+                    )
             db.add(UserRoleAssignment(user_id=target.id, role=body.role, assigned_by=admin.id))
 
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=f"{_ROLE_DISPLAY_NAMES.get(body.role, body.role.value)} was just assigned to another user. Please try again."
+            if body.role in _SINGLE_HOLDER_ROLES else "Could not update user (a conflicting record already exists).",
+        )
     return {"message": "User updated."}
 
 
@@ -477,7 +542,12 @@ async def list_users(
     role: Optional[str] = None,
     department_id: Optional[UUID] = None,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HOD)),
+    # Incharge Academic Cell / DPGS task (Section 10/32) — both are global,
+    # read-only here (view users across every department, same as Super
+    # Admin's existing unrestricted access below); they gain NO user-
+    # management capability from this alone (create/update/role-assignment
+    # endpoints remain SUPER_ADMIN-only, untouched by this task).
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HOD, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS)),
 ):
     # .options(selectinload(User.department)) eager-loads the department in
     # the same query (one extra batched SELECT, not one per row) so the
@@ -590,8 +660,39 @@ async def add_user_role(
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="This role is already assigned to the user.")
 
+    # Incharge Academic Cell / DPGS task (Section 3.1/8) — exactly one active
+    # holder each, enforced here as a friendly, pre-flight check AND at the
+    # database level (partial unique index, migration 0016) as the
+    # race-condition-safe backstop caught below. The SAME user may hold both
+    # roles (this check only looks for a DIFFERENT existing holder of the
+    # SAME role) — that is a completely separate, still-permitted case,
+    # already handled by the plain duplicate check just above.
+    if body.role in _SINGLE_HOLDER_ROLES:
+        other = (await db.execute(
+            select(UserRoleAssignment).where(UserRoleAssignment.role == body.role)
+        )).scalar_one_or_none()
+        if other:
+            holder = await db.get(User, other.user_id)
+            raise HTTPException(
+                status_code=409,
+                detail=f"{_ROLE_DISPLAY_NAMES.get(body.role, body.role.value)} is already assigned to "
+                       f"{holder.full_name if holder else 'another user'}"
+                       f"{f' ({holder.email})' if holder else ''}. Remove that assignment first before assigning it to someone else.",
+            )
+
     db.add(UserRoleAssignment(user_id=user_id, role=body.role, assigned_by=admin.id))
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Race-condition backstop (Section 8's explicit requirement) — two
+        # concurrent assignment requests for the same single-holder role can
+        # both pass the pre-flight check above; the database's own partial
+        # unique index is the actual source of truth and rejects the loser.
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=f"{_ROLE_DISPLAY_NAMES.get(body.role, body.role.value)} was just assigned to another user. Please refresh and try again.",
+        )
     assigned = await get_assigned_roles(user_id, db)
     return {"message": "Role assigned.", "assigned_roles": [r.value for r in assigned]}
 
@@ -794,8 +895,13 @@ async def _validate_user_bulk_rows(
     # Never SUPER_ADMIN through bulk upload, for either path (Section 10) —
     # for the HOD path this is moot (force_role already pins FACULTY), but
     # applying it unconditionally means the same rule can never accidentally
-    # diverge between the two call sites.
-    allowed_roles = set(UserRole) - {UserRole.SUPER_ADMIN}
+    # diverge between the two call sites. Incharge Academic Cell / DPGS task
+    # (this revision) — these two are also excluded from bulk upload: the
+    # "exactly one active holder" invariant has no per-row conflict handling
+    # in this all-or-nothing bulk path, and Section 53's "no automatic
+    # office-holder seeding" is safest served by requiring these two specific
+    # roles to always go through the single-user assignment endpoints.
+    allowed_roles = set(UserRole) - {UserRole.SUPER_ADMIN, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS}
 
     hod_department_label = department_names.get(force_department_id) if force_department_id else None
 

@@ -39,6 +39,9 @@ const STAGE_STYLE: Record<string, string> = {
   members_pending: "bg-blue-100 text-blue-700",
   hod_pending: "bg-purple-100 text-purple-700",
   hod_approved: "bg-green-100 text-green-700",
+  incharge_pending: "bg-indigo-100 text-indigo-700",
+  dpgs_pending: "bg-teal-100 text-teal-700",
+  dpgs_approved: "bg-green-100 text-green-700",
   reverted: "bg-red-100 text-red-700",
 };
 // Roles allowed to call GET /auth/users (must match auth.py's list_users RBAC).
@@ -184,6 +187,10 @@ function StaffCommitteeView() {
   const qc = useQueryClient();
   const canPropose = ["super_admin", "hod"].includes(role ?? "");
   const canLookupUsers = USER_LOOKUP_ROLES.includes(role ?? "");
+  // Incharge Academic Cell / DPGS task (this revision) — both approve
+  // committees after HOD (Section 25/26), global (no department check).
+  const isInchargeLike = ["super_admin", "incharge_academic_cell"].includes(role ?? "");
+  const isDpgsLike = ["super_admin", "dpgs"].includes(role ?? "");
 
   const [showPropose, setShowPropose] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -296,6 +303,24 @@ function StaffCommitteeView() {
       api.patch(`/research/committees/${id}/hod-approval`, { approved, remark }),
     onSuccess: (_, { approved }) => { toast.success(approved ? "Committee approved." : "Committee reverted."); invalidateAll(); },
     onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed to record HOD decision."),
+  });
+
+  // Incharge Academic Cell / DPGS task — both are plain approval/revert
+  // actions (Section 24: Advisory Committee has no downloadable document,
+  // so neither is ever a signature). Revert returns to HOD, not the
+  // student (Section 27) — enforced server-side; this UI only reflects it.
+  const inchargeApproval = useMutation({
+    mutationFn: ({ id, approved, remark }: { id: string; approved: boolean; remark?: string }) =>
+      api.patch(`/research/committees/${id}/incharge-approval`, { approved, remark }),
+    onSuccess: (_, { approved }) => { toast.success(approved ? "Committee approved." : "Committee reverted to HOD."); invalidateAll(); },
+    onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed to record decision."),
+  });
+
+  const dpgsApproval = useMutation({
+    mutationFn: ({ id, approved, remark }: { id: string; approved: boolean; remark?: string }) =>
+      api.patch(`/research/committees/${id}/dpgs-approval`, { approved, remark }),
+    onSuccess: (_, { approved }) => { toast.success(approved ? "Committee given final approval." : "Committee reverted to HOD."); invalidateAll(); },
+    onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed to record decision."),
   });
 
   const myMajorAdvisorRow = selected?.members.find((m) => m.role === "major_advisor" && m.faculty_id === currentUser?.id);
@@ -536,9 +561,68 @@ function StaffCommitteeView() {
                     </div>
                   )}
 
+                  {/* Incharge Academic Cell stage — approval only, never a
+                      signature (Section 24/25). */}
+                  {selected.stage === "incharge_pending" && isInchargeLike && (
+                    <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4">
+                      <p className="text-sm font-semibold text-indigo-900 mb-3">Approved by HOD. Awaiting Incharge Academic Cell approval.</p>
+                      <div className="flex gap-3">
+                        <button onClick={() => setConfirm({
+                          action: () => inchargeApproval.mutate({ id: selected.id, approved: true }),
+                          title: "Approve Committee", message: `Approve the Advisory Committee for ${selected.student_name} as Incharge Academic Cell?`,
+                          confirmLabel: "Yes, Approve", confirmClassName: "bg-green-600 hover:bg-green-700 text-white",
+                        })} className="flex items-center gap-1.5 px-4 py-2 bg-green-600 text-white text-sm font-semibold rounded-lg hover:bg-green-700">
+                          <CheckCircle2 size={14} /> Approve
+                        </button>
+                        <button onClick={() => setRemarkPrompt({ title: "Revert to HOD", onSubmit: (remark) => inchargeApproval.mutate({ id: selected.id, approved: false, remark }) })}
+                          className="flex items-center gap-1.5 px-4 py-2 border border-red-300 text-red-700 text-sm font-semibold rounded-lg hover:bg-red-50">
+                          <XCircle size={14} /> Revert
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {selected.stage === "incharge_pending" && !isInchargeLike && (
+                    <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 text-sm font-semibold text-indigo-900">
+                      Approved by HOD. Awaiting Incharge Academic Cell approval.
+                    </div>
+                  )}
+
+                  {/* DPGS stage — final approval, still never a signature
+                      (Advisory Committee has no downloadable document at
+                      all, Section 24 — unlike Course Registration/PPW). */}
+                  {selected.stage === "dpgs_pending" && isDpgsLike && (
+                    <div className="bg-teal-50 border border-teal-200 rounded-xl p-4">
+                      <p className="text-sm font-semibold text-teal-900 mb-3">Approved by Incharge Academic Cell. Awaiting DPGS final approval.</p>
+                      <div className="flex gap-3">
+                        <button onClick={() => setConfirm({
+                          action: () => dpgsApproval.mutate({ id: selected.id, approved: true }),
+                          title: "Final Approval", message: `Give final approval to the Advisory Committee for ${selected.student_name} as DPGS?`,
+                          confirmLabel: "Yes, Approve", confirmClassName: "bg-green-600 hover:bg-green-700 text-white",
+                        })} className="flex items-center gap-1.5 px-4 py-2 bg-green-600 text-white text-sm font-semibold rounded-lg hover:bg-green-700">
+                          <CheckCircle2 size={14} /> Approve
+                        </button>
+                        <button onClick={() => setRemarkPrompt({ title: "Revert to HOD", onSubmit: (remark) => dpgsApproval.mutate({ id: selected.id, approved: false, remark }) })}
+                          className="flex items-center gap-1.5 px-4 py-2 border border-red-300 text-red-700 text-sm font-semibold rounded-lg hover:bg-red-50">
+                          <XCircle size={14} /> Revert
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {selected.stage === "dpgs_pending" && !isDpgsLike && (
+                    <div className="bg-teal-50 border border-teal-200 rounded-xl p-4 text-sm font-semibold text-teal-900">
+                      Approved by Incharge Academic Cell. Awaiting DPGS final approval.
+                    </div>
+                  )}
+
+                  {selected.stage === "dpgs_approved" && (
+                    <div className="bg-green-50 border border-green-200 rounded-xl p-4 text-sm font-semibold text-green-800">
+                      Advisory Committee given final approval by DPGS.
+                    </div>
+                  )}
+
                   {selected.stage === "hod_approved" && (
                     <div className="bg-green-50 border border-green-200 rounded-xl p-4 text-sm font-semibold text-green-800">
-                      Advisory Committee approved by HOD. (I/C Academic Cell and DPGS stages are not yet available in this demo — see documentation.)
+                      Advisory Committee approved by HOD.
                     </div>
                   )}
                 </div>

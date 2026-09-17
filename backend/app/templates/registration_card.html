@@ -46,7 +46,7 @@
   .total-line { text-align: right; font-weight: 700; margin: 4px 0 10px 0; }
 
   .signature-block { display: flex; justify-content: space-between; margin-top: 30px; }
-  .signature-cell { width: 30%; text-align: center; border-top: 1px solid #444; padding-top: 6px; }
+  .signature-cell { width: 22%; text-align: center; border-top: 1px solid #444; padding-top: 6px; }
 
   .footer-note { margin-top: 20px; font-size: 8pt; color: #777; text-align: center; }
 </style>
@@ -154,6 +154,14 @@
     <div class="signature-cell">
       <p style="font-weight:600;">Signature of Head of the Dept.</p>
       {% if hod_name %}<p style="font-size:8.5pt; color:#444;">{{ hod_name }}</p>{% endif %}
+    </div>
+    <!-- Incharge Academic Cell task (this revision) — Incharge Academic Cell
+         is deliberately NOT given a cell here (workflow-approval-only, never
+         a signatory, Section 13). DPGS is the final signatory. -->
+    <div class="signature-cell">
+      <p style="font-weight:600;">Signature of D.P.G.S</p>
+      {% if dpgs_name %}<p style="font-size:8.5pt; color:#444;">{{ dpgs_name }}</p>{% endif %}
+      {% if dpgs_signed_at %}<p style="font-size:8.5pt; color:#444;">{{ dpgs_signed_at }}</p>{% endif %}
     </div>
   </div>
 
