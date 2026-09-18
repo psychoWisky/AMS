@@ -308,12 +308,30 @@ async def create_course(
 ):
     if user.active_role == UserRole.HOD and not body.department_id:
         raise HTTPException(400, "Department is required.")
+    # _authorize_department_manage already guarantees that for an HOD,
+    # body.department_id equals their OWN authenticated department (or the
+    # request is rejected with 403 before this point) — so body.department_id
+    # is always the actual, authorized department by the time the course-code
+    # department-scoping fix's uniqueness check below runs, never a
+    # client-supplied value used un-checked.
     _authorize_department_manage(body.department_id, user)
-    existing = await db.execute(select(Course).where(Course.course_number == body.course_number))
+    # Course-code department-scoping fix (this revision) — uniqueness is
+    # scoped to (department_id, course_number), matching the new composite
+    # DB constraint (migration 0019); the same course number is allowed in
+    # a different department.
+    existing = await db.execute(
+        select(Course).where(Course.department_id == body.department_id, Course.course_number == body.course_number)
+    )
     if existing.scalar_one_or_none():
-        raise HTTPException(409, "Course number already exists.")
+        raise HTTPException(409, "Course number already exists in this department.")
     c = Course(**body.model_dump(), created_by=user.id)
-    db.add(c); await db.commit(); await db.refresh(c, attribute_names=["department"])
+    db.add(c)
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(409, "Course number already exists in this department.")
+    await db.refresh(c, attribute_names=["department"])
     return CourseOut.from_orm(c)
 
 
@@ -363,9 +381,34 @@ async def update_course(
     # below. HOD may not change department_id at all; admins are unrestricted.
     if user.active_role == UserRole.HOD and body.department_id is not None and body.department_id != c.department_id:
         raise HTTPException(403, "You cannot move a course to a different department.")
+
+    # Course-code department-scoping fix (this revision) — uniqueness is
+    # scoped to (department_id, course_number). `final_department_id` is
+    # the department this course will actually have AFTER this update: an
+    # explicit body.department_id (already authorization-checked above —
+    # HOD can only ever supply their own, or omit it) if provided, else the
+    # course's existing, unchanged department. Excludes the course's own
+    # row so a no-op update (same code, same department) never false-
+    # positives against itself.
+    final_department_id = body.department_id if body.department_id is not None else c.department_id
+    dup_check = await db.execute(
+        select(Course.id).where(
+            Course.department_id == final_department_id,
+            Course.course_number == body.course_number,
+            Course.id != course_id,
+        )
+    )
+    if dup_check.scalar_one_or_none():
+        raise HTTPException(409, "Course number already exists in this department.")
+
     for k, v in body.model_dump(exclude_none=True).items():
         setattr(c, k, v)
-    await db.commit(); return {"message": "Updated."}
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(409, "Course number already exists in this department.")
+    return {"message": "Updated."}
 
 
 @router.delete("/{course_id}", status_code=204)
@@ -483,16 +526,25 @@ async def _validate_course_bulk_rows(
     exactly. Duplicate course-number detection runs BEFORE any insert is
     attempted (Section 6), both against the live database and within the
     uploaded file itself, always compared on the normalized (uppercased)
-    form — never relying solely on the Postgres unique constraint."""
+    form — never relying solely on the Postgres unique constraint.
+
+    Course-code department-scoping fix (this revision) — the duplicate key
+    is (department_id, course_number), matching the composite DB constraint
+    (migration 0019): the same course number is allowed to appear more than
+    once in a single upload, or already exist in the database, as long as
+    each occurrence belongs to a different department."""
     department_rows = (await db.execute(select(Department.id, Department.code, Department.name))).all()
     department_by_code = {code.strip().lower(): did for did, code, name in department_rows}
     department_names = {did: name for did, code, name in department_rows}
     hod_department_label = department_names.get(force_department_id) if force_department_id else None
 
-    existing_numbers = {n.upper() for n in (await db.execute(select(Course.course_number))).scalars().all()}
+    existing_pairs = {
+        (dept_id, number.upper())
+        for dept_id, number in (await db.execute(select(Course.department_id, Course.course_number))).all()
+    }
 
     findings: list[dict] = []
-    seen_numbers: dict[str, int] = {}
+    seen_pairs: dict[tuple[Optional[UUID], str], int] = {}
     row_payload: dict[int, dict] = {}
 
     for entry in rows:
@@ -580,18 +632,23 @@ async def _validate_course_bulk_rows(
             else:
                 department_id_value = resolved_dept
 
-        if course_number:
-            if course_number in existing_numbers:
-                add("Course Number", raw_number, "Course number already exists.")
-            elif course_number in seen_numbers:
-                other = seen_numbers[course_number]
-                add("Course Number", raw_number, f"Duplicate course number within the uploaded file (also row {other}).")
+        # Only checked once a department is actually resolved for this row —
+        # an unresolved department already carries its own finding above and
+        # excludes the row from row_payload regardless, so there is no
+        # meaningful (department_id, course_number) pair to check yet.
+        if course_number and department_id_value:
+            pair = (department_id_value, course_number)
+            if pair in existing_pairs:
+                add("Course Number", raw_number, "Course number already exists in this department.")
+            elif pair in seen_pairs:
+                other = seen_pairs[pair]
+                add("Course Number", raw_number, f"Duplicate course number within the uploaded file for this department (also row {other}).")
                 findings.append({
                     "row": other, "column": "Course Number", "value": raw_number,
-                    "error": f"Duplicate course number within the uploaded file (also row {row_no}).",
+                    "error": f"Duplicate course number within the uploaded file for this department (also row {row_no}).",
                 })
             else:
-                seen_numbers[course_number] = row_no
+                seen_pairs[pair] = row_no
 
         if row_findings:
             findings.extend(row_findings)

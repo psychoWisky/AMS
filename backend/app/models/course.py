@@ -9,7 +9,13 @@ from app.db.base import Base
 class Course(Base):
     __tablename__ = "ams_courses"
     id: Mapped[uuid.UUID]       = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    course_number: Mapped[str]  = mapped_column(String(50), unique=True, nullable=False)
+    # Course-code department-scoping fix (this revision) — `course_number`
+    # was previously globally unique (`unique=True`), which incorrectly
+    # rejected e.g. VETM using "CS101" just because AGRO already had it. The
+    # uniqueness boundary is now the (department_id, course_number) pair —
+    # see the composite UniqueConstraint below and migration
+    # `0019_course_dept_scoped_number`.
+    course_number: Mapped[str]  = mapped_column(String(50), nullable=False)
     title: Mapped[str]          = mapped_column(String(300), nullable=False)
     department_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_departments.id"))
     # Credit structure: theory + practical  (e.g. 2+0, 1+1, 0+2)
@@ -33,6 +39,15 @@ class Course(Base):
     created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    # NOTE: department_id is nullable (a course may in principle have no
+    # department, e.g. a Super Admin-created course where department was
+    # left blank on the individual form). Postgres treats every NULL as
+    # distinct in a UNIQUE constraint, so two such departmentless courses
+    # could in theory share a course_number without violating this
+    # constraint — an accepted, narrow edge case since every course this
+    # revision's bulk-upload/HOD paths create always has a department.
+    __table_args__ = (UniqueConstraint("department_id", "course_number", name="uq_course_department_number"),)
 
     department: Mapped["Department | None"] = relationship("Department", foreign_keys=[department_id])
     offerings: Mapped[list["CourseOffering"]] = relationship("CourseOffering", back_populates="course")
