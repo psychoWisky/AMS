@@ -462,7 +462,7 @@ export default function AdminPage() {
         <>
           <div className="flex items-start gap-2 mb-3 text-sm text-gray-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2.5">
             <Info size={15} className="text-amber-600 shrink-0 mt-0.5" />
-            <span>Custom roles are currently master-data entries only. They do not grant system permissions or change application access until role permissions are implemented. The 8 system roles below (marked "System") are what actually control access and cannot be renamed to a different code, changed to custom, or deleted.</span>
+            <span>Custom roles are currently master-data entries only. They do not grant system permissions or change application access until role permissions are implemented. The system roles below (marked "System") are what actually control access and cannot be renamed to a different code, changed to custom, or deleted.</span>
           </div>
           <div className="flex justify-end mb-3">
             <button onClick={() => setShowRoleForm(true)} className="flex items-center gap-2 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-xl font-semibold text-sm hover:bg-[#178F8F]"><Plus size={15} /> Add Role</button>
