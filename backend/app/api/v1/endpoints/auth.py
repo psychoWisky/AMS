@@ -807,7 +807,7 @@ async def create_faculty(
         "Your AVFU AMS Faculty Account",
         f"Dear {faculty.full_name},\n\nAn AVFU AMS account has been created for you.\n\n"
         f"AMS link: {ams_link}\nUsername (email): {faculty.email}\nInitial password: {faculty.email}\n\n"
-        f"Please log in and change your password immediately.\n\nAVFU Academic Office",
+        f"Please log in and change your password immediately and complete your profile.\n\nAVFU Academic Office",
     )
     return {
         "id": str(faculty.id),
@@ -1068,7 +1068,7 @@ def _send_bulk_credential_emails(created: list[User]) -> int:
             "Your AVFU AMS Account",
             f"Dear {u.full_name},\n\nAn AVFU AMS account has been created for you.\n\n"
             f"AMS link: {ams_link}\nUsername (email): {u.email}\nInitial password: {u.email}\n\n"
-            f"Please log in and change your password immediately.\n\nAVFU Academic Office",
+            f"Please log in and change your password immediately and complete your profile.\n\nAVFU Academic Office",
         )
         if sent:
             sent_count += 1
