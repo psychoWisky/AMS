@@ -20,7 +20,12 @@ import { X, Download, Upload, Loader2 } from "lucide-react";
 interface BulkUploadFinding { row: number; column: string; value: string; error: string; }
 interface BulkUploadResult {
   success: boolean; imported_count: number; filename?: string;
-  errors?: BulkUploadFinding[]; emails_sent?: number; emails_total?: number;
+  errors?: BulkUploadFinding[];
+  // Bulk Upload SMTP timeout fix — credential emails are now durably queued
+  // (EmailOutbox row committed in the same transaction as the user), never
+  // sent synchronously in the request, so the backend no longer reports
+  // emails_sent/emails_total (which implied delivery had already happened).
+  emails_queued?: number;
 }
 
 export function UserBulkUploadModal({
@@ -36,7 +41,7 @@ export function UserBulkUploadModal({
   templateUrl: string;
   templateFilename: string;
   onClose: () => void;
-  onSuccess: (importedCount: number, emailsSent: number, emailsTotal: number) => void;
+  onSuccess: (importedCount: number, emailsQueued: number) => void;
   // Bulk Course Upload task (this revision) — this modal's file-upload/
   // template-download/error-table UI is entirely generic (row/column/value/
   // error findings, same shared shape), so it's reused as-is for Courses
@@ -80,7 +85,7 @@ export function UserBulkUploadModal({
     },
     onSuccess: (res) => {
       if (res.data.success) {
-        onSuccess(res.data.imported_count, res.data.emails_sent ?? 0, res.data.emails_total ?? 0);
+        onSuccess(res.data.imported_count, res.data.emails_queued ?? 0);
       } else {
         setResult(res.data);
       }

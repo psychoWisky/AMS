@@ -21,6 +21,15 @@ class Settings(BaseSettings):
     # placeholder so the real format can be swapped in later without code changes.
     ORIENTATION_EMAIL_DOMAIN: str = "ams.avfu.demo"
 
+    # Email outbox worker (Bulk Upload SMTP timeout fix) — the standalone
+    # `python -m app.core.email_worker` process, never the FastAPI app
+    # itself. Defaults are conservative for a low-volume (tens-per-batch)
+    # AVFU AMS credential-email workload, not tuned for production scale.
+    EMAIL_WORKER_POLL_INTERVAL: int = 15       # seconds between polling cycles when idle
+    EMAIL_WORKER_MAX_ATTEMPTS: int = 5         # attempts before a job is marked FAILED
+    EMAIL_WORKER_BATCH_SIZE: int = 10          # jobs claimed per polling cycle
+    EMAIL_WORKER_PROCESSING_TIMEOUT: int = 300  # seconds — PROCESSING lease before a job is recovered as stale
+
     @property
     def origins(self) -> list[str]:
         return [o.strip() for o in self.ALLOWED_ORIGINS.split(",")]

@@ -391,10 +391,10 @@ export default function UsersPage() {
           templateUrl="/auth/users/bulk-upload/template"
           templateFilename="ams_users_bulk_upload_template.xlsx"
           onClose={() => setShowBulkUpload(false)}
-          onSuccess={(count, sent, total) => {
+          onSuccess={(count, queued) => {
             toast.success(
               `${count} user${count === 1 ? "" : "s"} created successfully.` +
-              (total > 0 ? ` ${sent}/${total} credential email(s) sent.` : ""),
+              (queued > 0 ? ` ${queued} credential email(s) queued for delivery.` : ""),
             );
             qc.invalidateQueries({ queryKey: ["ams-users"] });
             setShowBulkUpload(false);

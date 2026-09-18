@@ -43,8 +43,11 @@ export default function FacultiesPage() {
 
   const createFaculty = useMutation({
     mutationFn: () => api.post("/auth/faculty", form),
-    onSuccess: (res) => {
-      toast.success(res.data.email_sent ? "Faculty account created — credentials emailed." : "Faculty account created. Email could not be sent — share credentials manually.");
+    onSuccess: () => {
+      // Bulk Upload SMTP timeout fix — credential email is now durably
+      // queued (never sent synchronously in the request), so success here
+      // always means "queued", not "sent"; `email_sent` no longer exists.
+      toast.success("Faculty account created. Credential email queued for delivery.");
       qc.invalidateQueries({ queryKey: ["ams-hod-faculty"] });
       setShowCreate(false); setForm(EMPTY_FORM);
     },
@@ -221,10 +224,10 @@ export default function FacultiesPage() {
           templateUrl="/auth/faculty/bulk-upload/template"
           templateFilename="ams_users_bulk_upload_template.xlsx"
           onClose={() => setShowBulkUpload(false)}
-          onSuccess={(count, sent, total) => {
+          onSuccess={(count, queued) => {
             toast.success(
               `${count} faculty account${count === 1 ? "" : "s"} created successfully.` +
-              (total > 0 ? ` ${sent}/${total} credential email(s) sent.` : ""),
+              (queued > 0 ? ` ${queued} credential email(s) queued for delivery.` : ""),
             );
             qc.invalidateQueries({ queryKey: ["ams-hod-faculty"] });
             setShowBulkUpload(false);

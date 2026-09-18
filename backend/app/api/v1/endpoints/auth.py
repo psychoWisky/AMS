@@ -20,7 +20,7 @@ from app.core.dependencies import (
     get_assigned_roles, pick_default_role,
 )
 from app.core.config import settings
-from app.core.email import send_email
+from app.core.email import enqueue_email
 from app.core.bulk_upload import bulk_cell_to_str, parse_bulk_upload_file
 from app.models.user import User, UserRole, RefreshToken, UserRoleAssignment, Designation, Department, College
 # Programme<->Department many-to-many redesign — shared validation, whenever
@@ -795,24 +795,30 @@ async def create_faculty(
     try:
         await db.flush()
         db.add(UserRoleAssignment(user_id=faculty.id, role=UserRole.FACULTY, assigned_by=user.id))
+        # Bulk Upload SMTP timeout fix (this revision) — the credential email
+        # is now enqueued into the SAME transaction/commit as the user and
+        # role-assignment rows above (transactional outbox pattern), instead
+        # of being sent synchronously with a blocking smtplib call after
+        # commit. `faculty.full_name` reads plain in-memory attributes set
+        # above — no DB round-trip needed before building the message.
+        ams_link = settings.AMS_FRONTEND_URL
+        enqueue_email(
+            db, faculty.email,
+            "Your AVFU AMS Faculty Account",
+            f"Dear {faculty.full_name},\n\nAn AVFU AMS account has been created for you.\n\n"
+            f"AMS link: {ams_link}\nUsername (email): {faculty.email}\nInitial password: {faculty.email}\n\n"
+            f"Please log in and change your password immediately and complete your profile.\n\nAVFU Academic Office",
+        )
         await db.commit()
     except Exception:
         await db.rollback()
         raise HTTPException(409, "This email is already registered.")
     await db.refresh(faculty)
 
-    ams_link = settings.AMS_FRONTEND_URL
-    sent = send_email(
-        faculty.email,
-        "Your AVFU AMS Faculty Account",
-        f"Dear {faculty.full_name},\n\nAn AVFU AMS account has been created for you.\n\n"
-        f"AMS link: {ams_link}\nUsername (email): {faculty.email}\nInitial password: {faculty.email}\n\n"
-        f"Please log in and change your password immediately and complete your profile.\n\nAVFU Academic Office",
-    )
     return {
         "id": str(faculty.id),
-        "message": "Faculty account created." + ("" if sent else " Credential email could not be sent — SMTP is not configured for this environment; share the login details manually."),
-        "email_sent": sent,
+        "message": "Faculty account created. Credential email queued for delivery.",
+        "email_queued": True,
     }
 
 
@@ -1018,12 +1024,23 @@ async def _validate_user_bulk_rows(
 
 
 async def _create_bulk_users(valid_rows: list[dict], db: AsyncSession) -> list[User]:
-    """Phase 2 — every row already passed validation; create them all in one
-    transaction (Section 30's explicit transactional-safety requirement).
+    """Phase 2 — every row already passed validation; create them, their
+    role assignments, AND their credential-email outbox rows all in ONE
+    transaction (Section 30's explicit transactional-safety requirement,
+    extended by the Bulk Upload SMTP timeout fix's transactional-outbox
+    requirement: an EmailOutbox row must never exist without its user, or
+    vice versa — both commit together or both roll back together).
     Password/must_change_password mirror `create_faculty` exactly (Section 7
     — the SAME mechanism, not a new one): initial password = the user's own
     AVFU email, hashed; `must_change_password=True` forces a reset on first
-    login."""
+    login.
+
+    Credential emails are no longer sent synchronously here (that was the
+    root cause of the bulk-upload 504: a single Uvicorn worker blocked for
+    the duration of N sequential blocking SMTP sends). Each user's email is
+    now enqueued via `enqueue_email` in this same transaction; the
+    standalone `app.core.email_worker` process delivers it afterwards,
+    entirely outside this request."""
     created: list[User] = []
     for r in valid_rows:
         u = User(
@@ -1039,8 +1056,16 @@ async def _create_bulk_users(valid_rows: list[dict], db: AsyncSession) -> list[U
         created.append(u)
     try:
         await db.flush()
+        ams_link = settings.AMS_FRONTEND_URL
         for u in created:
             db.add(UserRoleAssignment(user_id=u.id, role=u.role))
+            enqueue_email(
+                db, u.email,
+                "Your AVFU AMS Account",
+                f"Dear {u.full_name},\n\nAn AVFU AMS account has been created for you.\n\n"
+                f"AMS link: {ams_link}\nUsername (email): {u.email}\nInitial password: {u.email}\n\n"
+                f"Please log in and change your password immediately and complete your profile.\n\nAVFU Academic Office",
+            )
         await db.commit()
     except IntegrityError:
         await db.rollback()
@@ -1052,27 +1077,6 @@ async def _create_bulk_users(valid_rows: list[dict], db: AsyncSession) -> list[U
     for u in created:
         await db.refresh(u)
     return created
-
-
-def _send_bulk_credential_emails(created: list[User]) -> int:
-    """Best-effort, per-user credential email — same convention and same
-    message shape as `create_faculty` above (Section 31: email delivery is
-    never a reason to leave a partially-created account; every row already
-    committed to the database before any email is attempted). Returns how
-    many sends actually succeeded, purely for the response message."""
-    ams_link = settings.AMS_FRONTEND_URL
-    sent_count = 0
-    for u in created:
-        sent = send_email(
-            u.email,
-            "Your AVFU AMS Account",
-            f"Dear {u.full_name},\n\nAn AVFU AMS account has been created for you.\n\n"
-            f"AMS link: {ams_link}\nUsername (email): {u.email}\nInitial password: {u.email}\n\n"
-            f"Please log in and change your password immediately and complete your profile.\n\nAVFU Academic Office",
-        )
-        if sent:
-            sent_count += 1
-    return sent_count
 
 
 def _build_user_bulk_template_workbook() -> io.BytesIO:
@@ -1132,10 +1136,13 @@ async def bulk_upload_faculty(
         return JSONResponse(status_code=400, content={"success": False, "imported_count": 0, "errors": findings})
 
     created = await _create_bulk_users(valid, db)
-    sent_count = _send_bulk_credential_emails(created)
+    # Bulk Upload SMTP timeout fix — emails are queued (durably, in the same
+    # transaction as the users above), never sent synchronously here, so
+    # `emails_queued` is reported instead of a since-removed `emails_sent`/
+    # `emails_total` pair that implied delivery had already happened.
     return {
         "success": True, "imported_count": len(created), "filename": file.filename,
-        "emails_sent": sent_count, "emails_total": len(created),
+        "emails_queued": len(created),
     }
 
 
@@ -1172,10 +1179,9 @@ async def bulk_upload_users(
         return JSONResponse(status_code=400, content={"success": False, "imported_count": 0, "errors": findings})
 
     created = await _create_bulk_users(valid, db)
-    sent_count = _send_bulk_credential_emails(created)
     return {
         "success": True, "imported_count": len(created), "filename": file.filename,
-        "emails_sent": sent_count, "emails_total": len(created),
+        "emails_queued": len(created),
     }
 
 
