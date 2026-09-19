@@ -14,6 +14,10 @@ interface ProgramRow { id: string; name: string; code: string; level: string; du
 interface ProgramDepartmentLink { association_id: string; department_id: string; department_name: string; department_code: string; }
 interface DepartmentProgramLink { association_id: string; program_id: string; program_name: string; program_code: string; program_level: string; }
 interface CollegeRow { id: string; name: string; code: string; is_active: boolean; }
+// College<->Programme many-to-many (BUSINESS_LOGIC.md section X) — independent of
+// the Programme<->Department associations above; managed from either side.
+interface CollegeProgramLink { association_id: string; program_id: string; program_name: string; program_code: string; program_level: string; }
+interface ProgramCollegeLink { association_id: string; college_id: string; college_name: string; college_code: string; }
 interface DesignationRow { id: string; name: string; is_active: boolean; created_at: string; }
 interface RoleRow { id: string; code: string; name: string; is_system: boolean; is_active: boolean; user_count: number; }
 
@@ -24,6 +28,10 @@ const TAB_LABEL: Record<Tab, string> = { departments: "Departments", programmes:
 export default function AdminPage() {
   const qc = useQueryClient();
   const [tab, setTab] = useState<Tab>("departments");
+  // College<->Programme association modal (declared up here because the
+  // Programmes/Colleges list queries below must also be enabled while it is
+  // open, whichever tab it was opened from).
+  const [collegeAssocFor, setCollegeAssocFor] = useState<{ type: "college" | "program"; id: string; name: string } | null>(null);
   const [confirm, setConfirm] = useState<{ action: () => void; title: string; message: string } | null>(null);
 
   // ── Departments ──────────────────────────────────────────────────────────
@@ -70,7 +78,7 @@ export default function AdminPage() {
     // modal render an empty list even though `assocQuery` itself succeeded
     // (0 associations is not the same as "no data to render"). Mirrors the
     // `departments` query's existing enabled condition just below/above.
-    enabled: tab === "programmes" || tab === "departments",
+    enabled: tab === "programmes" || tab === "departments" || !!collegeAssocFor,
   });
 
   const saveProg = useMutation({
@@ -123,6 +131,35 @@ export default function AdminPage() {
     onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed to update association."),
   });
 
+  // ── College <-> Programme associations ────────────────────────────────────
+  // Same UX as the Programme<->Department checklist above: opened from a
+  // College row (checklist = all Programmes) or a Programme row (checklist =
+  // all Colleges); both sides toggle the SAME ams_college_programs rows via the
+  // College endpoints. Removing a mapping only removes the association.
+  const collegeAssocQuery = useQuery<(CollegeProgramLink | ProgramCollegeLink)[]>({
+    queryKey: ["ams-college-associations", collegeAssocFor?.type, collegeAssocFor?.id],
+    queryFn: async () => {
+      const url = collegeAssocFor!.type === "college"
+        ? `/admin/colleges/${collegeAssocFor!.id}/programs`
+        : `/departments/programs/${collegeAssocFor!.id}/colleges`;
+      return (await api.get(url)).data;
+    },
+    enabled: !!collegeAssocFor,
+  });
+  const collegeLinkedIds = new Set(
+    (collegeAssocQuery.data ?? []).map((r) => collegeAssocFor?.type === "college" ? (r as CollegeProgramLink).program_id : (r as ProgramCollegeLink).college_id)
+  );
+
+  const toggleCollegeAssoc = useMutation({
+    mutationFn: ({ collegeId, programId, linked }: { collegeId: string; programId: string; linked: boolean }) =>
+      linked
+        ? api.delete(`/admin/colleges/${collegeId}/programs/${programId}`)
+        : api.post(`/admin/colleges/${collegeId}/programs`, { program_id: programId }),
+    // Always refetch (success or failure) so the checklist reflects the server, never a guess.
+    onSettled: () => qc.invalidateQueries({ queryKey: ["ams-college-associations", collegeAssocFor?.type, collegeAssocFor?.id] }),
+    onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed to update college association."),
+  });
+
   // ── Colleges ─────────────────────────────────────────────────────────────
   const [showCollegeForm, setShowCollegeForm] = useState(false);
   const [editCollege, setEditCollege] = useState<CollegeRow | null>(null);
@@ -131,7 +168,7 @@ export default function AdminPage() {
   const { data: colleges = [], isLoading: collegeLoading } = useQuery<CollegeRow[]>({
     queryKey: ["ams-admin-colleges"],
     queryFn: async () => (await api.get("/admin/colleges", { params: { include_inactive: true } })).data,
-    enabled: tab === "colleges",
+    enabled: tab === "colleges" || !!collegeAssocFor,
   });
 
   const saveCollege = useMutation({
@@ -342,6 +379,8 @@ export default function AdminPage() {
                           <button onClick={() => openEditProg(p)} className="p-1.5 text-gray-600 hover:bg-gray-100 rounded-lg" title="Edit"><Pencil size={15} /></button>
                           <button onClick={() => setAssocFor({ type: "program", id: p.id, name: p.name })}
                             className="text-xs font-semibold px-2 py-1 rounded-lg text-[#0D6E6E] hover:bg-[#E6F4F4]">Departments</button>
+                          <button onClick={() => setCollegeAssocFor({ type: "program", id: p.id, name: p.name })}
+                            className="text-xs font-semibold px-2 py-1 rounded-lg text-[#0D6E6E] hover:bg-[#E6F4F4]">Colleges</button>
                           <button onClick={() => setConfirm({ action: () => toggleProgActive.mutate({ id: p.id, is_active: !p.is_active }), title: p.is_active ? "Deactivate Programme" : "Activate Programme", message: `${p.is_active ? "Deactivate" : "Activate"} ${p.name}? Existing students/courses referencing it are not affected.` })}
                             className={`text-xs font-semibold px-2 py-1 rounded-lg ${p.is_active ? "text-red-600 hover:bg-red-50" : "text-green-700 hover:bg-green-50"}`}>{p.is_active ? "Deactivate" : "Activate"}</button>
                         </div>
@@ -385,6 +424,38 @@ export default function AdminPage() {
         </div>
       )}
 
+      {/* ── College <-> Programme associations modal ───────────────────── */}
+      {collegeAssocFor && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 max-h-[80vh] overflow-y-auto">
+            <h3 className="text-xl font-bold mb-1">{collegeAssocFor.type === "college" ? "Programmes of this College" : "Colleges offering this Programme"}</h3>
+            <p className="text-sm text-gray-600 mb-4">{collegeAssocFor.name}</p>
+            {(collegeAssocQuery.isLoading || (collegeAssocFor.type === "college" ? progLoading : collegeLoading)) ? (
+              <div className="flex justify-center py-8"><Loader2 className="animate-spin text-gray-600" /></div>
+            ) : collegeAssocQuery.isError ? (
+              <p className="text-sm text-red-600 py-4">Could not load the current assignments. Close and try again.</p>
+            ) : (
+              <div className="space-y-1.5">
+                {(collegeAssocFor.type === "college" ? programmes : colleges).map((item) => {
+                  const linked = collegeLinkedIds.has(item.id);
+                  const collegeId = collegeAssocFor.type === "college" ? collegeAssocFor.id : item.id;
+                  const programId = collegeAssocFor.type === "college" ? item.id : collegeAssocFor.id;
+                  return (
+                    <label key={item.id} className="flex items-center gap-2.5 px-3 py-2 rounded-lg hover:bg-gray-50 cursor-pointer">
+                      <input type="checkbox" checked={linked} disabled={toggleCollegeAssoc.isPending}
+                        onChange={() => toggleCollegeAssoc.mutate({ collegeId, programId, linked })}
+                        className="w-4 h-4 accent-[#0D6E6E]" />
+                      <span className="text-sm text-gray-800">{item.name}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+            <button onClick={() => setCollegeAssocFor(null)} className="w-full mt-5 py-2.5 border border-gray-200 rounded-xl text-base font-medium hover:bg-gray-50">Close</button>
+          </div>
+        </div>
+      )}
+
       {/* ── Colleges tab ────────────────────────────────────────────────── */}
       {tab === "colleges" && (
         <>
@@ -406,6 +477,8 @@ export default function AdminPage() {
                       <td className="px-4 py-3">
                         <div className="flex gap-1.5">
                           <button onClick={() => openEditCollege(c)} className="p-1.5 text-gray-600 hover:bg-gray-100 rounded-lg" title="Edit"><Pencil size={15} /></button>
+                          <button onClick={() => setCollegeAssocFor({ type: "college", id: c.id, name: c.name })}
+                            className="text-xs font-semibold px-2 py-1 rounded-lg text-[#0D6E6E] hover:bg-[#E6F4F4]">Programmes</button>
                           {c.is_active ? (
                             <button onClick={() => setConfirm({ action: () => deactivateCollege.mutate(c.id), title: "Deactivate College", message: `Deactivate ${c.name}? This is a soft delete — it can be reactivated later.` })}
                               className="text-xs font-semibold px-2 py-1 rounded-lg text-red-600 hover:bg-red-50">Deactivate</button>

@@ -236,6 +236,31 @@ class ProgramDepartment(Base):
     department: Mapped["Department"] = relationship("Department", back_populates="program_links", foreign_keys=[department_id])
 
 
+class CollegeProgram(Base):
+    """College<->Programme many-to-many association, explicitly managed by Super
+    Admin (BUSINESS_LOGIC.md section X). Modeled on ProgramDepartment above
+    and fully INDEPENDENT of it: no College->Department->Programme chain is
+    derived or enforced, and no existing Department<->Programme row is read or
+    written. A Programme may belong to several Colleges and a College may
+    offer several Programmes (the docs fix no single-college rule, and a
+    many-to-many table can express a single-college setup, not vice versa).
+    Configuration-only: no admission/student/course behaviour reads this yet.
+    Removing a row removes only the association — never the College or
+    Programme (the FKs' ON DELETE CASCADE only ever removes this join row
+    when a parent is hard-deleted, which AMS does not do — both are
+    soft-deleted via is_active)."""
+    __tablename__ = "ams_college_programs"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    college_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_colleges.id", ondelete="CASCADE"))
+    program_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_programs.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (UniqueConstraint("college_id", "program_id", name="uq_college_program"),)
+
+    college: Mapped["College"] = relationship("College", foreign_keys=[college_id])
+    program: Mapped["Program"] = relationship("Program", foreign_keys=[program_id])
+
+
 class RefreshToken(Base):
     __tablename__ = "ams_refresh_tokens"
     id: Mapped[uuid.UUID]       = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

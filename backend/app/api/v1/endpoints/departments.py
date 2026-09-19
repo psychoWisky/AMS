@@ -9,11 +9,12 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
+from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel
 
 from app.db.base import get_db
 from app.core.dependencies import get_current_user, require_roles
-from app.models.user import User, UserRole, Department, Program, ProgramDepartment, College, Designation, Role
+from app.models.user import User, UserRole, Department, Program, ProgramDepartment, College, CollegeProgram, Designation, Role
 
 router = APIRouter(prefix="/departments", tags=["Departments"])
 admin_router = APIRouter(prefix="/admin", tags=["Admin — Master Data"])
@@ -56,6 +57,9 @@ class ProgramUpdate(BaseModel):
 
 class ProgramDepartmentIn(BaseModel):
     department_id: UUID
+
+class CollegeProgramIn(BaseModel):
+    program_id: UUID
 
 class CollegeIn(BaseModel):
     name: str; code: str
@@ -252,6 +256,26 @@ async def remove_program_department(
         await db.commit()
 
 
+@router.get("/programs/{program_id}/colleges")
+async def list_program_colleges(
+    program_id: UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user),
+):
+    """Programme-side view of the College<->Programme association (see the
+    College endpoints under /admin/colleges/{id}/programs, which are the only
+    write path — the same rows are managed from either side). Independent of
+    the Programme<->Department associations above."""
+    if not await db.get(Program, program_id):
+        raise HTTPException(404, "Program not found.")
+    result = await db.execute(
+        select(CollegeProgram, College)
+        .join(College, College.id == CollegeProgram.college_id)
+        .where(CollegeProgram.program_id == program_id)
+        .order_by(College.name)
+    )
+    return [{"association_id": str(link.id), "college_id": str(c.id), "college_name": c.name, "college_code": c.code}
+            for link, c in result.all()]
+
+
 @router.get("/{department_id}/programs")
 async def list_department_programs(
     department_id: UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user),
@@ -318,6 +342,75 @@ async def deactivate_college(
     if not c: raise HTTPException(404, "College not found.")
     c.is_active = False
     await db.commit()
+
+
+# ── College <-> Programme associations (BUSINESS_LOGIC.md section X) ───────────
+# Explicit, Super Admin-managed many-to-many, independent of the Programme<->
+# Department associations above (no College->Department->Programme chain is
+# derived). Removing an association only removes the join row — never the
+# College or Programme, and never any Programme<->Department association.
+
+@admin_router.get("/colleges/{college_id}/programs")
+async def list_college_programs(
+    college_id: UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user),
+):
+    if not await db.get(College, college_id):
+        raise HTTPException(404, "College not found.")
+    result = await db.execute(
+        select(CollegeProgram, Program)
+        .join(Program, Program.id == CollegeProgram.program_id)
+        .where(CollegeProgram.college_id == college_id)
+        .order_by(Program.name)
+    )
+    return [{"association_id": str(link.id), "program_id": str(p.id), "program_name": p.name, "program_code": p.code, "program_level": p.level}
+            for link, p in result.all()]
+
+
+@admin_router.post("/colleges/{college_id}/programs", status_code=201)
+async def add_college_program(
+    college_id: UUID, body: CollegeProgramIn, db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(*_MASTER_DATA_ROLES)),
+):
+    if not await db.get(College, college_id):
+        raise HTTPException(404, "College not found.")
+    if not await db.get(Program, body.program_id):
+        raise HTTPException(404, "Program not found.")
+    existing = await db.execute(
+        select(CollegeProgram.id).where(CollegeProgram.college_id == college_id, CollegeProgram.program_id == body.program_id)
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(409, "This Programme is already associated with this College.")
+    link = CollegeProgram(college_id=college_id, program_id=body.program_id)
+    db.add(link)
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Concurrent duplicate: uq_college_program is the race-safe backstop.
+        await db.rollback()
+        raise HTTPException(409, "This Programme is already associated with this College.")
+    return {"id": str(link.id), "message": "Programme associated with College."}
+
+
+@admin_router.delete("/colleges/{college_id}/programs/{program_id}", status_code=204)
+async def remove_college_program(
+    college_id: UUID, program_id: UUID, db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(*_MASTER_DATA_ROLES)),
+):
+    """Removes ONLY the association row. Unknown College/Programme ids are a
+    404 (never silently ignored); once both exist, removing an association
+    that isn't there is an idempotent no-op 204, matching the existing
+    Programme<->Department removal."""
+    if not await db.get(College, college_id):
+        raise HTTPException(404, "College not found.")
+    if not await db.get(Program, program_id):
+        raise HTTPException(404, "Program not found.")
+    result = await db.execute(
+        select(CollegeProgram).where(CollegeProgram.college_id == college_id, CollegeProgram.program_id == program_id)
+    )
+    link = result.scalar_one_or_none()
+    if link:
+        await db.delete(link)
+        await db.commit()
 
 
 # ── Designations (Super Admin master data — designation-management task) ──────
