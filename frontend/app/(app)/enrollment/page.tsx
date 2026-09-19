@@ -25,7 +25,7 @@ interface MyCourseRow {
 }
 interface Calendar { id: string; name: string; academic_year: string; }
 interface Semester { id: string; calendar_id: string; name: string; }
-interface Offering { id: string; course_number: string; course_title: string; credit_structure: string; section: string | null; max_enrollment: number; enrolled_count: number; status: string; faculty_names: string[]; department_id: string | null; department_name: string | null; }
+interface Offering { id: string; course_number: string; course_title: string; program_level?: string | null; credit_structure: string; section: string | null; max_enrollment: number; enrolled_count: number; status: string; faculty_names: string[]; department_id: string | null; department_name: string | null; }
 interface EnrollmentRow { id: string; student_id: string; student_name: string; student_roll: string; status: string; enrolled_at: string; remarks: string | null; }
 
 const STATUS_COLOR: Record<string, string> = { pending: "bg-amber-100 text-amber-700", approved: "bg-green-100 text-green-700", rejected: "bg-red-100 text-red-700", withdrawn: "bg-gray-100 text-gray-600" };
@@ -273,7 +273,7 @@ export default function EnrollmentPage() {
         <select value={selectedOffering} onChange={(e) => setSelectedOffering(e.target.value)}
           className="flex-1 border border-gray-200 rounded-xl px-3 py-2.5 text-base focus:outline-none">
           <option value="">Select a course offering…</option>
-          {offeringsAll.map((o) => <option key={o.id} value={o.id}>{o.course_number} — {o.course_title} {o.section ? `(${o.section})` : ""}</option>)}
+          {offeringsAll.map((o) => <option key={o.id} value={o.id}>{o.course_number} — {o.course_title}{o.program_level ? ` — ${o.program_level}` : ""} {o.section ? `(${o.section})` : ""}</option>)}
         </select>
         <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}
           className="border border-gray-200 rounded-xl px-3 py-2.5 text-base focus:outline-none">

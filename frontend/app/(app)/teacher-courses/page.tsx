@@ -7,7 +7,7 @@ import { BookOpen, Search, Loader2, X, Eye, Crown } from "lucide-react";
 
 interface Offering {
   id: string; calendar_id: string; semester_id: string; course_id: string;
-  course_number: string; course_title: string; credit_structure: string;
+  course_number: string; course_title: string; program_level?: string | null; credit_structure: string;
   section: string | null; status: string;
   department_id: string | null; department_name: string | null;
   faculty_names: string[]; enrolled_count: number;
@@ -113,7 +113,7 @@ export default function TeacherCoursesPage() {
                 <tr key={o.id} className={i % 2 === 0 ? "bg-white" : "bg-gray-50/50"}>
                   <td className="px-4 py-3 text-gray-600">{i + 1}</td>
                   <td className="px-4 py-3 font-mono font-bold text-[#0D6E6E]">{o.course_number}</td>
-                  <td className="px-4 py-3 max-w-xs truncate">{o.course_title}</td>
+                  <td className="px-4 py-3 max-w-xs truncate">{o.course_title}{o.program_level && (<span className="ml-2 px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-xs font-semibold">{o.program_level}</span>)}</td>
                   <td className="px-4 py-3 font-mono text-sm">{o.credit_structure}</td>
                   <td className="px-4 py-3 text-gray-600">{o.faculty_names.join(", ") || "—"}</td>
                   <td className="px-4 py-3 text-gray-600">{o.department_name ?? "—"}</td>
@@ -137,7 +137,7 @@ export default function TeacherCoursesPage() {
             <div className="flex items-start justify-between px-6 py-5 border-b border-gray-100">
               <div>
                 <p className="font-mono text-sm text-[#0D6E6E] font-bold">{selected.course_number}</p>
-                <h3 className="text-xl font-bold text-gray-900">{selected.course_title}</h3>
+                <h3 className="text-xl font-bold text-gray-900">{selected.course_title}{selected.program_level && (<span className="ml-2 px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-xs font-semibold">{selected.program_level}</span>)}</h3>
               </div>
               <button onClick={() => setSelected(null)} className="text-gray-400 hover:text-gray-700"><X size={20} /></button>
             </div>

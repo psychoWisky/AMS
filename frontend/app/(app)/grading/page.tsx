@@ -10,7 +10,7 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 
 interface SheetSummary { id: string; sheet_type: string; status: string; is_locked: boolean; }
 interface GradeEntry { id: string; student_id: string; student_name: string; student_roll: string; internal_marks: number | null; external_marks: number | null; total_marks: number | null; grade_letter: string | null; grade_points: number | null; is_absent: boolean; }
-interface Offering { id: string; course_number: string; course_title: string; section: string | null; }
+interface Offering { id: string; course_number: string; course_title: string; program_level?: string | null; section: string | null; }
 interface SheetDetail { id: string; course_title: string; sheet_type: string; status: string; is_locked: boolean; entries: GradeEntry[]; approvals: { stage: number; role_required: string; status: string; approver_name: string | null; signed_at: string | null; remarks: string | null }[]; }
 
 const STATUS_COLOR: Record<string, string> = { draft: "bg-gray-100 text-gray-700", submitted: "bg-amber-100 text-amber-700", under_review: "bg-blue-100 text-blue-700", approved: "bg-green-100 text-green-700", published: "bg-teal-100 text-teal-700" };
@@ -111,7 +111,7 @@ export default function GradingPage() {
         <select value={selectedOffering} onChange={(e) => { setSelectedOffering(e.target.value); setSelectedSheet(null); }}
           className="flex-1 max-w-md border border-gray-200 rounded-xl px-3 py-2.5 text-base focus:outline-none">
           <option value="">Select offering…</option>
-          {offerings.map((o) => <option key={o.id} value={o.id}>{o.course_number} — {o.course_title} {o.section ? `(${o.section})` : ""}</option>)}
+          {offerings.map((o) => <option key={o.id} value={o.id}>{o.course_number} — {o.course_title}{o.program_level ? ` — ${o.program_level}` : ""} {o.section ? `(${o.section})` : ""}</option>)}
         </select>
         {selectedOffering && !selectedSheet && (
           <button onClick={() => setConfirm({

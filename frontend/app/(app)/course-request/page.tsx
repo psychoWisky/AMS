@@ -9,7 +9,7 @@ import { ClipboardList, Loader2, CheckCircle2, XCircle, Eye, X } from "lucide-re
 
 interface Calendar { id: string; name: string; academic_year: string; }
 interface Semester { id: string; calendar_id: string; name: string; }
-interface Offering { id: string; course_number: string; course_title: string; semester_id: string; }
+interface Offering { id: string; course_number: string; course_title: string; program_level?: string | null; semester_id: string; }
 interface WithdrawalRequestInfo { id: string; status: string; status_label: string; reason: string; decision_remark: string | null; }
 interface EnrollmentItem {
   id: string; student_id: string; student_name: string | null; student_roll: string | null;
@@ -246,7 +246,7 @@ export default function CourseRequestPage() {
             <select value={offeringId} onChange={(e) => setOfferingId(e.target.value)}
               className="border border-gray-200 rounded-xl px-3 py-2.5 text-base focus:outline-none min-w-[220px]">
               <option value="">Course…</option>
-              {myOfferings.map((o) => <option key={o.id} value={o.id}>{o.course_number} — {o.course_title}</option>)}
+              {myOfferings.map((o) => <option key={o.id} value={o.id}>{o.course_number} — {o.course_title}{o.program_level ? ` — ${o.program_level}` : ""}</option>)}
             </select>
           </div>
 

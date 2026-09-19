@@ -18,7 +18,7 @@ interface Course {
   is_research: boolean; is_compulsory: boolean;
 }
 interface Offering {
-  id: string; course_number: string; course_title: string; credit_structure: string;
+  id: string; course_number: string; course_title: string; program_level: string | null; credit_structure: string;
   category: string | null; credit_type: string | null; is_research: boolean;
   semester_name: string | null; section: string | null; max_enrollment: number;
   enrolled_count: number; status: string; faculty_names: string[];
@@ -32,10 +32,10 @@ interface FacultyUser { id: string; full_name: string; designation: string | nul
 interface DepartmentOpt { id: string; name: string; code: string; stream: string | null; }
 interface AvailableToMeRow {
   availability_id: string; course_id: string; course_number: string | null; course_title: string | null;
-  credit_structure: string | null; owning_department_id: string | null; owning_department_name: string | null;
+  program_level: string | null; credit_structure: string | null; owning_department_id: string | null; owning_department_name: string | null;
 }
 interface SearchCourseResult {
-  id: string; course_number: string; title: string; credit_structure: string;
+  id: string; course_number: string; title: string; program_level: string; credit_structure: string;
   department_id: string | null; department_name: string | null;
 }
 
@@ -567,7 +567,7 @@ export default function CoursesPage() {
                     <tr key={o.id} className={i % 2 === 0 ? "bg-white" : "bg-gray-50/50"}>
                       <td className="px-4 py-3 text-gray-600">{i + 1}</td>
                       <td className="px-4 py-3 font-mono font-bold text-[#0D6E6E] whitespace-nowrap">{o.course_number}</td>
-                      <td className="px-4 py-3 max-w-xs truncate">{o.course_title}</td>
+                      <td className="px-4 py-3 max-w-xs truncate">{o.course_title}{o.program_level && (<span className="ml-2 px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-xs font-semibold">{o.program_level}</span>)}</td>
                       <td className="px-4 py-3 text-gray-600 whitespace-nowrap">{o.semester_name ?? "—"}</td>
                       <td className="px-4 py-3 font-mono text-sm">{o.credit_structure}</td>
                       <td className="px-4 py-3 text-gray-600">{o.credit_type ? CREDIT_TYPE_LABELS[o.credit_type] : "—"}</td>
@@ -619,7 +619,7 @@ export default function CoursesPage() {
                 {availableToMe.map((row, i) => (
                   <tr key={row.availability_id} className={i % 2 === 0 ? "bg-white" : "bg-gray-50/50"}>
                     <td className="px-4 py-3 font-mono font-bold text-[#0D6E6E] whitespace-nowrap">{row.course_number}</td>
-                    <td className="px-4 py-3 max-w-xs truncate">{row.course_title}</td>
+                    <td className="px-4 py-3 max-w-xs truncate">{row.course_title}{row.program_level && (<span className="ml-2 px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-xs font-semibold">{row.program_level}</span>)}</td>
                     <td className="px-4 py-3 font-mono text-sm">{row.credit_structure}</td>
                     <td className="px-4 py-3 text-gray-600">{row.owning_department_name ?? "—"}</td>
                     <td className="px-4 py-3">
@@ -660,7 +660,7 @@ export default function CoursesPage() {
                   className="w-full flex items-center justify-between text-left px-3 py-2.5 text-sm hover:bg-[#E6F4F4] border-b border-gray-50 last:border-0 disabled:opacity-50">
                   <span>
                     <span className="font-mono font-bold text-[#0D6E6E]">{c.course_number}</span> — {c.title}{" "}
-                    <span className="text-gray-500">({c.credit_structure}, {c.department_name ?? "—"})</span>
+                    <span className="text-gray-500">({c.program_level}, {c.credit_structure}, {c.department_name ?? "—"})</span>
                   </span>
                   <Plus size={14} className="text-[#0D6E6E] shrink-0" />
                 </button>
@@ -700,7 +700,7 @@ export default function CoursesPage() {
                 <select value={offeringForm.course_id} onChange={(e) => setOfferingForm((f) => ({ ...f, course_id: e.target.value }))}
                   className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
                   <option value="">Select course…</option>
-                  {courses.map((c) => <option key={c.id} value={c.id}>{c.course_number} — {c.title}</option>)}
+                  {courses.map((c) => <option key={c.id} value={c.id}>{c.course_number} — {c.title} — {c.program_level}</option>)}
                 </select>
               </div>
               {isHod ? (

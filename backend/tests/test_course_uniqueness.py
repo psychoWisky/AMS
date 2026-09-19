@@ -3,13 +3,20 @@ duplicate-DETECTION fix (superseding the previous, incorrect
 (department_id, course_number) uniqueness rule from migration 0019).
 
 Corrected business rule under test:
-    same department + same code + SAME normalized title      -> REJECT
-    same department + same code + DIFFERENT normalized title -> ALLOWED
+    same department + same code + SAME normalized title
+        + SAME Programme Level (Course.program_level: UG/PG/PhD)   -> REJECT
+    same department + same code + SAME normalized title
+        + DIFFERENT Programme Level                                -> ALLOWED
+    same department + same code + DIFFERENT normalized title       -> ALLOWED
                                                                  (bulk upload
                                                                  additionally
                                                                  warns; see
                                                                  test_course_bulk_upload_confirmation.py)
-    different department + same code (any title)             -> ALLOWED
+    different department + same code (any title)                   -> ALLOWED
+("Programme" here is the Programme LEVEL on Course, not the ams_programs master
+table — Course has no relationship to that table.) Tests whose names start
+`test_level_` cover the Programme Level part of the rule; the rest predate it
+and use the default level (UG) on both sides, so they still hold unchanged.
 
 No pytest — matches the existing convention in this `tests/` directory
 (see `test_email_outbox.py`'s own docstring for why). Calls the real
@@ -43,7 +50,7 @@ from fastapi import HTTPException
 from sqlalchemy import select, delete
 
 from app.db.base import AsyncSessionLocal
-from app.models.course import Course
+from app.models.course import Course, CourseOffering
 from app.models.user import User, UserRole, Department
 from app.api.v1.endpoints import courses as courses_module
 from app.api.v1.endpoints.courses import CourseIn
@@ -77,8 +84,8 @@ async def _cleanup_by_numbers(numbers: list[str]) -> None:
         await db.commit()
 
 
-def _course_in(course_number: str, department_id, title: str = "ZZTEST Course") -> CourseIn:
-    return CourseIn(course_number=course_number, title=title, department_id=department_id)
+def _course_in(course_number: str, department_id, title: str = "ZZTEST Course", program_level: str = "UG") -> CourseIn:
+    return CourseIn(course_number=course_number, title=title, department_id=department_id, program_level=program_level)
 
 
 class _Results:
@@ -498,6 +505,383 @@ async def test_rbac_department_resolution_not_overridable_in_bulk():
         await _cleanup_by_numbers([number])
 
 
+# ── Programme Level (Course.program_level) is part of the duplicate key ──────
+#
+# Confirmed AVFU rule: a course is a duplicate only when department + code +
+# normalized title + Programme Level (UG/PG/PhD — the existing
+# `Course.program_level` field, NOT the ams_programs master table) all match.
+
+_TITLE = "Animal Nutrition"
+
+
+async def _create(number, dept, title, level, user):
+    async with AsyncSessionLocal() as db:
+        return await courses_module.create_course(_course_in(number, dept, title, level), db, user)
+
+
+async def _expect_409(coro) -> bool:
+    try:
+        await coro
+    except HTTPException as e:
+        return e.status_code == 409
+    return False
+
+
+async def _row(course_id):
+    async with AsyncSessionLocal() as db:
+        return await db.get(Course, course_id)
+
+
+async def test_level_create_same_level_rejected():
+    name = "LEVEL create — same dept + code + title + SAME level (PG/PG) -> REJECT"
+    number = _fake_number("lv1")
+    admin = _fake_user(_SOME_USER_ID, None, UserRole.SUPER_ADMIN)
+    try:
+        await _create(number, _DEPT_A, _TITLE, "PG", admin)
+        assert await _expect_409(_create(number, _DEPT_A, _TITLE, "PG", admin)), "expected HTTPException(409)"
+        async with AsyncSessionLocal() as db:
+            n = len((await db.execute(select(Course.id).where(Course.course_number == number))).scalars().all())
+        assert n == 1, f"the rejected duplicate must not be stored, found {n} rows"
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([number])
+
+
+async def test_level_create_different_level_allowed():
+    name = "LEVEL create — same dept + code + title, DIFFERENT level (PG then PhD) -> BOTH ALLOWED, distinct ids"
+    number = _fake_number("lv2")
+    admin = _fake_user(_SOME_USER_ID, None, UserRole.SUPER_ADMIN)
+    try:
+        pg = await _create(number, _DEPT_A, _TITLE, "PG", admin)
+        phd = await _create(number, _DEPT_A, _TITLE, "PhD", admin)
+        assert pg.id != phd.id
+        async with AsyncSessionLocal() as db:
+            rows = (await db.execute(select(Course.program_level).where(Course.course_number == number).order_by(Course.program_level))).scalars().all()
+        assert rows == ["PG", "PhD"], f"expected one PG and one PhD row, got {rows}"
+        # ...but a second PhD row is again a duplicate.
+        assert await _expect_409(_create(number, _DEPT_A, _TITLE, "PhD", admin))
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([number])
+
+
+async def test_level_create_different_department_allowed():
+    name = "LEVEL create — different department + same code + title + level -> ALLOWED (codes are reusable across departments)"
+    number = _fake_number("lv3")
+    admin = _fake_user(_SOME_USER_ID, None, UserRole.SUPER_ADMIN)
+    try:
+        await _create(number, _DEPT_A, _TITLE, "PG", admin)
+        await _create(number, _DEPT_B, _TITLE, "PG", admin)
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([number])
+
+
+async def test_level_create_same_level_different_title_allowed():
+    name = "LEVEL create — same dept + code + level, DIFFERENT title -> ALLOWED (existing rule preserved)"
+    number = _fake_number("lv4")
+    admin = _fake_user(_SOME_USER_ID, None, UserRole.SUPER_ADMIN)
+    try:
+        await _create(number, _DEPT_A, "Animal Nutrition I", "PG", admin)
+        await _create(number, _DEPT_A, "Animal Nutrition II", "PG", admin)
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([number])
+
+
+async def test_level_create_title_normalization():
+    name = "LEVEL create — whitespace/case title variant collides at the SAME level, and is allowed at a DIFFERENT level"
+    number = _fake_number("lv5")
+    admin = _fake_user(_SOME_USER_ID, None, UserRole.SUPER_ADMIN)
+    try:
+        await _create(number, _DEPT_A, _TITLE, "PG", admin)
+        assert await _expect_409(_create(number, _DEPT_A, "  animal NUTRITION  ", "PG", admin)), "normalized variant at same level must collide"
+        await _create(number, _DEPT_A, "  animal NUTRITION  ", "PhD", admin)  # different level -> fine
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([number])
+
+
+async def test_level_input_canonicalized_and_validated():
+    name = "LEVEL create — 'pg'/' phd ' are canonicalized (so casing cannot bypass the rule); an unknown level is rejected"
+    number = _fake_number("lv6")
+    admin = _fake_user(_SOME_USER_ID, None, UserRole.SUPER_ADMIN)
+    try:
+        assert CourseIn(course_number=number, title=_TITLE, program_level="pg").program_level == "PG"
+        assert CourseIn(course_number=number, title=_TITLE, program_level=" phd ").program_level == "PhD"
+        await _create(number, _DEPT_A, _TITLE, "PG", admin)
+        assert await _expect_409(_create(number, _DEPT_A, _TITLE, "pg", admin)), "'pg' must be treated as PG, not as a new level"
+        from pydantic import ValidationError
+        try:
+            CourseIn(course_number=number, title=_TITLE, program_level="Masters")
+            raise AssertionError("an unknown Programme Level must be rejected")
+        except ValidationError:
+            pass
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([number])
+
+
+async def test_level_update_same_level_collision_rejected():
+    name = "LEVEL update — updating B (602/PG) into A's full key (601/title/PG) -> REJECT, B unchanged"
+    n1, n2 = _fake_number("lv7a"), _fake_number("lv7b")
+    admin = _fake_user(_SOME_USER_ID, None, UserRole.SUPER_ADMIN)
+    try:
+        await _create(n1, _DEPT_A, _TITLE, "PG", admin)
+        b = await _create(n2, _DEPT_A, _TITLE, "PG", admin)
+        async with AsyncSessionLocal() as db:
+            assert await _expect_409(courses_module.update_course(b.id, _course_in(n1, _DEPT_A, _TITLE, "PG"), db, admin))
+        fresh = await _row(b.id)
+        assert fresh.course_number == n2 and fresh.program_level == "PG", "the rejected update must not change B"
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([n1, n2])
+
+
+async def test_level_update_cross_level_allowed_and_blocked_into_existing():
+    name = "LEVEL update — PG -> PhD allowed when that combination is free; blocked when a PhD twin already exists"
+    number = _fake_number("lv8")
+    admin = _fake_user(_SOME_USER_ID, None, UserRole.SUPER_ADMIN)
+    try:
+        a = await _create(number, _DEPT_A, _TITLE, "PG", admin)
+        async with AsyncSessionLocal() as db:
+            await courses_module.update_course(a.id, _course_in(number, _DEPT_A, _TITLE, "PhD"), db, admin)
+        assert (await _row(a.id)).program_level == "PhD", "free cross-level update must be applied"
+
+        # Now a PG twin is created; moving the PhD row back to PG would collide with it.
+        twin = await _create(number, _DEPT_A, _TITLE, "PG", admin)
+        async with AsyncSessionLocal() as db:
+            assert await _expect_409(courses_module.update_course(a.id, _course_in(number, _DEPT_A, _TITLE, "PG"), db, admin)), \
+                "changing level into an existing duplicate must be rejected"
+        assert (await _row(a.id)).program_level == "PhD" and (await _row(twin.id)).program_level == "PG"
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([number])
+
+
+async def test_level_update_self_no_false_positive():
+    name = "LEVEL update — a no-op update (same dept/code/title/level) never collides with itself, even with a PhD twin present"
+    number = _fake_number("lv9")
+    admin = _fake_user(_SOME_USER_ID, None, UserRole.SUPER_ADMIN)
+    try:
+        pg = await _create(number, _DEPT_A, _TITLE, "PG", admin)
+        await _create(number, _DEPT_A, _TITLE, "PhD", admin)
+        async with AsyncSessionLocal() as db:
+            await courses_module.update_course(pg.id, _course_in(number, _DEPT_A, _TITLE, "PG"), db, admin)
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([number])
+
+
+async def test_level_rbac_department_rules_unchanged():
+    name = "LEVEL RBAC — HOD@A still cannot create/move a course into department B at ANY level; can create its own cross-level twin"
+    number = _fake_number("lv10")
+    hod_a = _fake_user(_SOME_USER_ID, _DEPT_A, UserRole.HOD)
+    try:
+        for level in ("UG", "PG", "PhD"):
+            async with AsyncSessionLocal() as db:
+                try:
+                    await courses_module.create_course(_course_in(number, _DEPT_B, _TITLE, level), db, hod_a)
+                    raise AssertionError(f"HOD@A created a {level} course in department B")
+                except HTTPException as e:
+                    assert e.status_code == 403, e.status_code
+        await _create(number, _DEPT_A, _TITLE, "PG", hod_a)
+        await _create(number, _DEPT_A, _TITLE, "PhD", hod_a)
+        mine = await _row((await _find(number, "PG")))
+        async with AsyncSessionLocal() as db:
+            try:
+                await courses_module.update_course(mine.id, _course_in(number, _DEPT_B, _TITLE, "PG"), db, hod_a)
+                raise AssertionError("HOD@A moved a course into department B")
+            except HTTPException as e:
+                assert e.status_code == 403, e.status_code
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([number])
+
+
+async def _find(number, level):
+    async with AsyncSessionLocal() as db:
+        return (await db.execute(select(Course.id).where(Course.course_number == number, Course.program_level == level))).scalar_one()
+
+
+def _brow(n, number, title, level, dept_code):
+    return {"row": n, "values": {"Course Number": number, "Course Title": title, "Programme": level, "Department": dept_code}}
+
+
+async def _bulk(rows):
+    async with AsyncSessionLocal() as db:
+        return await courses_module._validate_course_bulk_rows(rows, db, force_department_id=None)
+
+
+async def test_level_bulk_within_file_different_level_allowed():
+    name = "LEVEL bulk — same file: same dept+code+title with PG and PhD rows -> BOTH VALID, no finding, no warning"
+    number = _fake_number("bl1")
+    try:
+        async with AsyncSessionLocal() as db:
+            code = await _dept_code(db, _DEPT_A)
+        findings, warnings, valid = await _bulk([_brow(2, number, _TITLE, "PG", code), _brow(3, number, _TITLE, "PhD", code)])
+        assert findings == [] and warnings == [], f"findings={findings} warnings={warnings}"
+        assert sorted(r["program_level"] for r in valid) == ["PG", "PhD"]
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([number])
+
+
+async def test_level_bulk_within_file_same_level_duplicate():
+    name = "LEVEL bulk — same file: two PG rows with the same dept+code+title -> both flagged as duplicates"
+    number = _fake_number("bl2")
+    try:
+        async with AsyncSessionLocal() as db:
+            code = await _dept_code(db, _DEPT_A)
+        findings, warnings, valid = await _bulk([_brow(2, number, _TITLE, "PG", code), _brow(3, number, " animal nutrition ", "pg", code)])
+        assert valid == [] and len(findings) == 2, f"findings={findings} valid={valid}"
+        assert all("Duplicate" in f["error"] for f in findings)
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([number])
+
+
+async def test_level_bulk_existing_db_different_level_allowed_same_level_duplicate():
+    name = "LEVEL bulk — existing DB PG course: uploading the PhD twin -> allowed (no finding/warning); uploading the PG twin -> DUPLICATE"
+    number = _fake_number("bl3")
+    admin = _fake_user(_SOME_USER_ID, None, UserRole.SUPER_ADMIN)
+    try:
+        await _create(number, _DEPT_A, _TITLE, "PG", admin)
+        async with AsyncSessionLocal() as db:
+            code = await _dept_code(db, _DEPT_A)
+        findings, warnings, valid = await _bulk([_brow(2, number, _TITLE, "PhD", code)])
+        assert findings == [] and warnings == [] and len(valid) == 1, f"PhD twin: findings={findings} warnings={warnings}"
+        findings, warnings, valid = await _bulk([_brow(2, number, _TITLE, "PG", code)])
+        assert valid == [] and any("Duplicate course" in f["error"] and "(PG)" in f["error"] for f in findings), findings
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([number])
+
+
+async def test_level_bulk_different_title_still_warns_regardless_of_level():
+    name = "LEVEL bulk — same code + DIFFERENT title still produces the confirmation WARNING (existing behaviour preserved), at any level"
+    number = _fake_number("bl4")
+    admin = _fake_user(_SOME_USER_ID, None, UserRole.SUPER_ADMIN)
+    try:
+        await _create(number, _DEPT_A, _TITLE, "PG", admin)
+        async with AsyncSessionLocal() as db:
+            code = await _dept_code(db, _DEPT_A)
+        for level in ("PG", "PhD"):
+            findings, warnings, valid = await _bulk([_brow(2, number, "Animal Nutrition Advanced", level, code)])
+            assert findings == [] and len(valid) == 1 and len(warnings) == 1, f"{level}: findings={findings} warnings={warnings}"
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([number])
+
+
+async def test_level_bulk_invalid_level_reports_only_its_own_finding():
+    name = "LEVEL bulk — an invalid Programme value yields ONLY the Programme finding (no spurious duplicate finding)"
+    number = _fake_number("bl5")
+    admin = _fake_user(_SOME_USER_ID, None, UserRole.SUPER_ADMIN)
+    try:
+        await _create(number, _DEPT_A, _TITLE, "UG", admin)  # would be a same-title duplicate at the default level
+        async with AsyncSessionLocal() as db:
+            code = await _dept_code(db, _DEPT_A)
+        findings, warnings, valid = await _bulk([_brow(2, number, _TITLE, "Masters", code)])
+        assert [f["column"] for f in findings] == ["Programme"], findings
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([number])
+
+
+# ── Database / offering identity ────────────────────────────────────────────
+
+async def test_level_db_allows_same_dept_code_title_rows_no_new_constraint():
+    name = "LEVEL DB — two rows with identical dept+code+title but different level insert cleanly; ams_courses still has no unique constraint"
+    number = _fake_number("db1")
+    try:
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as db:
+            for level in ("PG", "PhD"):
+                db.add(Course(course_number=number, title=_TITLE, department_id=_DEPT_A, program_level=level, created_by=_SOME_USER_ID))
+            await db.commit()
+            cons = (await db.execute(text(
+                "SELECT conname FROM pg_constraint WHERE conrelid = 'ams_courses'::regclass AND contype='u'"
+            ))).scalars().all()
+        assert cons == [], f"the application-level rule must not be mirrored by a DB constraint, found {cons}"
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([number])
+
+
+async def test_level_offerings_reference_distinct_courses_by_id():
+    name = "LEVEL offerings — PG and PhD twins can each be offered in the same semester/department; offerings resolve to the exact course row and expose its level"
+    from sqlalchemy.orm import selectinload
+    from app.models.academic import Semester
+    number = _fake_number("of1")
+    offering_ids = []
+    try:
+        async with AsyncSessionLocal() as db:
+            sem = (await db.execute(select(Semester).limit(1))).scalars().first()
+            course_ids = {}
+            for level in ("PG", "PhD"):
+                c = Course(course_number=number, title=_TITLE, department_id=_DEPT_A, program_level=level, created_by=_SOME_USER_ID)
+                db.add(c)
+                await db.flush()
+                course_ids[level] = c.id
+                o = CourseOffering(calendar_id=sem.calendar_id, semester_id=sem.id, course_id=c.id, department_id=_DEPT_A, created_by=_SOME_USER_ID)
+                db.add(o)
+                await db.flush()
+                offering_ids.append(o.id)
+            await db.commit()
+        async with AsyncSessionLocal() as db:
+            offs = (await db.execute(
+                select(CourseOffering).options(
+                    selectinload(CourseOffering.course), selectinload(CourseOffering.semester),
+                    selectinload(CourseOffering.department), selectinload(CourseOffering.faculty_assignments),
+                ).where(CourseOffering.id.in_(offering_ids))
+            )).scalars().all()
+            dicts = {d["program_level"]: d for d in (courses_module._offering_dict(o, 0) for o in offs)}
+        assert set(dicts) == {"PG", "PhD"}, f"offerings must expose their course's level, got {set(dicts)}"
+        assert dicts["PG"]["course_id"] == str(course_ids["PG"]) and dicts["PhD"]["course_id"] == str(course_ids["PhD"])
+        assert dicts["PG"]["course_number"] == dicts["PhD"]["course_number"] == number and dicts["PG"]["id"] != dicts["PhD"]["id"]
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        async with AsyncSessionLocal() as db:
+            await db.execute(delete(CourseOffering).where(CourseOffering.id.in_(offering_ids)))
+            await db.commit()
+        await _cleanup_by_numbers([number])
+
+
 async def main() -> None:
     await _setup()
     scenarios = [
@@ -518,6 +902,23 @@ async def main() -> None:
         test_bulk_existing_db_same_title_hard_reject_diff_title_warning,
         test_rbac_hod_cannot_create_in_other_department,
         test_rbac_department_resolution_not_overridable_in_bulk,
+        test_level_create_same_level_rejected,
+        test_level_create_different_level_allowed,
+        test_level_create_different_department_allowed,
+        test_level_create_same_level_different_title_allowed,
+        test_level_create_title_normalization,
+        test_level_input_canonicalized_and_validated,
+        test_level_update_same_level_collision_rejected,
+        test_level_update_cross_level_allowed_and_blocked_into_existing,
+        test_level_update_self_no_false_positive,
+        test_level_rbac_department_rules_unchanged,
+        test_level_bulk_within_file_different_level_allowed,
+        test_level_bulk_within_file_same_level_duplicate,
+        test_level_bulk_existing_db_different_level_allowed_same_level_duplicate,
+        test_level_bulk_different_title_still_warns_regardless_of_level,
+        test_level_bulk_invalid_level_reports_only_its_own_finding,
+        test_level_db_allows_same_dept_code_title_rows_no_new_constraint,
+        test_level_offerings_reference_distinct_courses_by_id,
     ]
     for scenario in scenarios:
         await scenario()

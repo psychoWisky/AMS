@@ -319,6 +319,33 @@ async def test_no_warnings_uploads_normally_without_confirmation_fields():
         await _cleanup_by_numbers([n1])
 
 
+async def test_cross_programme_level_twins_upload_without_confirmation_same_level_rejected():
+    name = "Programme Level — same dept+code+title at PG and PhD uploads immediately (201, no confirmation); re-uploading it -> HARD 400, nothing created"
+    n1 = _fake_number("c20")
+    try:
+        content = _make_workbook([
+            [n1, "Animal Nutrition", "PG", "", "", "3", "0", "Active", _DEPT_A_CODE],
+            [n1, "Animal Nutrition", "PhD", "", "", "3", "0", "Active", _DEPT_A_CODE],
+        ])
+        r = await _post_bulk_upload(content)
+        body = r.json()
+        assert r.status_code == 201 and body["imported_count"] == 2, f"expected both levels accepted at once, got {r.status_code}: {body}"
+        assert not body.get("requires_confirmation"), body
+
+        # The identical file again: both rows are now exact duplicates (same level) -> hard rejection, even with a confirmation flag.
+        r2 = await _post_bulk_upload(content, confirm_warnings=True, confirmation_token="not-a-real-token")
+        b2 = r2.json()
+        assert r2.status_code == 400 and b2["success"] is False and len(b2["errors"]) == 2, f"expected hard duplicate rejection, got {r2.status_code}: {b2}"
+        async with AsyncSessionLocal() as db:
+            count = len((await db.execute(select(Course.id).where(Course.course_number == n1))).scalars().all())
+        assert count == 2, f"the rejected re-upload must not create anything, found {count} rows"
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([n1])
+
+
 async def main() -> None:
     await _setup()
     try:
@@ -330,6 +357,7 @@ async def main() -> None:
             test_race_condition_final_revalidation_rejects,
             test_confirmation_token_bound_to_authenticated_user,
             test_no_warnings_uploads_normally_without_confirmation_fields,
+            test_cross_programme_level_twins_upload_without_confirmation_same_level_rejected,
         ]
         for scenario in scenarios:
             await scenario()

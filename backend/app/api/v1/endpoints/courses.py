@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, field_validator, model_validator
 import openpyxl
 
 from app.db.base import get_db
@@ -65,6 +65,18 @@ class CourseIn(BaseModel):
     credit_type: Optional[str] = None
     description: Optional[str] = None
     status: str = "active"
+
+    @field_validator("program_level")
+    @classmethod
+    def _canonical_program_level(cls, v: str) -> str:
+        # Programme Level is part of the course duplicate key
+        # (department + code + normalized title + level), so it must always be
+        # one canonical value — otherwise "pg"/" PG " would slip past the
+        # duplicate check. Same case-insensitive resolution the bulk upload uses.
+        resolved = _resolve_program_level(v)
+        if resolved is None:
+            raise ValueError(f"Programme must be one of: {', '.join(_PROGRAM_LEVEL_VALUES)}.")
+        return resolved
 
     @model_validator(mode="after")
     def set_course_type(self):
@@ -263,6 +275,7 @@ async def list_courses_available_to_my_department(
         "course_id": str(a.course_id),
         "course_number": a.course.course_number if a.course else None,
         "course_title": a.course.title if a.course else None,
+        "program_level": a.course.program_level if a.course else None,
         "credit_structure": a.course.credit_structure if a.course else None,
         "owning_department_id": str(a.course.department_id) if a.course and a.course.department_id else None,
         "owning_department_name": a.course.department.name if a.course and a.course.department else None,
@@ -326,8 +339,10 @@ async def create_course(
     # is NOT unique, even within a department (confirmed AVFU business case:
     # the same department can legitimately run "RES101" for both "Research
     # (Semester II)" and "Research (Semester IV)"). Only an EXACT duplicate —
-    # same department, same code, AND same normalized title — is rejected
-    # here; a same-code-different-title course is silently allowed. This
+    # same department, same code, same normalized title, AND same Programme
+    # Level (`Course.program_level`, e.g. UG/PG/PhD — NOT the ams_programs
+    # master table) — is rejected here; a same-code-different-title course,
+    # or the same code+title at a different Programme Level, is allowed. This
     # endpoint intentionally does NOT implement the bulk-upload's warning/
     # confirmation workflow: it is a single synchronous create action with
     # no existing preview step to hang a warning off, and the task scoping
@@ -336,13 +351,16 @@ async def create_course(
     # blocks the legitimate same-code case) — see docs/BUSINESS_LOGIC.md.
     norm_incoming_title = _normalize_title(body.title)
     existing = await db.execute(
-        select(Course.id, Course.title).where(Course.department_id == body.department_id, Course.course_number == body.course_number)
+        select(Course.id, Course.title).where(
+            Course.department_id == body.department_id, Course.course_number == body.course_number,
+            Course.program_level == body.program_level,
+        )
     )
     for existing_id, existing_title in existing.all():
         if _normalize_title(existing_title) == norm_incoming_title:
             raise HTTPException(
                 409,
-                f"A course with this code and the same title already exists in this department (course ID {existing_id}).",
+                f"A course with this code, the same title and the same Programme ({body.program_level}) already exists in this department (course ID {existing_id}).",
             )
     c = Course(**body.model_dump(), created_by=user.id)
     db.add(c)
@@ -404,8 +422,11 @@ async def update_course(
 
     # Course-code duplicate-detection fix (this revision) — same rule as
     # create_course: only an EXACT duplicate (same department, same code,
-    # same normalized title) is rejected; a same-code-different-title
-    # course is allowed. `final_department_id` is the department this
+    # same normalized title, same Programme Level) is rejected; a
+    # same-code-different-title course, or the same code+title at a
+    # different Programme Level, is allowed. The PUT body is a full
+    # replacement (CourseIn), so `body.program_level` is the course's final
+    # level. `final_department_id` is the department this
     # course will actually have AFTER this update: an explicit
     # body.department_id (already authorization-checked above — HOD can
     # only ever supply their own, or omit it) if provided, else the
@@ -418,6 +439,7 @@ async def update_course(
         select(Course.id, Course.title).where(
             Course.department_id == final_department_id,
             Course.course_number == body.course_number,
+            Course.program_level == body.program_level,
             Course.id != course_id,
         )
     )
@@ -425,7 +447,7 @@ async def update_course(
         if _normalize_title(other_title) == norm_incoming_title:
             raise HTTPException(
                 409,
-                f"A course with this code and the same title already exists in this department (course ID {other_id}).",
+                f"A course with this code, the same title and the same Programme ({body.program_level}) already exists in this department (course ID {other_id}).",
             )
 
     for k, v in body.model_dump(exclude_none=True).items():
@@ -575,9 +597,13 @@ async def _validate_course_bulk_rows(
     and "Research (Semester IV)"). Two rows/records sharing (department_id,
     course_number) are therefore compared on TITLE too, via `_normalize_title`
     (whitespace/case-insensitive, nothing else folded):
-      * same department + same code + SAME normalized title  -> a genuine
-        duplicate -> added to `findings` (hard reject, no override possible,
-        exactly like every other field-validation finding).
+      * same department + same code + SAME normalized title + SAME Programme
+        Level (`Course.program_level`: UG/PG/PhD — not the ams_programs
+        master table) -> a genuine duplicate -> added to `findings` (hard
+        reject, no override possible, exactly like every other
+        field-validation finding).
+      * same department + same code + same normalized title but a DIFFERENT
+        Programme Level -> a distinct, allowed course (no finding, no warning).
       * same department + same code + DIFFERENT normalized title -> a
         `warnings` entry (informational; does not by itself block creation —
         the caller decides whether to require confirmation).
@@ -589,22 +615,24 @@ async def _validate_course_bulk_rows(
     department_names = {did: name for did, code, name in department_rows}
     hod_department_label = department_names.get(force_department_id) if force_department_id else None
 
-    # (department_id, UPPERCASE course_number) -> [(existing course id, existing title), ...]
-    # — a list, not a single value, because MULTIPLE existing courses can
-    # legitimately share the same pair now (that is the entire point of
-    # this fix); each one is checked against the incoming title separately.
-    existing_by_pair: dict[tuple[Optional[UUID], str], list[tuple[UUID, str]]] = {}
-    for existing_id, dept_id, number, existing_title in (
-        await db.execute(select(Course.id, Course.department_id, Course.course_number, Course.title))
+    # (department_id, UPPERCASE course_number) -> [(existing course id, existing title, existing
+    # Programme Level), ...] — a list, not a single value, because MULTIPLE
+    # existing courses can legitimately share the same pair now (that is the
+    # entire point of this fix); each one is checked against the incoming
+    # title AND Programme Level separately: only all four of department,
+    # code, normalized title and level matching is a duplicate.
+    existing_by_pair: dict[tuple[Optional[UUID], str], list[tuple[UUID, str, str]]] = {}
+    for existing_id, dept_id, number, existing_title, existing_level in (
+        await db.execute(select(Course.id, Course.department_id, Course.course_number, Course.title, Course.program_level))
     ).all():
-        existing_by_pair.setdefault((dept_id, number.upper()), []).append((existing_id, existing_title))
+        existing_by_pair.setdefault((dept_id, number.upper()), []).append((existing_id, existing_title, existing_level))
 
     findings: list[dict] = []
     warnings: list[dict] = []
-    # Same key shape as existing_by_pair — (row_no, raw_title, normalized_title)
-    # per already-seen row, so a later row is checked against EVERY earlier
-    # row sharing its pair, not just the most recent one.
-    seen_by_pair: dict[tuple[Optional[UUID], str], list[tuple[int, str, str]]] = {}
+    # Same key shape as existing_by_pair — (row_no, raw_title, normalized_title,
+    # Programme Level) per already-seen row, so a later row is checked against
+    # EVERY earlier row sharing its pair, not just the most recent one.
+    seen_by_pair: dict[tuple[Optional[UUID], str], list[tuple[int, str, str, str]]] = {}
     row_payload: dict[int, dict] = {}
 
     for entry in rows:
@@ -625,10 +653,12 @@ async def _validate_course_bulk_rows(
         title = v.get("Course Title", "").strip()
 
         program_level = "UG"
+        level_valid = True
         raw_level = v.get("Programme", "")
         if raw_level:
             resolved_level = _resolve_program_level(raw_level)
             if resolved_level is None:
+                level_valid = False
                 add("Programme", raw_level, f"Invalid Programme. Allowed values: {', '.join(_PROGRAM_LEVEL_VALUES)}.")
             else:
                 program_level = resolved_level
@@ -696,18 +726,22 @@ async def _validate_course_bulk_rows(
         # resolved for this row — an unresolved department/missing title
         # already carries its own finding above and excludes the row from
         # row_payload regardless, so there is no meaningful comparison yet.
-        if course_number and title and department_id_value:
+        # (An invalid Programme value likewise already carries its own finding.)
+        if course_number and title and department_id_value and level_valid:
             pair = (department_id_value, course_number)
             norm_title = _normalize_title(title)
             dept_label = department_names.get(department_id_value) or (raw_dept.strip() if raw_dept else "this department")
 
-            for existing_id, existing_title in existing_by_pair.get(pair, []):
+            for existing_id, existing_title, existing_level in existing_by_pair.get(pair, []):
                 if _normalize_title(existing_title) == norm_title:
-                    add(
-                        "Course Number", raw_number,
-                        f"Duplicate course: {dept_label} already has a course with this code and the same title "
-                        f"(existing course ID {existing_id}, title \"{existing_title}\").",
-                    )
+                    if existing_level == program_level:
+                        add(
+                            "Course Number", raw_number,
+                            f"Duplicate course: {dept_label} already has a course with this code, the same title "
+                            f"and the same Programme ({program_level}) (existing course ID {existing_id}, title \"{existing_title}\").",
+                        )
+                    # else: same code + title at a DIFFERENT Programme Level is a
+                    # distinct, allowed course — neither a duplicate nor a warning.
                 else:
                     warnings.append({
                         "row": row_no,
@@ -722,16 +756,18 @@ async def _validate_course_bulk_rows(
                         ),
                     })
 
-            for other_row_no, other_raw_title, other_norm_title in seen_by_pair.get(pair, []):
+            for other_row_no, other_raw_title, other_norm_title, other_level in seen_by_pair.get(pair, []):
                 if other_norm_title == norm_title:
-                    add(
-                        "Course Number", raw_number,
-                        f"Duplicate course number and title within the uploaded file (also row {other_row_no}).",
-                    )
-                    findings.append({
-                        "row": other_row_no, "column": "Course Number", "value": raw_number,
-                        "error": f"Duplicate course number and title within the uploaded file (also row {row_no}).",
-                    })
+                    if other_level == program_level:
+                        add(
+                            "Course Number", raw_number,
+                            f"Duplicate course number, title and Programme ({program_level}) within the uploaded file (also row {other_row_no}).",
+                        )
+                        findings.append({
+                            "row": other_row_no, "column": "Course Number", "value": raw_number,
+                            "error": f"Duplicate course number, title and Programme ({program_level}) within the uploaded file (also row {row_no}).",
+                        })
+                    # else: same code + title at a different Programme Level — allowed.
                 else:
                     warnings.append({
                         "row": row_no,
@@ -746,7 +782,7 @@ async def _validate_course_bulk_rows(
                         ),
                     })
 
-            seen_by_pair.setdefault(pair, []).append((row_no, title, norm_title))
+            seen_by_pair.setdefault(pair, []).append((row_no, title, norm_title, program_level))
 
         if row_findings:
             findings.extend(row_findings)
@@ -1001,6 +1037,9 @@ def _offering_dict(o: CourseOffering, enrolled: int) -> dict:
         "semester_id": str(o.semester_id), "course_id": str(o.course_id),
         "course_number": o.course.course_number if o.course else None,
         "course_title": o.course.title if o.course else None,
+        # Programme Level (Course.program_level: UG/PG/PhD) — lets selectors tell
+        # apart two courses that share department + code + title but differ by level.
+        "program_level": o.course.program_level if o.course else None,
         "credit_structure": o.course.credit_structure if o.course else None,
         # Registration Card / 20-credit task — a numeric credit value alongside
         # the existing display-only credit_structure string, so the frontend
@@ -1205,6 +1244,7 @@ async def get_offering(offering_id: UUID, db: AsyncSession = Depends(get_db), us
         "course_id": str(o.course_id),
         "course_number": o.course.course_number if o.course else None,
         "course_title": o.course.title if o.course else None,
+        "program_level": o.course.program_level if o.course else None,
         "credit_structure": o.course.credit_structure if o.course else None,
         "category": o.course.category if o.course else None,
         "credit_type": o.course.credit_type if o.course else None,
