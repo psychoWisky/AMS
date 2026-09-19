@@ -297,6 +297,11 @@ async def list_courses(
         if not user.active_department_id:
             return []
         q = q.where(Course.department_id == user.active_department_id)
+    elif user.active_role == UserRole.FACULTY:
+        # BUSINESS_LOGIC.md Section Q.1 — Faculty has no generic course-
+        # catalogue need ("Teacher Courses" is their course surface); this
+        # list was the one catalogue endpoint left open. Same 403 as get_course.
+        raise HTTPException(403, "Faculty do not have access to the course catalogue. Use Teacher Courses.")
     elif department_id:
         q = q.where(Course.department_id == department_id)
     result = await db.execute(q.order_by(Course.course_number))

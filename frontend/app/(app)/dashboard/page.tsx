@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { useUser, useRole } from "@/stores/auth.store";
 import { ROLES } from "@/lib/utils";
+import { canAccessRoute } from "@/lib/navigation";
 import {
   GraduationCap, BookOpen, CalendarDays, ClipboardList, BarChart3, Bell,
   IdCard, Coins, FlaskConical, ClipboardCheck, FileText, FileSpreadsheet,
@@ -195,8 +196,10 @@ export default function DashboardPage() {
     { key: "advisory-committee", label: "Advisory Committee", icon: GraduationCap, href: "/research", desc: "Advisory committees, PhD tracking", color: "bg-green-50 text-green-700" },
     { key: "notifications", label: "Notifications", icon: Bell, href: "/notifications", desc: `${notifications.length} unread`, color: "bg-red-50 text-red-700" },
   ];
-  const hiddenForFaculty = new Set(["courses", "enrollment"]);
-  const cards = role === "faculty" ? allCards.filter((c) => !hiddenForFaculty.has(c.key)) : allCards;
+  // Only cards for pages the ACTIVE role can actually open (same route-access
+  // list as the sidebar/route guard) — this subsumes the Faculty exclusions
+  // described above (Courses/Enrollment are not Faculty routes).
+  const cards = allCards.filter((c) => canAccessRoute(c.href, role));
 
   return (
     <div className="p-6 max-w-6xl mx-auto">

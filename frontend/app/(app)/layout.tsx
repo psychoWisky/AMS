@@ -3,6 +3,8 @@ import { useState, useEffect } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { useIsLoggedIn, useUser } from "@/stores/auth.store";
 import { AMSSidebar } from "@/components/layouts/sidebar";
+import { AccessDenied } from "@/components/ui/access-denied";
+import { canAccessRoute } from "@/lib/navigation";
 import { cn } from "@/lib/utils";
 
 // BUSINESS_LOGIC.md Section N (student profile-completion gating) — routes a
@@ -47,11 +49,18 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     return null;
   }
 
+  // Route guard (UX only — the backend authorizes every request itself).
+  // Decided from the session's ACTIVE role, never from the set of roles the
+  // account merely holds elsewhere, so an inactive assignment grants nothing.
+  // The page component is not mounted at all when denied, so it fires none
+  // of its role-restricted requests.
+  const routeAllowed = canAccessRoute(pathname, activeRole);
+
   return (
     <div className="min-h-screen bg-[#F5F7FA] text-gray-900">
       <AMSSidebar collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
       <main className={cn("transition-all duration-200 min-h-screen", collapsed ? "ml-16" : "ml-[220px]")}>
-        {children}
+        {routeAllowed ? children : <AccessDenied />}
       </main>
     </div>
   );

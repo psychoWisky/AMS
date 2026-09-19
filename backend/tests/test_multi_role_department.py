@@ -29,13 +29,14 @@ import sys
 import uuid
 
 import httpx
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, update
 
 from app.db.base import AsyncSessionLocal
 from app.main import app
 from app.core.security import create_access_token
 from app.models.user import User, UserRole, RefreshToken, UserRoleAssignment, Department
-from app.models.course import Course
+from app.models.course import Course, CourseOffering
+from app.models.academic import Semester
 
 _MARKER = "zztest_multirole"
 
@@ -553,6 +554,190 @@ async def test_removed_assignment_self_heals_active_context():
         await _cleanup_user(user_id)
 
 
+async def test_faculty_a_hod_b_forged_department_and_inactive_assignment():
+    name = "SECURITY — FACULTY@A + HOD@B: forged department ids are rejected, and the inactive assignment grants nothing"
+    user_id = await _create_test_user("forge")
+    course_prefix = "ZZTEST_FORGE_"
+    try:
+        await _add_role(user_id, "faculty", _DEPT_A)
+        await _add_role(user_id, "hod", _DEPT_B)
+        # A course OWNED BY department A, created by the Super Admin.
+        async with _client() as c:
+            r = await c.post("/api/v1/courses", headers=_super_headers(), json={
+                "course_number": f"{course_prefix}{uuid.uuid4().hex[:6]}".upper(), "title": "Owned by A", "department_id": str(_DEPT_A)})
+        assert r.status_code == 201, r.text
+        a_course_id = r.json()["id"]
+
+        token, rt_id = await _mint_session(user_id)
+        try:
+            me = (await _me(token)).json()
+            faculty_a_id = _assignment_id_for(me, "faculty", _DEPT_A)
+            hod_b_id = _assignment_id_for(me, "hod", _DEPT_B)
+            auth = {"Authorization": f"Bearer {token}"}
+
+            def new_course(dept, tag):
+                return {"course_number": f"{course_prefix}{tag}{uuid.uuid4().hex[:5]}".upper(), "title": "Forge test", "department_id": str(dept)}
+
+            # ── Active as FACULTY@A: the inactive HOD@B assignment grants nothing.
+            assert (await _switch_role(token, faculty_a_id)).status_code == 200
+            async with _client() as c:
+                for dept in (_DEPT_A, _DEPT_B):
+                    r = await c.post("/api/v1/courses", headers=auth, json=new_course(dept, "F"))
+                    assert r.status_code == 403, f"Faculty@A create in {dept} must be 403, got {r.status_code} {r.text}"
+                r = await c.get("/api/v1/auth/users", headers=auth)
+                assert r.status_code == 403, f"HOD-restricted GET /auth/users as Faculty@A: {r.status_code}"
+                r = await c.post("/api/v1/auth/faculty", headers=auth, json={})
+                assert r.status_code in (403,), f"HOD-only POST /auth/faculty as Faculty@A must be 403 (before body validation), got {r.status_code}"
+
+            # ── Active as HOD@B: department is B, whatever the body claims.
+            assert (await _switch_role(token, hod_b_id)).status_code == 200
+            forged = new_course(_DEPT_A, "X")
+            async with _client() as c:
+                r = await c.post("/api/v1/courses", headers=auth, json=forged)
+                assert r.status_code == 403, f"HOD@B creating for department A must be 403, got {r.status_code} {r.text}"
+                r = await c.post("/api/v1/courses", headers=auth, json=new_course(_DEPT_B, "OK"))
+                assert r.status_code == 201, r.text
+                b_course_id = r.json()["id"]
+                r = await c.put(f"/api/v1/courses/{a_course_id}", headers=auth,
+                                json={"course_number": "ZZTEST_FORGE_X", "title": "hijack", "department_id": str(_DEPT_A)})
+                assert r.status_code == 403, f"HOD@B updating a department-A course must be 403, got {r.status_code}"
+                r = await c.put(f"/api/v1/courses/{b_course_id}", headers=auth,
+                                json={"course_number": "ZZTEST_FORGE_Y", "title": "move", "department_id": str(_DEPT_A)})
+                assert r.status_code == 403, f"HOD@B moving its own course into department A must be 403, got {r.status_code}"
+                r = await c.post(f"/api/v1/courses/{a_course_id}/availability", headers=auth, json={"department_id": str(_DEPT_A)})
+                assert r.status_code == 403, f"HOD@B managing department A availability must be 403, got {r.status_code}"
+                r = await c.post("/api/v1/courses/offerings", headers=auth, json={
+                    "calendar_id": str(uuid.uuid4()), "semester_id": str(uuid.uuid4()), "course_id": str(a_course_id),
+                    "department_id": str(_DEPT_A), "faculty_ids": [str(user_id)], "leader_id": str(user_id)})
+                assert r.status_code == 403, f"HOD@B creating an offering for department A must be 403, got {r.status_code} {r.text}"
+
+            async with AsyncSessionLocal() as db:
+                owned = (await db.execute(select(Course.department_id).where(Course.id == uuid.UUID(b_course_id)))).scalar_one()
+                forged_rows = (await db.execute(select(Course.id).where(Course.course_number == forged["course_number"]))).scalars().all()
+                a_after = (await db.execute(select(Course.title, Course.department_id).where(Course.id == uuid.UUID(a_course_id)))).one()
+            assert owned == _DEPT_B, "HOD@B's course must be owned by department B"
+            assert not forged_rows, "the forged department-A course must not exist"
+            assert a_after == ("Owned by A", _DEPT_A), f"department A's course was modified: {a_after}"
+        finally:
+            async with AsyncSessionLocal() as db:
+                await db.execute(delete(RefreshToken).where(RefreshToken.id == rt_id))
+                await db.execute(delete(Course).where(Course.course_number.like(f"{course_prefix}%")))
+                await db.commit()
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, f"{type(e).__name__}: {e}")
+    finally:
+        async with AsyncSessionLocal() as db:
+            await db.execute(delete(Course).where(Course.course_number.like(f"{course_prefix}%")))
+            await db.commit()
+        await _cleanup_user(user_id)
+
+
+async def test_course_catalogue_list_faculty_blocked_others_unchanged():
+    name = "GET /courses: Faculty -> 403 (also when Faculty@A is merely inactive-HOD@B); HOD@B -> own dept only; Student unchanged"
+    user_f = await _create_test_user("catfac")
+    user_m = await _create_test_user("catmulti")
+    user_s = await _create_test_user("catstud")
+    try:
+        await _add_role(user_f, "faculty", _DEPT_A)
+        await _add_role(user_m, "faculty", _DEPT_A)
+        await _add_role(user_m, "hod", _DEPT_B)
+        await _add_role(user_s, "student")
+        tok_f, rt_f = await _mint_session(user_f)
+        tok_m, rt_m = await _mint_session(user_m)
+        tok_s, rt_s = await _mint_session(user_s)
+        try:
+            async def list_courses(tok):
+                async with _client() as c:
+                    return await c.get("/api/v1/courses", headers={"Authorization": f"Bearer {tok}"})
+
+            r = await list_courses(tok_f)
+            assert r.status_code == 403, f"Faculty GET /courses must be 403, got {r.status_code}"
+
+            me = (await _me(tok_m)).json()
+            fac_a = _assignment_id_for(me, "faculty", _DEPT_A)
+            hod_b = _assignment_id_for(me, "hod", _DEPT_B)
+            assert (await _switch_role(tok_m, fac_a)).status_code == 200
+            r = await list_courses(tok_m)
+            assert r.status_code == 403, f"Faculty@A (holding HOD@B, inactive) must be 403, got {r.status_code}"
+            assert (await _switch_role(tok_m, hod_b)).status_code == 200
+            r = await list_courses(tok_m)
+            assert r.status_code == 200, r.text
+            assert all(c["department_id"] == str(_DEPT_B) for c in r.json()), "HOD@B must only see department B courses"
+            assert (await _switch_role(tok_m, fac_a)).status_code == 200
+            assert (await list_courses(tok_m)).status_code == 403, "switching back to Faculty@A must block again"
+
+            r = await list_courses(tok_s)
+            assert r.status_code == 200 and r.json() == [], f"scope-less Student keeps the existing scoped (empty) result, got {r.status_code} {r.text[:80]}"
+            r = await list_courses(_SUPER_TOKEN)
+            assert r.status_code == 200 and len(r.json()) > 0, "Super Admin unchanged"
+        finally:
+            async with AsyncSessionLocal() as db:
+                await db.execute(delete(RefreshToken).where(RefreshToken.id.in_([rt_f, rt_m, rt_s])))
+                await db.commit()
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, f"{type(e).__name__}: {e}")
+    finally:
+        for uid in (user_f, user_m, user_s):
+            await _cleanup_user(uid)
+
+
+async def test_faculty_teacher_courses_and_assigned_access_still_work():
+    name = "Faculty still reaches Teacher Courses surfaces: own offerings (mine/default), own assigned course, own offering detail; unassigned course 403"
+    user_id = await _create_test_user("teacher")
+    prefix = "ZZTEST_TEACH_"
+    offering_id = None
+    try:
+        async with AsyncSessionLocal() as db:
+            await db.execute(update(User).where(User.id == user_id).values(department_id=_DEPT_A))
+            sem = (await db.execute(select(Semester.id, Semester.calendar_id).limit(1))).one()
+            await db.commit()
+        await _add_role(user_id, "faculty", _DEPT_A)
+
+        async def make_course(tag):
+            async with _client() as c:
+                r = await c.post("/api/v1/courses", headers=_super_headers(), json={
+                    "course_number": f"{prefix}{tag}{uuid.uuid4().hex[:5]}".upper(), "title": f"Teach {tag}", "department_id": str(_DEPT_A)})
+            assert r.status_code == 201, r.text
+            return r.json()["id"]
+
+        assigned_course, other_course = await make_course("A"), await make_course("B")
+        async with _client() as c:
+            r = await c.post("/api/v1/courses/offerings", headers=_super_headers(), json={
+                "calendar_id": str(sem.calendar_id), "semester_id": str(sem.id), "course_id": assigned_course,
+                "department_id": str(_DEPT_A), "faculty_ids": [str(user_id)], "leader_id": str(user_id)})
+        assert r.status_code == 201, r.text
+        offering_id = r.json()["id"]
+
+        token, rt_id = await _mint_session(user_id)
+        try:
+            h = {"Authorization": f"Bearer {token}"}
+            async with _client() as c:
+                for params in ({"mine": "true"}, {}):
+                    r = await c.get("/api/v1/courses/offerings/all", headers=h, params=params)
+                    assert r.status_code == 200, r.text
+                    assert [o["id"] for o in r.json()] == [offering_id], f"Faculty must see exactly their own offering ({params}), got {[o['id'] for o in r.json()]}"
+                assert (await c.get(f"/api/v1/courses/offerings/{offering_id}", headers=h)).status_code == 200
+                assert (await c.get(f"/api/v1/courses/{assigned_course}", headers=h)).status_code == 200, "assigned course must stay viewable"
+                assert (await c.get(f"/api/v1/courses/{other_course}", headers=h)).status_code == 403, "unassigned course must stay 403"
+                assert (await c.get("/api/v1/courses", headers=h)).status_code == 403
+        finally:
+            async with AsyncSessionLocal() as db:
+                await db.execute(delete(RefreshToken).where(RefreshToken.id == rt_id))
+                await db.commit()
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, f"{type(e).__name__}: {e}")
+    finally:
+        async with AsyncSessionLocal() as db:
+            # OfferingFaculty.faculty_id has no ON DELETE: the offering (which cascades it) must go before the user.
+            await db.execute(delete(CourseOffering).where(CourseOffering.course_id.in_(select(Course.id).where(Course.course_number.like(f"{prefix}%")))))
+            await db.execute(delete(Course).where(Course.course_number.like(f"{prefix}%")))
+            await db.commit()
+        await _cleanup_user(user_id)
+
+
 async def main() -> None:
     await _setup()
     try:
@@ -572,6 +757,9 @@ async def main() -> None:
             test_switch_role_rejects_foreign_assignment_id,
             test_switch_role_rejects_random_uuid,
             test_removed_assignment_self_heals_active_context,
+            test_faculty_a_hod_b_forged_department_and_inactive_assignment,
+            test_course_catalogue_list_faculty_blocked_others_unchanged,
+            test_faculty_teacher_courses_and_assigned_access_still_work,
         ]
         for scenario in scenarios:
             await scenario()

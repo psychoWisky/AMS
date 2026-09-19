@@ -2,7 +2,7 @@
 import { useState, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
-import { useRole, useUser } from "@/stores/auth.store";
+import { useRole, useActiveDepartmentId } from "@/stores/auth.store";
 import { toast } from "sonner";
 import { ADMIN_ROLES, COURSE_CATEGORY_LABELS, CREDIT_TYPE_LABELS } from "@/lib/utils";
 import { BookOpen, Plus, Search, Loader2, Globe, EyeOff, Pencil, Trash2, X, Crown, UserPlus, Upload } from "lucide-react";
@@ -49,7 +49,10 @@ const EMPTY_COURSE_FORM = { course_number: "", title: "", credit_theory: "3", cr
 
 export default function CoursesPage() {
   const role = useRole();
-  const user = useUser();
+  // The department of the ACTIVE role assignment (server-authoritative, updated
+  // on every role switch) — never the legacy `user.department_id`, which does
+  // not change when a multi-department user switches assignment.
+  const activeDepartmentId = useActiveDepartmentId();
   const qc = useQueryClient();
   const isAdmin = role ? ADMIN_ROLES.includes(role) : false;
   const isHod = role === "hod";
@@ -89,7 +92,7 @@ export default function CoursesPage() {
     queryKey: ["ams-departments"],
     queryFn: async () => (await api.get("/departments")).data,
   });
-  const hodDept = departments.find((d) => d.id === user?.department_id);
+  const hodDept = departments.find((d) => d.id === activeDepartmentId);
 
   const { data: courses = [], isLoading } = useQuery<Course[]>({
     queryKey: ["ams-courses"],
@@ -125,8 +128,8 @@ export default function CoursesPage() {
     // BUSINESS_LOGIC.md Section N.4 — for HOD this is scoped to their own
     // department via the department_id param; the backend also enforces this
     // scope server-side for HOD regardless of what's requested here.
-    queryKey: ["ams-faculty", isHod ? user?.department_id : "all"],
-    queryFn: async () => (await api.get("/auth/users", { params: isHod ? { department_id: user?.department_id } : {} }))
+    queryKey: ["ams-faculty", isHod ? activeDepartmentId : "all"],
+    queryFn: async () => (await api.get("/auth/users", { params: isHod ? { department_id: activeDepartmentId } : {} }))
       .data.filter((u: { role: string }) => ["faculty","hod"].includes(u.role)),
     enabled: showOfferingCreate,
   });
@@ -199,7 +202,7 @@ export default function CoursesPage() {
 
   function openCreate() {
     setEditCourse(null);
-    setForm({ ...EMPTY_COURSE_FORM, department_id: isHod ? (user?.department_id ?? "") : "" });
+    setForm({ ...EMPTY_COURSE_FORM, department_id: isHod ? (activeDepartmentId ?? "") : "" });
     setShowCreate(true);
   }
   function openEdit(c: Course) {
@@ -221,7 +224,7 @@ export default function CoursesPage() {
       calendar_id: offeringForm.calendar_id,
       semester_id: offeringForm.semester_id,
       course_id: offeringForm.course_id,
-      department_id: isHod ? user?.department_id : offeringForm.department_id,
+      department_id: isHod ? activeDepartmentId : offeringForm.department_id,
       max_enrollment: parseInt(offeringForm.max_enrollment),
       section: offeringForm.section || null,
       faculty_ids: selectedFaculty.map((f) => f.id),
@@ -621,7 +624,7 @@ export default function CoursesPage() {
                     <td className="px-4 py-3 text-gray-600">{row.owning_department_name ?? "—"}</td>
                     <td className="px-4 py-3">
                       <button onClick={() => setConfirm({
-                        action: () => removeAvailability.mutate({ courseId: row.course_id, departmentId: user?.department_id ?? "" }),
+                        action: () => removeAvailability.mutate({ courseId: row.course_id, departmentId: activeDepartmentId ?? "" }),
                         title: "Remove Availability", message: `Remove ${row.course_number} — ${row.course_title} from your department's available courses? This does not affect ${row.owning_department_name ?? "the owning department"}'s course record.`,
                         confirmLabel: "Yes, Remove", confirmClassName: "bg-red-600 hover:bg-red-700 text-white",
                       })} className="flex items-center gap-1 text-sm font-semibold text-red-600 hover:underline"><EyeOff size={12} /> Remove</button>
@@ -651,7 +654,7 @@ export default function CoursesPage() {
               {availabilitySearchResults.length === 0 ? (
                 <p className="text-sm text-gray-500 p-3">No matching courses.</p>
               ) : availabilitySearchResults
-                .filter((c) => c.department_id !== user?.department_id)
+                .filter((c) => c.department_id !== activeDepartmentId)
                 .map((c) => (
                 <button key={c.id} type="button" onClick={() => addAvailability.mutate(c.id)} disabled={addAvailability.isPending}
                   className="w-full flex items-center justify-between text-left px-3 py-2.5 text-sm hover:bg-[#E6F4F4] border-b border-gray-50 last:border-0 disabled:opacity-50">
