@@ -73,7 +73,7 @@ export default function UsersPage() {
   const { data: departments = [] } = useQuery<DepartmentOpt[]>({
     queryKey: ["ams-departments"],
     queryFn: async () => (await api.get("/departments")).data,
-    enabled: showCreate || !!editUser,
+    enabled: showCreate || !!editUser || !!rolesUser,
   });
 
   const { data: programs = [] } = useQuery<ProgramOpt[]>({
