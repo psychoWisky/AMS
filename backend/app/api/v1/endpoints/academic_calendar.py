@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from app.db.base import get_db
 from app.core.dependencies import get_current_user, require_roles
@@ -43,6 +43,32 @@ class SemesterIn(BaseModel):
     exam_end: Optional[date] = None
     result_declaration: Optional[date] = None
     holidays: Optional[list] = None
+
+class SemesterUpdate(BaseModel):
+    """Partial-update body for PUT /semesters/{id}. Every field is optional;
+    only fields actually present in the request are applied, so omitted fields
+    (including sem_type, which SemesterIn would otherwise reset to "odd") keep
+    their stored value. The four optional dates and registration_end/holidays
+    may be sent as null to clear them; the NOT NULL columns may not."""
+    calendar_id: Optional[UUID] = None
+    name: Optional[str] = None
+    sem_type: Optional[str] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    registration_start: Optional[date] = None
+    registration_end: Optional[date] = None
+    exam_start: Optional[date] = None
+    exam_end: Optional[date] = None
+    result_declaration: Optional[date] = None
+    holidays: Optional[list] = None
+
+    @field_validator("calendar_id", "name", "sem_type", "start_date", "end_date", mode="before")
+    @classmethod
+    def _required_columns_not_null(cls, v):
+        if v is None:
+            raise ValueError("This field cannot be null.")
+        return v
+
 
 class SemesterOut(BaseModel):
     id: UUID; calendar_id: UUID; name: str; sem_type: str
@@ -175,12 +201,14 @@ async def get_semester(sem_id: UUID, db: AsyncSession = Depends(get_db), _: User
 
 @router.put("/semesters/{sem_id}")
 async def update_semester(
-    sem_id: UUID, body: SemesterIn, db: AsyncSession = Depends(get_db),
+    sem_id: UUID, body: SemesterUpdate, db: AsyncSession = Depends(get_db),
     _: User = Depends(require_roles(UserRole.SUPER_ADMIN)),
 ):
     sem = await db.get(Semester, sem_id)
     if not sem: raise HTTPException(404, "Semester not found.")
-    for k, v in body.model_dump(exclude_none=True).items():
+    # exclude_unset: omitted fields are preserved; an explicit null clears a
+    # nullable column (the optional dates).
+    for k, v in body.model_dump(exclude_unset=True).items():
         setattr(sem, k, v)
     await db.commit(); return {"message": "Updated."}
 

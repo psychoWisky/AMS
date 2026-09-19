@@ -88,8 +88,9 @@ export default function AdmitCardPage() {
     const win = window.open("", "_blank", "width=900,height=750");
     if (!win) return;
     const card = admitCard;
+    const fmtLong = (d: string) => new Date(d).toLocaleDateString("en-IN", { day: "2-digit", month: "long", year: "numeric" });
     const examPeriod = card.exam.exam_start
-      ? `${new Date(card.exam.exam_start).toLocaleDateString("en-IN", { day: "2-digit", month: "long", year: "numeric" })} to ${new Date(card.exam.exam_end!).toLocaleDateString("en-IN", { day: "2-digit", month: "long", year: "numeric" })}`
+      ? (card.exam.exam_end ? `${fmtLong(card.exam.exam_start)} to ${fmtLong(card.exam.exam_end)}` : `From ${fmtLong(card.exam.exam_start)}`)
       : "To be announced";
     const generatedOn = new Date(card.generated_at).toLocaleDateString("en-IN", { day: "2-digit", month: "long", year: "numeric" });
 
@@ -458,7 +459,7 @@ export default function AdmitCardPage() {
                   { label: "University ID (UID)", value: admitCard.student.uid },
                   { label: "Email", value: admitCard.student.email },
                   { label: "Semester", value: admitCard.exam.semester_name },
-                  { label: "Exam Period", value: admitCard.exam.exam_start ? `${new Date(admitCard.exam.exam_start).toLocaleDateString("en-IN")} — ${new Date(admitCard.exam.exam_end!).toLocaleDateString("en-IN")}` : "To be announced" },
+                  { label: "Exam Period", value: admitCard.exam.exam_start ? (admitCard.exam.exam_end ? `${new Date(admitCard.exam.exam_start).toLocaleDateString("en-IN")} — ${new Date(admitCard.exam.exam_end).toLocaleDateString("en-IN")}` : `From ${new Date(admitCard.exam.exam_start).toLocaleDateString("en-IN")}`) : "To be announced" },
                 ].map(({ label, value }) => (
                   <div key={label} className="border border-gray-200 rounded-xl p-3">
                     <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">{label}</p>

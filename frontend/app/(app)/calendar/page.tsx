@@ -21,6 +21,9 @@ interface Semester { id: string; calendar_id: string; name: string; sem_type: st
 // legitimately rely on its broader membership).
 const CALENDAR_ADMIN_ROLES = ["super_admin"];
 
+// Semester dates that are optional at every level (form, API, database).
+const OPTIONAL_SEMESTER_DATES = ["registration_start", "exam_start", "exam_end", "result_declaration"] as const;
+
 const STATUS_COLOR: Record<string, string> = {
   draft: "bg-gray-100 text-gray-700",
   active: "bg-green-100 text-green-700",
@@ -67,7 +70,7 @@ export default function CalendarPage() {
   });
 
   const createSem = useMutation({
-    mutationFn: (d: typeof semForm & { calendar_id: string }) => api.post("/academic/semesters", d),
+    mutationFn: (d: Record<string, string>) => api.post("/academic/semesters", d),
     onSuccess: () => { toast.success("Semester created."); qc.invalidateQueries({ queryKey: ["ams-semesters", expanded] }); setShowSemCreate(null); },
     onError: (err: unknown) => {
       const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
@@ -116,7 +119,7 @@ export default function CalendarPage() {
   });
 
   const editSem = useMutation({
-    mutationFn: ({ id, data }: { id: string; data: typeof editSemForm }) => api.put(`/academic/semesters/${id}`, data),
+    mutationFn: ({ id, data }: { id: string; data: Record<string, string | null> }) => api.put(`/academic/semesters/${id}`, data),
     onSuccess: () => { toast.success("Semester updated."); qc.invalidateQueries({ queryKey: ["ams-semesters", expanded] }); setEditSemTarget(null); },
     onError: (err: unknown) => {
       const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
@@ -264,7 +267,10 @@ export default function CalendarPage() {
                           if (!semForm.name.trim() || !semForm.start_date || !semForm.end_date) {
                             toast.error("Semester name, start date and end date are required."); return;
                           }
-                          createSem.mutate({ ...semForm, calendar_id: cal.id });
+                          // Optional dates left blank are omitted (the backend rejects "" as a date).
+                          const payload: Record<string, string> = { ...semForm, calendar_id: cal.id };
+                          for (const k of OPTIONAL_SEMESTER_DATES) if (!payload[k]) delete payload[k];
+                          createSem.mutate(payload);
                         }}
                         disabled={createSem.isPending}
                         className="flex-1 py-2 bg-[#0D6E6E] text-white rounded-lg text-base font-bold">
@@ -398,7 +404,18 @@ export default function CalendarPage() {
                   if (!editSemForm.name.trim() || !editSemForm.start_date || !editSemForm.end_date) {
                     toast.error("Semester name, start date and end date are required."); return;
                   }
-                  editSem.mutate({ id: editSemTarget.id, data: editSemForm });
+                  // Send only the fields the user actually changed, so untouched
+                  // dates are never overwritten; a cleared optional date is sent
+                  // as null (explicit clear), never as "".
+                  const original = editSemTarget as unknown as Record<string, string | null>;
+                  const changes: Record<string, string | null> = {};
+                  for (const key of Object.keys(editSemForm) as (keyof typeof editSemForm)[]) {
+                    if (editSemForm[key] === (original[key] ?? "")) continue;
+                    const isOptionalDate = (OPTIONAL_SEMESTER_DATES as readonly string[]).includes(key);
+                    changes[key] = editSemForm[key] === "" && isOptionalDate ? null : editSemForm[key];
+                  }
+                  if (Object.keys(changes).length === 0) { setEditSemTarget(null); return; }
+                  editSem.mutate({ id: editSemTarget.id, data: changes });
                 }}
                 disabled={editSem.isPending}
                 className="flex-1 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-base font-bold hover:bg-[#178F8F] disabled:opacity-60">
