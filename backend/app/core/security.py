@@ -33,6 +33,21 @@ def create_refresh_token(subject: str) -> str:
     return _make_token({"sub": subject, "type": "refresh"},
                        timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS))
 
+def create_bulk_upload_confirmation_token(subject: str, file_hash: str, warning_count: int) -> str:
+    """Course bulk-upload duplicate-warning confirmation fix — a short-lived,
+    HMAC-signed (same SECRET_KEY/algorithm as access/refresh tokens) token
+    proving a specific user was actually shown a specific, byte-identical
+    file's duplicate-code warnings before confirming. `file_hash` (sha256 of
+    the raw uploaded bytes) is the anti-tamper binding: the confirm step
+    re-hashes whatever file is re-submitted and rejects a mismatch outright,
+    so a client can never preview file A's (mild) warnings and then use the
+    resulting token to silently push through a completely different file B.
+    `warning_count` is carried only for a cheap sanity check, not itself a
+    security boundary. Contains no course/user PII beyond the user's own id
+    (`sub`) they are already authenticated as."""
+    data = {"sub": subject, "type": "course_bulk_upload_confirm", "file_hash": file_hash, "warning_count": warning_count}
+    return _make_token(data, timedelta(minutes=15))
+
 def decode_token(token: str, token_type: str = "access") -> Optional[dict]:
     """Multi-role/role-switching task — returns the full decoded payload
     (not just `sub`) so callers can also read the `sid` session-pointer claim

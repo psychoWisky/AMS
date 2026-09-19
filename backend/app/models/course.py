@@ -9,12 +9,26 @@ from app.db.base import Base
 class Course(Base):
     __tablename__ = "ams_courses"
     id: Mapped[uuid.UUID]       = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    # Course-code department-scoping fix (this revision) — `course_number`
-    # was previously globally unique (`unique=True`), which incorrectly
-    # rejected e.g. VETM using "CS101" just because AGRO already had it. The
-    # uniqueness boundary is now the (department_id, course_number) pair —
-    # see the composite UniqueConstraint below and migration
-    # `0019_course_dept_scoped_number`.
+    # Course-code uniqueness history (do not reintroduce a DB constraint
+    # here without re-reading this):
+    #   - originally `unique=True` (globally unique) — wrong: blocked two
+    #     different departments from ever sharing a code.
+    #   - migration 0019 replaced that with UNIQUE(department_id,
+    #     course_number) — also wrong: real AVFU data legitimately has the
+    #     SAME department reuse a code across genuinely different courses
+    #     (e.g. "RES101" for both "Research (Semester II)" and "Research
+    #     (Semester IV)").
+    #   - migration 0020 removed that composite constraint entirely.
+    # `course_number` is now NOT unique in any scope at the database level.
+    # `Course.id` is the sole technical identity for a course — nothing may
+    # look a course up "by code" and assume at most one result. Genuine
+    # duplicate-course detection (same department + same code + same
+    # NORMALIZED title) is an application-level concern — see
+    # `app.api.v1.endpoints.courses`'s `_normalize_title` and the
+    # duplicate-checking logic in `create_course`/`update_course`/
+    # `_validate_course_bulk_rows` — deliberately not a DB constraint,
+    # since title is human-entered text needing normalization a portable
+    # unique index can't express.
     course_number: Mapped[str]  = mapped_column(String(50), nullable=False)
     title: Mapped[str]          = mapped_column(String(300), nullable=False)
     department_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_departments.id"))
@@ -39,15 +53,6 @@ class Course(Base):
     created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
-
-    # NOTE: department_id is nullable (a course may in principle have no
-    # department, e.g. a Super Admin-created course where department was
-    # left blank on the individual form). Postgres treats every NULL as
-    # distinct in a UNIQUE constraint, so two such departmentless courses
-    # could in theory share a course_number without violating this
-    # constraint — an accepted, narrow edge case since every course this
-    # revision's bulk-upload/HOD paths create always has a department.
-    __table_args__ = (UniqueConstraint("department_id", "course_number", name="uq_course_department_number"),)
 
     department: Mapped["Department | None"] = relationship("Department", foreign_keys=[department_id])
     offerings: Mapped[list["CourseOffering"]] = relationship("CourseOffering", back_populates="course")

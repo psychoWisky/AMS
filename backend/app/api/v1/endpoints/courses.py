@@ -23,8 +23,9 @@ per instruction not to silently invent open-question answers):
 """
 from typing import Optional, List
 from uuid import UUID
+import hashlib
 import io
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_
@@ -36,6 +37,7 @@ import openpyxl
 from app.db.base import get_db
 from app.core.dependencies import get_current_user, require_roles
 from app.core.config import settings
+from app.core.security import create_bulk_upload_confirmation_token, decode_token
 from app.core.bulk_upload import parse_bulk_upload_file
 from app.models.user import User, UserRole, Program, Department
 from app.models.course import Course, CourseOffering, OfferingFaculty, CourseAvailability
@@ -315,22 +317,35 @@ async def create_course(
     # department-scoping fix's uniqueness check below runs, never a
     # client-supplied value used un-checked.
     _authorize_department_manage(body.department_id, user)
-    # Course-code department-scoping fix (this revision) — uniqueness is
-    # scoped to (department_id, course_number), matching the new composite
-    # DB constraint (migration 0019); the same course number is allowed in
-    # a different department.
+    # Course-code duplicate-detection fix (this revision) — `course_number`
+    # is NOT unique, even within a department (confirmed AVFU business case:
+    # the same department can legitimately run "RES101" for both "Research
+    # (Semester II)" and "Research (Semester IV)"). Only an EXACT duplicate —
+    # same department, same code, AND same normalized title — is rejected
+    # here; a same-code-different-title course is silently allowed. This
+    # endpoint intentionally does NOT implement the bulk-upload's warning/
+    # confirmation workflow: it is a single synchronous create action with
+    # no existing preview step to hang a warning off, and the task scoping
+    # this change explicitly permits leaving single-course creation's UX
+    # alone as long as the underlying rule is correct (no DB constraint
+    # blocks the legitimate same-code case) — see docs/BUSINESS_LOGIC.md.
+    norm_incoming_title = _normalize_title(body.title)
     existing = await db.execute(
-        select(Course).where(Course.department_id == body.department_id, Course.course_number == body.course_number)
+        select(Course.id, Course.title).where(Course.department_id == body.department_id, Course.course_number == body.course_number)
     )
-    if existing.scalar_one_or_none():
-        raise HTTPException(409, "Course number already exists in this department.")
+    for existing_id, existing_title in existing.all():
+        if _normalize_title(existing_title) == norm_incoming_title:
+            raise HTTPException(
+                409,
+                f"A course with this code and the same title already exists in this department (course ID {existing_id}).",
+            )
     c = Course(**body.model_dump(), created_by=user.id)
     db.add(c)
     try:
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        raise HTTPException(409, "Course number already exists in this department.")
+        raise HTTPException(409, "Could not create course — the selected department may no longer exist.")
     await db.refresh(c, attribute_names=["department"])
     return CourseOut.from_orm(c)
 
@@ -382,24 +397,31 @@ async def update_course(
     if user.active_role == UserRole.HOD and body.department_id is not None and body.department_id != c.department_id:
         raise HTTPException(403, "You cannot move a course to a different department.")
 
-    # Course-code department-scoping fix (this revision) — uniqueness is
-    # scoped to (department_id, course_number). `final_department_id` is
-    # the department this course will actually have AFTER this update: an
-    # explicit body.department_id (already authorization-checked above —
-    # HOD can only ever supply their own, or omit it) if provided, else the
+    # Course-code duplicate-detection fix (this revision) — same rule as
+    # create_course: only an EXACT duplicate (same department, same code,
+    # same normalized title) is rejected; a same-code-different-title
+    # course is allowed. `final_department_id` is the department this
+    # course will actually have AFTER this update: an explicit
+    # body.department_id (already authorization-checked above — HOD can
+    # only ever supply their own, or omit it) if provided, else the
     # course's existing, unchanged department. Excludes the course's own
-    # row so a no-op update (same code, same department) never false-
-    # positives against itself.
+    # row so a no-op update (same code, same title, same department) never
+    # false-positives against itself.
     final_department_id = body.department_id if body.department_id is not None else c.department_id
+    norm_incoming_title = _normalize_title(body.title)
     dup_check = await db.execute(
-        select(Course.id).where(
+        select(Course.id, Course.title).where(
             Course.department_id == final_department_id,
             Course.course_number == body.course_number,
             Course.id != course_id,
         )
     )
-    if dup_check.scalar_one_or_none():
-        raise HTTPException(409, "Course number already exists in this department.")
+    for other_id, other_title in dup_check.all():
+        if _normalize_title(other_title) == norm_incoming_title:
+            raise HTTPException(
+                409,
+                f"A course with this code and the same title already exists in this department (course ID {other_id}).",
+            )
 
     for k, v in body.model_dump(exclude_none=True).items():
         setattr(c, k, v)
@@ -407,7 +429,7 @@ async def update_course(
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        raise HTTPException(409, "Course number already exists in this department.")
+        raise HTTPException(409, "Could not update course — the selected department may no longer exist.")
     return {"message": "Updated."}
 
 
@@ -482,6 +504,19 @@ def _normalize_course_number(raw: str) -> str:
     return raw.strip().upper()
 
 
+def _normalize_title(raw: str) -> str:
+    """Course-code duplicate-detection fix (this revision) — comparison key
+    for deciding whether two courses sharing the same (department,
+    course_number) are the SAME course (title differs only by whitespace/
+    case) or genuinely DIFFERENT courses (e.g. "Research (Semester II)" vs
+    "Research (Semester IV)"). Deliberately narrow: only whitespace and case
+    are folded — no punctuation stripping, no word removal, no semester
+    parsing. "Research (Semester II)" and "Research (Semester IV)" must
+    keep comparing as different strings; only "Research", " research ", and
+    "RESEARCH" should collapse to the same key."""
+    return raw.strip().casefold()
+
+
 def _resolve_program_level(raw: str) -> Optional[str]:
     return {"ug": "UG", "pg": "PG", "phd": "PhD"}.get(raw.strip().lower())
 
@@ -519,32 +554,52 @@ def _resolve_course_status(raw: str) -> Optional[str]:
 
 async def _validate_course_bulk_rows(
     rows: list[dict], db: AsyncSession, *, force_department_id: Optional[UUID],
-) -> tuple[list[dict], list[dict]]:
+) -> tuple[list[dict], list[dict], list[dict]]:
     """All-or-nothing validation — no database write happens here. Returns
-    (findings, valid_row_data); any non-empty `findings` means the caller
-    must create nothing at all, mirroring auth.py's bulk-upload philosophy
-    exactly. Duplicate course-number detection runs BEFORE any insert is
-    attempted (Section 6), both against the live database and within the
-    uploaded file itself, always compared on the normalized (uppercased)
-    form — never relying solely on the Postgres unique constraint.
+    (findings, warnings, valid_row_data); any non-empty `findings` means the
+    caller must create nothing at all, mirroring auth.py's bulk-upload
+    philosophy exactly. Ordinary field-validation findings run first, as
+    before; duplicate-COURSE detection runs BEFORE any insert is attempted,
+    both against the live database and within the uploaded file itself.
 
-    Course-code department-scoping fix (this revision) — the duplicate key
-    is (department_id, course_number), matching the composite DB constraint
-    (migration 0019): the same course number is allowed to appear more than
-    once in a single upload, or already exist in the database, as long as
-    each occurrence belongs to a different department."""
+    Course-code duplicate-detection fix (this revision, superseding the
+    previous (department_id, course_number) uniqueness rule from migration
+    0019) — `course_number` is NOT unique, even within one department: real
+    AVFU data legitimately reuses a code within the same department for
+    genuinely different courses (e.g. "RES101" for "Research (Semester II)"
+    and "Research (Semester IV)"). Two rows/records sharing (department_id,
+    course_number) are therefore compared on TITLE too, via `_normalize_title`
+    (whitespace/case-insensitive, nothing else folded):
+      * same department + same code + SAME normalized title  -> a genuine
+        duplicate -> added to `findings` (hard reject, no override possible,
+        exactly like every other field-validation finding).
+      * same department + same code + DIFFERENT normalized title -> a
+        `warnings` entry (informational; does not by itself block creation —
+        the caller decides whether to require confirmation).
+      * different department, any title -> no relationship at all; never
+        compared.
+    """
     department_rows = (await db.execute(select(Department.id, Department.code, Department.name))).all()
     department_by_code = {code.strip().lower(): did for did, code, name in department_rows}
     department_names = {did: name for did, code, name in department_rows}
     hod_department_label = department_names.get(force_department_id) if force_department_id else None
 
-    existing_pairs = {
-        (dept_id, number.upper())
-        for dept_id, number in (await db.execute(select(Course.department_id, Course.course_number))).all()
-    }
+    # (department_id, UPPERCASE course_number) -> [(existing course id, existing title), ...]
+    # — a list, not a single value, because MULTIPLE existing courses can
+    # legitimately share the same pair now (that is the entire point of
+    # this fix); each one is checked against the incoming title separately.
+    existing_by_pair: dict[tuple[Optional[UUID], str], list[tuple[UUID, str]]] = {}
+    for existing_id, dept_id, number, existing_title in (
+        await db.execute(select(Course.id, Course.department_id, Course.course_number, Course.title))
+    ).all():
+        existing_by_pair.setdefault((dept_id, number.upper()), []).append((existing_id, existing_title))
 
     findings: list[dict] = []
-    seen_pairs: dict[tuple[Optional[UUID], str], int] = {}
+    warnings: list[dict] = []
+    # Same key shape as existing_by_pair — (row_no, raw_title, normalized_title)
+    # per already-seen row, so a later row is checked against EVERY earlier
+    # row sharing its pair, not just the most recent one.
+    seen_by_pair: dict[tuple[Optional[UUID], str], list[tuple[int, str, str]]] = {}
     row_payload: dict[int, dict] = {}
 
     for entry in rows:
@@ -632,23 +687,61 @@ async def _validate_course_bulk_rows(
             else:
                 department_id_value = resolved_dept
 
-        # Only checked once a department is actually resolved for this row —
-        # an unresolved department already carries its own finding above and
-        # excludes the row from row_payload regardless, so there is no
-        # meaningful (department_id, course_number) pair to check yet.
-        if course_number and department_id_value:
+        # Only checked once both a department AND a title are actually
+        # resolved for this row — an unresolved department/missing title
+        # already carries its own finding above and excludes the row from
+        # row_payload regardless, so there is no meaningful comparison yet.
+        if course_number and title and department_id_value:
             pair = (department_id_value, course_number)
-            if pair in existing_pairs:
-                add("Course Number", raw_number, "Course number already exists in this department.")
-            elif pair in seen_pairs:
-                other = seen_pairs[pair]
-                add("Course Number", raw_number, f"Duplicate course number within the uploaded file for this department (also row {other}).")
-                findings.append({
-                    "row": other, "column": "Course Number", "value": raw_number,
-                    "error": f"Duplicate course number within the uploaded file for this department (also row {row_no}).",
-                })
-            else:
-                seen_pairs[pair] = row_no
+            norm_title = _normalize_title(title)
+            dept_label = department_names.get(department_id_value) or (raw_dept.strip() if raw_dept else "this department")
+
+            for existing_id, existing_title in existing_by_pair.get(pair, []):
+                if _normalize_title(existing_title) == norm_title:
+                    add(
+                        "Course Number", raw_number,
+                        f"Duplicate course: {dept_label} already has a course with this code and the same title "
+                        f"(existing course ID {existing_id}, title \"{existing_title}\").",
+                    )
+                else:
+                    warnings.append({
+                        "row": row_no,
+                        "department_id": str(department_id_value), "department_name": dept_label,
+                        "course_number": course_number,
+                        "incoming_title": title,
+                        "existing_course_id": str(existing_id), "existing_title": existing_title,
+                        "existing_row": None,
+                        "message": (
+                            f"Course code '{course_number}' already exists in {dept_label} with a different title "
+                            f"(\"{existing_title}\"). Please verify these are intentionally separate courses."
+                        ),
+                    })
+
+            for other_row_no, other_raw_title, other_norm_title in seen_by_pair.get(pair, []):
+                if other_norm_title == norm_title:
+                    add(
+                        "Course Number", raw_number,
+                        f"Duplicate course number and title within the uploaded file (also row {other_row_no}).",
+                    )
+                    findings.append({
+                        "row": other_row_no, "column": "Course Number", "value": raw_number,
+                        "error": f"Duplicate course number and title within the uploaded file (also row {row_no}).",
+                    })
+                else:
+                    warnings.append({
+                        "row": row_no,
+                        "department_id": str(department_id_value), "department_name": dept_label,
+                        "course_number": course_number,
+                        "incoming_title": title,
+                        "existing_course_id": None, "existing_title": other_raw_title,
+                        "existing_row": other_row_no,
+                        "message": (
+                            f"Course code '{course_number}' also appears in row {other_row_no} of this file with a "
+                            f"different title (\"{other_raw_title}\"). Please verify these are intentionally separate courses."
+                        ),
+                    })
+
+            seen_by_pair.setdefault(pair, []).append((row_no, title, norm_title))
 
         if row_findings:
             findings.extend(row_findings)
@@ -668,10 +761,15 @@ async def _validate_course_bulk_rows(
     for r in list(row_payload):
         if r in invalidated_rows:
             del row_payload[r]
+    # A row hard-rejected as an exact duplicate is already blocking the
+    # whole file outright — its own "different title" warning (if any, from
+    # a THIRD, unrelated row sharing the same code) would only be
+    # confusing/redundant noise in that response, so it's dropped here too.
+    warnings = [w for w in warnings if w["row"] not in invalidated_rows]
 
     findings.sort(key=lambda f: (f["row"], f["column"]))
     valid = [row_payload[r] for r in sorted(row_payload)]
-    return findings, valid
+    return findings, warnings, valid
 
 
 async def _create_bulk_courses(valid_rows: list[dict], db: AsyncSession, user: User) -> list[Course]:
@@ -692,10 +790,17 @@ async def _create_bulk_courses(valid_rows: list[dict], db: AsyncSession, user: U
     try:
         await db.commit()
     except IntegrityError:
+        # course_number is no longer unique in any scope (migration 0020) —
+        # duplicate-course rejection is handled entirely by
+        # _validate_course_bulk_rows above, before this function is ever
+        # called. An IntegrityError here means something else went wrong
+        # (e.g. a department was deleted between validation and this
+        # commit) — a generic, honest message, not a stale "duplicate
+        # Course Number" claim.
         await db.rollback()
         raise HTTPException(
             409,
-            "One or more rows conflict with existing data (e.g. a duplicate Course Number). "
+            "One or more rows conflict with existing data (e.g. a department that no longer exists). "
             "No courses were created.",
         )
     for c in created:
@@ -724,26 +829,85 @@ def _build_course_bulk_template_workbook() -> io.BytesIO:
 
 @router.post("/bulk-upload", status_code=201)
 async def bulk_upload_courses(
-    file: UploadFile = File(...), db: AsyncSession = Depends(get_db),
+    file: UploadFile = File(...),
+    # Course duplicate-warning confirmation fix (this revision) — these two
+    # optional fields turn this SAME endpoint into a two-step preview/
+    # confirm flow without inventing a separate URL or a persisted "pending
+    # upload" table (Section 8/9's explicit "reuse existing architecture,
+    # don't over-engineer" guidance): the first call (no token) behaves as
+    # a preview when duplicate-code warnings are found; the caller then
+    # re-submits the SAME file with `confirm_warnings=true` and the
+    # `confirmation_token` this endpoint returned, to actually create the
+    # courses. See the confirmation-verification block below for why a
+    # bare `confirm_warnings=true` boolean is never trusted by itself.
+    confirm_warnings: bool = Form(False),
+    confirmation_token: Optional[str] = Form(None),
+    db: AsyncSession = Depends(get_db),
     user: User = Depends(require_roles(*_MANAGE_ROLES)),
 ):
     """SUPER_ADMIN/HOD only (Section 15 — same `_MANAGE_ROLES` gate as the
     individual create_course endpoint; Faculty/Student are rejected before
     this function body ever runs). HOD's own department is validated against
     every row (never silently forced) — a single mismatched row rejects the
-    ENTIRE file, exactly like create_course's own `_authorize_department_manage`."""
+    ENTIRE file, exactly like create_course's own `_authorize_department_manage`.
+
+    Course duplicate-warning confirmation fix — response shapes:
+      * ordinary field-validation errors OR hard duplicates -> HTTP 400,
+        unchanged `{success, imported_count, errors}` shape (hard duplicates
+        are just another `errors` finding — see `_validate_course_bulk_rows`).
+      * same-code-different-title warnings, not yet confirmed -> HTTP 409,
+        `{success: false, requires_confirmation: true, warnings, confirmation_token}`.
+        NOTHING is created at this point.
+      * no findings, and (no warnings OR warnings + valid confirmation) ->
+        HTTP 201, unchanged `{success, imported_count, filename}` shape.
+    """
     if user.active_role == UserRole.HOD and not user.department_id:
         raise HTTPException(400, "Your account has no department assigned; contact an administrator.")
 
     content = await file.read()
     if len(content) > _MAX_COURSE_BULK_BYTES:
         raise HTTPException(413, f"File exceeds the {settings.MAX_FILE_SIZE_MB} MB limit.")
+    file_hash = hashlib.sha256(content).hexdigest()
 
+    # Confirmation-tampering fix — a bare `confirm_warnings: true` is worth
+    # nothing on its own (any client could send that trivially). It is only
+    # honored if `confirmation_token` is a signature-valid, non-expired
+    # token whose `sub` is THIS authenticated user and whose `file_hash`
+    # matches the file actually attached to THIS request byte-for-byte —
+    # proving this exact user was actually shown this exact file's warnings
+    # before confirming. Any mismatch (wrong user, expired, tampered,
+    # missing, or a DIFFERENT file re-submitted) is treated as "not
+    # confirmed", never surfaced as a distinct error — it just falls
+    # through to the same preview/warning response a first-time upload
+    # would get, with a fresh token.
+    confirmed = False
+    if confirm_warnings and confirmation_token:
+        payload = decode_token(confirmation_token, token_type="course_bulk_upload_confirm")
+        if payload and payload.get("sub") == str(user.id) and payload.get("file_hash") == file_hash:
+            confirmed = True
+
+    # Parsing + validation (including duplicate detection) always runs
+    # fresh against the CURRENT database state — this is also what makes
+    # the confirm step's revalidation a true final check, not a reuse of
+    # whatever was true at preview time (Section 11's explicit race-
+    # condition requirement): if another user created a conflicting course
+    # between an earlier preview and this call, it is caught right here.
     rows = parse_bulk_upload_file(file.filename or "", content, _COURSE_BULK_COLUMNS)
     force_department_id = user.department_id if user.active_role == UserRole.HOD else None
-    findings, valid = await _validate_course_bulk_rows(rows, db, force_department_id=force_department_id)
+    findings, warnings, valid = await _validate_course_bulk_rows(rows, db, force_department_id=force_department_id)
+
+    # Hard duplicates / ordinary validation errors block unconditionally —
+    # no confirmation can ever override this (Rule 2 / Rule 4).
     if findings:
         return JSONResponse(status_code=400, content={"success": False, "imported_count": 0, "errors": findings})
+
+    if warnings and not confirmed:
+        new_token = create_bulk_upload_confirmation_token(str(user.id), file_hash, len(warnings))
+        return JSONResponse(status_code=409, content={
+            "success": False, "imported_count": 0,
+            "requires_confirmation": True, "warnings": warnings,
+            "confirmation_token": new_token,
+        })
 
     created = await _create_bulk_courses(valid, db, user)
     return {"success": True, "imported_count": len(created), "filename": file.filename}

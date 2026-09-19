@@ -1,14 +1,27 @@
 """Standalone, dependency-free test script for the course-code
-department-scoping fix (course_number uniqueness is now per-department,
-not global).
+duplicate-DETECTION fix (superseding the previous, incorrect
+(department_id, course_number) uniqueness rule from migration 0019).
+
+Corrected business rule under test:
+    same department + same code + SAME normalized title      -> REJECT
+    same department + same code + DIFFERENT normalized title -> ALLOWED
+                                                                 (bulk upload
+                                                                 additionally
+                                                                 warns; see
+                                                                 test_course_bulk_upload_confirmation.py)
+    different department + same code (any title)             -> ALLOWED
 
 No pytest — matches the existing convention in this `tests/` directory
 (see `test_email_outbox.py`'s own docstring for why). Calls the real
 endpoint functions (`create_course`, `update_course`,
 `_validate_course_bulk_rows`) directly with hand-built request bodies and
-lightweight fake `user` objects — no HTTP layer needed, since these are
-plain async functions that only read `user.active_role`/`user.department_id`/
-`user.id`, exactly like FastAPI's dependency injection would provide.
+lightweight fake `user` objects — no HTTP layer needed here, since these
+are plain async functions that only read `user.active_role`/
+`user.department_id`/`user.id`, exactly like FastAPI's dependency
+injection would provide. (The full bulk-upload HTTP endpoint, including
+its preview/confirmation flow, is covered separately in
+`test_course_bulk_upload_confirmation.py`, which needs the real
+multipart/Form request shape.)
 
 Runs against the SAME local Postgres database configured in `.env`
 (`DATABASE_URL`) — never production. Every course this script creates uses
@@ -31,7 +44,7 @@ from sqlalchemy import select, delete
 
 from app.db.base import AsyncSessionLocal
 from app.models.course import Course
-from app.models.user import User, UserRole
+from app.models.user import User, UserRole, Department
 from app.api.v1.endpoints import courses as courses_module
 from app.api.v1.endpoints.courses import CourseIn
 
@@ -90,9 +103,6 @@ _SOME_USER_ID: Optional[uuid.UUID] = None
 async def _setup() -> None:
     global _DEPT_A, _DEPT_B, _SOME_USER_ID
     async with AsyncSessionLocal() as db:
-        # Any two real, distinct department ids work — this script never
-        # writes to ams_departments itself, only reads it.
-        from app.models.user import Department
         rows = (await db.execute(select(Department.id).order_by(Department.code).limit(2))).scalars().all()
         assert len(rows) >= 2, "test requires at least 2 existing departments in the local dev database"
         _DEPT_A, _DEPT_B = rows[0], rows[1]
@@ -102,20 +112,62 @@ async def _setup() -> None:
         _SOME_USER_ID = user_row
 
 
-async def test_same_department_duplicate_rejected():
-    name = "Test 1 — same department, same course code: second create is REJECTED"
-    number = _fake_number("cs101")
+async def _dept_code(db, department_id) -> str:
+    return (await db.execute(select(Department.code).where(Department.id == department_id))).scalar_one()
+
+
+# ── Database-level / migration checks ───────────────────────────────────────
+
+async def test_migration_chain_reaches_0020():
+    name = "DB — alembic chain reaches 0020_course_number_not_unique and no unique constraint remains on ams_courses"
+    try:
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as db:
+            version = (await db.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
+            cons = (await db.execute(text(
+                "SELECT conname FROM pg_constraint WHERE conrelid = 'ams_courses'::regclass AND contype='u'"
+            ))).scalars().all()
+        assert version == "0020_course_number_not_unique", f"expected head 0020_course_number_not_unique, got {version}"
+        assert cons == [], f"expected zero unique constraints on ams_courses, found {cons}"
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+
+
+async def test_department_id_course_number_duplicates_allowed_at_db_level():
+    name = "DB — two rows with identical (department_id, course_number) but different titles insert cleanly (no constraint violation)"
+    number = _fake_number("dbdup")
+    try:
+        async with AsyncSessionLocal() as db:
+            db.add(Course(course_number=number, title="Research (Semester II)", department_id=_DEPT_A))
+            db.add(Course(course_number=number, title="Research (Semester IV)", department_id=_DEPT_A))
+            await db.commit()
+        async with AsyncSessionLocal() as db:
+            rows = (await db.execute(select(Course).where(Course.course_number == number))).scalars().all()
+        assert len(rows) == 2, f"expected both rows to insert without a constraint violation, got {len(rows)}"
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([number])
+
+
+# ── create_course ────────────────────────────────────────────────────────────
+
+async def test_create_same_dept_same_title_rejected():
+    name = "create_course — same department + same code + SAME title -> REJECT"
+    number = _fake_number("t1")
     admin = _fake_user(_SOME_USER_ID, None, UserRole.SUPER_ADMIN)
     try:
         async with AsyncSessionLocal() as db:
-            await courses_module.create_course(_course_in(number, _DEPT_A), db, admin)
+            await courses_module.create_course(_course_in(number, _DEPT_A, "Research"), db, admin)
         rejected = False
         async with AsyncSessionLocal() as db:
             try:
-                await courses_module.create_course(_course_in(number, _DEPT_A), db, admin)
+                await courses_module.create_course(_course_in(number, _DEPT_A, "Research"), db, admin)
             except HTTPException as e:
                 rejected = e.status_code == 409
-        assert rejected, "expected the second same-department create to raise HTTPException(409)"
+        assert rejected, "expected the exact-duplicate create to raise HTTPException(409)"
         RESULTS.record(name, True)
     except Exception as e:
         RESULTS.record(name, False, str(e))
@@ -123,20 +175,61 @@ async def test_same_department_duplicate_rejected():
         await _cleanup_by_numbers([number])
 
 
-async def test_cross_department_same_code_allowed():
-    name = "Test 2 — different departments, same course code: both ALLOWED"
-    number = _fake_number("cs101b")
+async def test_create_same_dept_same_code_whitespace_title_rejected():
+    name = "create_course — title differing only by leading/trailing whitespace -> still REJECT"
+    number = _fake_number("t2")
     admin = _fake_user(_SOME_USER_ID, None, UserRole.SUPER_ADMIN)
     try:
         async with AsyncSessionLocal() as db:
-            out_a = await courses_module.create_course(_course_in(number, _DEPT_A), db, admin)
+            await courses_module.create_course(_course_in(number, _DEPT_A, "Research"), db, admin)
+        rejected = False
         async with AsyncSessionLocal() as db:
-            out_b = await courses_module.create_course(_course_in(number, _DEPT_B), db, admin)
-        assert out_a.department_id == _DEPT_A
-        assert out_b.department_id == _DEPT_B
+            try:
+                await courses_module.create_course(_course_in(number, _DEPT_A, "  Research  "), db, admin)
+            except HTTPException as e:
+                rejected = e.status_code == 409
+        assert rejected, "expected a whitespace-only title difference to still be treated as an exact duplicate"
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([number])
+
+
+async def test_create_same_dept_same_code_case_title_rejected():
+    name = "create_course — title differing only by case -> still REJECT"
+    number = _fake_number("t3")
+    admin = _fake_user(_SOME_USER_ID, None, UserRole.SUPER_ADMIN)
+    try:
+        async with AsyncSessionLocal() as db:
+            await courses_module.create_course(_course_in(number, _DEPT_A, "Research"), db, admin)
+        rejected = False
+        async with AsyncSessionLocal() as db:
+            try:
+                await courses_module.create_course(_course_in(number, _DEPT_A, "RESEARCH"), db, admin)
+            except HTTPException as e:
+                rejected = e.status_code == 409
+        assert rejected, "expected a case-only title difference to still be treated as an exact duplicate"
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([number])
+
+
+async def test_create_same_dept_same_code_different_title_allowed():
+    name = "create_course — same department + same code + DIFFERENT title -> ALLOWED (confirmed AVFU business case)"
+    number = _fake_number("t4")
+    admin = _fake_user(_SOME_USER_ID, None, UserRole.SUPER_ADMIN)
+    try:
+        async with AsyncSessionLocal() as db:
+            c1 = await courses_module.create_course(_course_in(number, _DEPT_A, "Research (Semester II)"), db, admin)
+        async with AsyncSessionLocal() as db:
+            c2 = await courses_module.create_course(_course_in(number, _DEPT_A, "Research (Semester IV)"), db, admin)
+        assert c1.id != c2.id
         async with AsyncSessionLocal() as db:
             rows = (await db.execute(select(Course).where(Course.course_number == number))).scalars().all()
-        assert len(rows) == 2, f"expected 2 courses (one per department), got {len(rows)}"
+        assert len(rows) == 2, f"expected both differently-titled courses to exist, got {len(rows)}"
         RESULTS.record(name, True)
     except Exception as e:
         RESULTS.record(name, False, str(e))
@@ -144,68 +237,16 @@ async def test_cross_department_same_code_allowed():
         await _cleanup_by_numbers([number])
 
 
-async def test_bulk_duplicate_within_file():
-    name = "Test 3 — bulk upload: duplicate (same dept, same code) within the file is flagged"
-    number = _fake_number("cs103")
-    try:
-        async with AsyncSessionLocal() as db:
-            dept_code = (await _dept_code(db, _DEPT_A))
-            rows = [
-                {"row": 2, "values": {"Course Number": number, "Course Title": "A", "Department": dept_code}},
-                {"row": 3, "values": {"Course Number": number, "Course Title": "B", "Department": dept_code}},
-            ]
-            findings, valid = await courses_module._validate_course_bulk_rows(rows, db, force_department_id=None)
-        assert len(valid) == 0, "an all-or-nothing duplicate must produce zero valid rows"
-        assert any("Duplicate course number" in f["error"] for f in findings), f"expected a duplicate finding, got {findings}"
-        assert len(findings) == 2, f"expected both offending rows flagged, got {findings}"
-        RESULTS.record(name, True)
-    except Exception as e:
-        RESULTS.record(name, False, str(e))
-    finally:
-        await _cleanup_by_numbers([number])
-
-
-async def test_bulk_same_code_across_departments():
-    name = "Test 4 — bulk upload: same code across two departments in the same file is ACCEPTED"
-    number = _fake_number("cs104")
-    try:
-        async with AsyncSessionLocal() as db:
-            code_a = await _dept_code(db, _DEPT_A)
-            code_b = await _dept_code(db, _DEPT_B)
-            rows = [
-                {"row": 2, "values": {"Course Number": number, "Course Title": "A", "Department": code_a}},
-                {"row": 3, "values": {"Course Number": number, "Course Title": "B", "Department": code_b}},
-            ]
-            findings, valid = await courses_module._validate_course_bulk_rows(rows, db, force_department_id=None)
-        assert findings == [], f"expected no findings, got {findings}"
-        assert len(valid) == 2, f"expected both rows accepted, got {len(valid)}"
-        RESULTS.record(name, True)
-    except Exception as e:
-        RESULTS.record(name, False, str(e))
-    finally:
-        await _cleanup_by_numbers([number])
-
-
-async def test_existing_db_record_blocks_same_department_only():
-    name = "Test 5 — existing DB record blocks bulk-upload only for the SAME department"
-    number = _fake_number("cs105")
+async def test_create_different_dept_same_code_same_title_allowed():
+    name = "create_course — different department + same code + SAME title -> no relationship, ALLOWED"
+    number = _fake_number("t5")
     admin = _fake_user(_SOME_USER_ID, None, UserRole.SUPER_ADMIN)
     try:
         async with AsyncSessionLocal() as db:
-            await courses_module.create_course(_course_in(number, _DEPT_A), db, admin)
-
+            await courses_module.create_course(_course_in(number, _DEPT_A, "Research"), db, admin)
         async with AsyncSessionLocal() as db:
-            code_a = await _dept_code(db, _DEPT_A)
-            code_b = await _dept_code(db, _DEPT_B)
-            rows_same_dept = [{"row": 2, "values": {"Course Number": number, "Course Title": "X", "Department": code_a}}]
-            findings_same, valid_same = await courses_module._validate_course_bulk_rows(rows_same_dept, db, force_department_id=None)
-            rows_other_dept = [{"row": 2, "values": {"Course Number": number, "Course Title": "X", "Department": code_b}}]
-            findings_other, valid_other = await courses_module._validate_course_bulk_rows(rows_other_dept, db, force_department_id=None)
-
-        assert any("already exists" in f["error"] for f in findings_same), f"expected a rejection for the same department, got {findings_same}"
-        assert valid_same == []
-        assert findings_other == [], f"expected the other department's upload to be accepted, got {findings_other}"
-        assert len(valid_other) == 1
+            out_b = await courses_module.create_course(_course_in(number, _DEPT_B, "Research"), db, admin)
+        assert out_b.department_id == _DEPT_B
         RESULTS.record(name, True)
     except Exception as e:
         RESULTS.record(name, False, str(e))
@@ -213,34 +254,63 @@ async def test_existing_db_record_blocks_same_department_only():
         await _cleanup_by_numbers([number])
 
 
-async def test_update_self_and_conflict():
-    name = "Test 6 — update: a course keeps its own code without a false duplicate, but cannot take another course's code in the same department"
-    n1, n2 = _fake_number("cs106a"), _fake_number("cs106b")
+async def test_create_different_dept_same_code_different_title_allowed():
+    name = "create_course — different department + same code + different title -> ALLOWED"
+    number = _fake_number("t6")
     admin = _fake_user(_SOME_USER_ID, None, UserRole.SUPER_ADMIN)
     try:
         async with AsyncSessionLocal() as db:
-            c1 = await courses_module.create_course(_course_in(n1, _DEPT_A), db, admin)
+            await courses_module.create_course(_course_in(number, _DEPT_A, "Research (Semester II)"), db, admin)
         async with AsyncSessionLocal() as db:
-            c2 = await courses_module.create_course(_course_in(n2, _DEPT_A), db, admin)
+            out_b = await courses_module.create_course(_course_in(number, _DEPT_B, "Something Else"), db, admin)
+        assert out_b.department_id == _DEPT_B
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([number])
 
-        # No-op update: c1 keeps its own code/department — must NOT false-positive.
+
+# ── update_course ────────────────────────────────────────────────────────────
+
+async def test_update_keeps_own_code_and_title_no_false_positive():
+    name = "update_course — a no-op update (same code, same title) does not false-positive against itself"
+    number = _fake_number("u1")
+    admin = _fake_user(_SOME_USER_ID, None, UserRole.SUPER_ADMIN)
+    try:
         async with AsyncSessionLocal() as db:
-            result = await courses_module.update_course(c1.id, _course_in(n1, _DEPT_A, title="Renamed"), db, admin)
+            c1 = await courses_module.create_course(_course_in(number, _DEPT_A, "Research"), db, admin)
+        async with AsyncSessionLocal() as db:
+            result = await courses_module.update_course(c1.id, _course_in(number, _DEPT_A, "Research"), db, admin)
         assert result == {"message": "Updated."}
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([number])
 
-        # Conflict: c1 tries to take c2's code within the SAME department.
+
+async def test_update_to_exact_duplicate_of_another_course_rejected():
+    name = "update_course — updating title+code to exactly match another course in the same department -> REJECT"
+    n1, n2 = _fake_number("u2a"), _fake_number("u2b")
+    admin = _fake_user(_SOME_USER_ID, None, UserRole.SUPER_ADMIN)
+    try:
+        async with AsyncSessionLocal() as db:
+            await courses_module.create_course(_course_in(n1, _DEPT_A, "Research (Semester II)"), db, admin)
+        async with AsyncSessionLocal() as db:
+            c2 = await courses_module.create_course(_course_in(n2, _DEPT_A, "Something"), db, admin)
+
         conflict = False
         async with AsyncSessionLocal() as db:
             try:
-                await courses_module.update_course(c1.id, _course_in(n2, _DEPT_A), db, admin)
+                await courses_module.update_course(c2.id, _course_in(n1, _DEPT_A, "Research (Semester II)"), db, admin)
             except HTTPException as e:
                 conflict = e.status_code == 409
-        assert conflict, "expected updating c1 to c2's code (same department) to raise HTTPException(409)"
+        assert conflict, "expected updating c2 into an exact duplicate of c1 to raise HTTPException(409)"
 
-        # c1's own row must be unaffected by the rejected attempt.
         async with AsyncSessionLocal() as db:
-            fresh_c1 = await db.get(Course, c1.id)
-        assert fresh_c1.course_number == n1, "the rejected update must not have changed c1's course_number"
+            fresh_c2 = await db.get(Course, c2.id)
+        assert fresh_c2.course_number == n2, "the rejected update must not have changed c2 at all"
         RESULTS.record(name, True)
     except Exception as e:
         RESULTS.record(name, False, str(e))
@@ -248,15 +318,138 @@ async def test_update_self_and_conflict():
         await _cleanup_by_numbers([n1, n2])
 
 
+async def test_update_to_same_code_different_title_allowed():
+    name = "update_course — updating to another course's CODE but keeping a different title -> ALLOWED"
+    n1, n2 = _fake_number("u3a"), _fake_number("u3b")
+    admin = _fake_user(_SOME_USER_ID, None, UserRole.SUPER_ADMIN)
+    try:
+        async with AsyncSessionLocal() as db:
+            await courses_module.create_course(_course_in(n1, _DEPT_A, "Research (Semester II)"), db, admin)
+        async with AsyncSessionLocal() as db:
+            c2 = await courses_module.create_course(_course_in(n2, _DEPT_A, "Something Else"), db, admin)
+
+        async with AsyncSessionLocal() as db:
+            result = await courses_module.update_course(c2.id, _course_in(n1, _DEPT_A, "Something Else"), db, admin)
+        assert result == {"message": "Updated."}
+
+        async with AsyncSessionLocal() as db:
+            fresh_c2 = await db.get(Course, c2.id)
+        assert fresh_c2.course_number == n1
+        assert fresh_c2.title == "Something Else"
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([n1, n2])
+
+
+# ── Bulk-upload validation (_validate_course_bulk_rows) ─────────────────────
+
+async def test_bulk_within_file_same_title_hard_reject():
+    name = "bulk validate — same dept + same code + SAME title within file -> HARD REJECT"
+    number = _fake_number("b1")
+    try:
+        async with AsyncSessionLocal() as db:
+            code_a = await _dept_code(db, _DEPT_A)
+            rows = [
+                {"row": 12, "values": {"Course Number": number, "Course Title": "Research (Semester II)", "Department": code_a}},
+                {"row": 18, "values": {"Course Number": number, "Course Title": "Research (Semester II)", "Department": code_a}},
+            ]
+            findings, warnings, valid = await courses_module._validate_course_bulk_rows(rows, db, force_department_id=None)
+        assert valid == [], "an exact within-file duplicate must produce zero valid rows"
+        assert len(findings) == 2, f"expected both offending rows flagged, got {findings}"
+        assert warnings == [], f"an exact duplicate must not ALSO appear as a warning, got {warnings}"
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([number])
+
+
+async def test_bulk_within_file_different_title_warning():
+    name = "bulk validate — same dept + same code + DIFFERENT title within file -> WARNING, both rows accepted"
+    number = _fake_number("b2")
+    try:
+        async with AsyncSessionLocal() as db:
+            code_a = await _dept_code(db, _DEPT_A)
+            rows = [
+                {"row": 12, "values": {"Course Number": number, "Course Title": "Research (Semester II)", "Department": code_a}},
+                {"row": 18, "values": {"Course Number": number, "Course Title": "Research (Semester IV)", "Department": code_a}},
+            ]
+            findings, warnings, valid = await courses_module._validate_course_bulk_rows(rows, db, force_department_id=None)
+        assert findings == [], f"expected no hard findings, got {findings}"
+        assert len(valid) == 2, f"expected both differently-titled rows accepted, got {valid}"
+        assert len(warnings) >= 1, "expected at least one duplicate-code warning"
+        assert any(w["row"] == 18 for w in warnings), f"expected the second row to carry the warning, got {warnings}"
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([number])
+
+
+async def test_bulk_different_departments_same_code_no_warning():
+    name = "bulk validate — same code across two different departments in the same file -> ALLOWED, no warning"
+    number = _fake_number("b3")
+    try:
+        async with AsyncSessionLocal() as db:
+            code_a = await _dept_code(db, _DEPT_A)
+            code_b = await _dept_code(db, _DEPT_B)
+            rows = [
+                {"row": 12, "values": {"Course Number": number, "Course Title": "Research", "Department": code_a}},
+                {"row": 18, "values": {"Course Number": number, "Course Title": "Research", "Department": code_b}},
+            ]
+            findings, warnings, valid = await courses_module._validate_course_bulk_rows(rows, db, force_department_id=None)
+        assert findings == [], f"expected no findings, got {findings}"
+        assert warnings == [], f"different departments must never produce a duplicate-code warning, got {warnings}"
+        assert len(valid) == 2
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([number])
+
+
+async def test_bulk_existing_db_same_title_hard_reject_diff_title_warning():
+    name = "bulk validate — existing DB course: same title -> HARD REJECT; different title -> WARNING only"
+    number = _fake_number("b4")
+    admin = _fake_user(_SOME_USER_ID, None, UserRole.SUPER_ADMIN)
+    try:
+        async with AsyncSessionLocal() as db:
+            await courses_module.create_course(_course_in(number, _DEPT_A, "Research (Semester II)"), db, admin)
+
+        async with AsyncSessionLocal() as db:
+            code_a = await _dept_code(db, _DEPT_A)
+            rows_same_title = [{"row": 2, "values": {"Course Number": number, "Course Title": "Research (Semester II)", "Department": code_a}}]
+            findings_same, warnings_same, valid_same = await courses_module._validate_course_bulk_rows(rows_same_title, db, force_department_id=None)
+
+            rows_diff_title = [{"row": 2, "values": {"Course Number": number, "Course Title": "Research (Semester IV)", "Department": code_a}}]
+            findings_diff, warnings_diff, valid_diff = await courses_module._validate_course_bulk_rows(rows_diff_title, db, force_department_id=None)
+
+        assert any("Duplicate course" in f["error"] for f in findings_same), f"expected a hard-duplicate finding, got {findings_same}"
+        assert valid_same == []
+
+        assert findings_diff == [], f"a different title must not be a hard finding, got {findings_diff}"
+        assert len(valid_diff) == 1, "a different-titled row must still be accepted (pending confirmation upstream)"
+        assert len(warnings_diff) == 1 and warnings_diff[0]["existing_course_id"] is not None
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([number])
+
+
+# ── RBAC ─────────────────────────────────────────────────────────────────────
+
 async def test_rbac_hod_cannot_create_in_other_department():
-    name = "Test 7 — RBAC: HOD of dept A cannot create a course in dept B via a manipulated department_id"
-    number = _fake_number("cs107")
+    name = "RBAC — HOD of dept A cannot create a course in dept B via a manipulated department_id"
+    number = _fake_number("r1")
     hod_dept_a = _fake_user(_SOME_USER_ID, _DEPT_A, UserRole.HOD)
     try:
         blocked = False
         async with AsyncSessionLocal() as db:
             try:
-                await courses_module.create_course(_course_in(number, _DEPT_B), db, hod_dept_a)
+                await courses_module.create_course(_course_in(number, _DEPT_B, "Research"), db, hod_dept_a)
             except HTTPException as e:
                 blocked = e.status_code == 403
         assert blocked, "expected an HOD supplying a foreign department_id to be rejected with 403"
@@ -265,10 +458,9 @@ async def test_rbac_hod_cannot_create_in_other_department():
             leftover = (await db.execute(select(Course).where(Course.course_number == number))).scalars().all()
         assert leftover == [], "the blocked attempt must not have created any course row"
 
-        # Sanity: the SAME HOD creating within their OWN department must still work —
-        # proves the fix didn't also break the legitimate path.
+        # Sanity: the SAME HOD creating within their OWN department must still work.
         async with AsyncSessionLocal() as db:
-            created = await courses_module.create_course(_course_in(number, _DEPT_A), db, hod_dept_a)
+            created = await courses_module.create_course(_course_in(number, _DEPT_A, "Research"), db, hod_dept_a)
         assert created.department_id == _DEPT_A
         RESULTS.record(name, True)
     except Exception as e:
@@ -277,21 +469,43 @@ async def test_rbac_hod_cannot_create_in_other_department():
         await _cleanup_by_numbers([number])
 
 
-async def _dept_code(db, department_id) -> str:
-    from app.models.user import Department
-    return (await db.execute(select(Department.code).where(Department.id == department_id))).scalar_one()
+async def test_rbac_department_resolution_not_overridable_in_bulk():
+    name = "RBAC — bulk validate: HOD's Excel Department column cannot override force_department_id"
+    number = _fake_number("r2")
+    try:
+        async with AsyncSessionLocal() as db:
+            code_b = await _dept_code(db, _DEPT_B)
+            rows = [{"row": 2, "values": {"Course Number": number, "Course Title": "Research", "Department": code_b}}]
+            findings, warnings, valid = await courses_module._validate_course_bulk_rows(rows, db, force_department_id=_DEPT_A)
+        assert valid == [], "a row whose Department doesn't match the HOD's forced department must never be accepted"
+        assert any("does not match the authenticated HOD" in f["error"] for f in findings), f"expected a department-mismatch finding, got {findings}"
+        RESULTS.record(name, True)
+    except Exception as e:
+        RESULTS.record(name, False, str(e))
+    finally:
+        await _cleanup_by_numbers([number])
 
 
 async def main() -> None:
     await _setup()
     scenarios = [
-        test_same_department_duplicate_rejected,
-        test_cross_department_same_code_allowed,
-        test_bulk_duplicate_within_file,
-        test_bulk_same_code_across_departments,
-        test_existing_db_record_blocks_same_department_only,
-        test_update_self_and_conflict,
+        test_migration_chain_reaches_0020,
+        test_department_id_course_number_duplicates_allowed_at_db_level,
+        test_create_same_dept_same_title_rejected,
+        test_create_same_dept_same_code_whitespace_title_rejected,
+        test_create_same_dept_same_code_case_title_rejected,
+        test_create_same_dept_same_code_different_title_allowed,
+        test_create_different_dept_same_code_same_title_allowed,
+        test_create_different_dept_same_code_different_title_allowed,
+        test_update_keeps_own_code_and_title_no_false_positive,
+        test_update_to_exact_duplicate_of_another_course_rejected,
+        test_update_to_same_code_different_title_allowed,
+        test_bulk_within_file_same_title_hard_reject,
+        test_bulk_within_file_different_title_warning,
+        test_bulk_different_departments_same_code_no_warning,
+        test_bulk_existing_db_same_title_hard_reject_diff_title_warning,
         test_rbac_hod_cannot_create_in_other_department,
+        test_rbac_department_resolution_not_overridable_in_bulk,
     ]
     for scenario in scenarios:
         await scenario()

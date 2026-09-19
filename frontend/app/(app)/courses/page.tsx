@@ -7,7 +7,7 @@ import { toast } from "sonner";
 import { ADMIN_ROLES, COURSE_CATEGORY_LABELS, CREDIT_TYPE_LABELS } from "@/lib/utils";
 import { BookOpen, Plus, Search, Loader2, Globe, EyeOff, Pencil, Trash2, X, Crown, UserPlus, Upload } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { UserBulkUploadModal } from "@/components/ui/user-bulk-upload-modal";
+import { CourseBulkUploadModal } from "@/components/ui/course-bulk-upload-modal";
 
 interface Course {
   id: string; course_number: string; title: string; credit_structure: string;
@@ -396,17 +396,21 @@ export default function CoursesPage() {
         </>
       )}
 
-      {/* Bulk Course Upload modal (this revision) */}
+      {/* Bulk Course Upload modal — course-code duplicate-detection fix
+          (this revision): a DEDICATED component (not the shared
+          UserBulkUploadModal), since course upload now has a warning/
+          confirmation step the Faculty/User bulk uploads don't need. */}
       {showBulkUpload && (
-        <UserBulkUploadModal
+        <CourseBulkUploadModal
           uploadUrl="/courses/bulk-upload"
           templateUrl="/courses/bulk-upload/template"
           templateFilename="ams_courses_bulk_upload_template.xlsx"
-          title="Bulk Upload Courses"
           description={
             <>Upload an <span className="font-semibold">.xlsx</span> or <span className="font-semibold">.csv</span> file with columns:
               Course Number, Course Title, Programme (UG/PG/PhD), Course Type, Credit Type, Theory Credit, Practical Credit, Status, Department.
-              {isHod ? " Department must match your own department." : " Department is matched by its exact existing code."} Use <span className="font-semibold">Download Template</span> below to get the exact format.</>
+              {isHod ? " Department must match your own department." : " Department is matched by its exact existing code."} Course codes no
+              longer need to be unique — the same code may repeat, including within the same department, as long as the titles differ.
+              Use <span className="font-semibold">Download Template</span> below to get the exact format.</>
           }
           onClose={() => setShowBulkUpload(false)}
           onSuccess={(count) => {
