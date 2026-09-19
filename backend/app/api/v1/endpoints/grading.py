@@ -50,7 +50,7 @@ async def _authorize_offering_grading(offering_id: UUID, user: User, db: AsyncSe
     if not offering:
         raise HTTPException(404, "Offering not found.")
     if user.active_role == UserRole.HOD:
-        if user.department_id and offering.department_id and user.department_id == offering.department_id:
+        if user.active_department_id and offering.department_id and user.active_department_id == offering.department_id:
             return
         raise HTTPException(403, "You can only access gradesheets within your own department.")
     if user.active_role == UserRole.FACULTY:
@@ -82,7 +82,7 @@ async def _authorize_student_academic_view(student_id: UUID, user: User, db: Asy
         raise HTTPException(403, "You can only view your own academic progress.")
     if user.active_role == UserRole.HOD:
         dept_id = await resolve_student_department_id(student_id, db)
-        if dept_id and user.department_id and dept_id == user.department_id:
+        if dept_id and user.active_department_id and dept_id == user.active_department_id:
             return
         raise HTTPException(403, "You can only view students within your own department.")
     if user.active_role == UserRole.FACULTY:

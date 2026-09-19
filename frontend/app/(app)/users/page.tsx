@@ -16,12 +16,26 @@ interface User {
   department_name?: string | null;
 }
 interface DepartmentOpt { id: string; name: string; code: string; }
+// Multi-role/multi-department task (this revision) — one persisted
+// UserRoleAssignment row, exactly as GET /auth/users/{id}/roles returns it.
+interface RoleAssignmentRow { id: string; role: string; department_id: string | null; department_name: string | null; }
 // Programme<->Department many-to-many redesign — Program no longer carries a
 // single department_id (see backend GET /departments/programs); Department
 // options for a chosen Programme come from GET /departments?program_id=...
 interface ProgramOpt { id: string; name: string; code: string; level: string; }
 
 const ROLE_OPTIONS = Object.keys(ROLES);
+// Multi-role/multi-department task (this revision) — the Assigned Roles
+// modal's two sections: institution-wide roles (plain checkboxes, no
+// department) vs. department-scoped roles (one checkbox per department,
+// fully independent — checking HOD for a department never auto-checks
+// FACULTY for it, or vice versa; each is its own explicit grant).
+// `super_admin` is deliberately included here too (backend enforces its
+// exclusivity — see auth.py's add_user_role — this UI does not need its
+// own separate copy of that rule, it just surfaces whatever the backend
+// rejects).
+const GLOBAL_ROLE_OPTIONS = ["super_admin", "dpgs", "incharge_academic_cell", "student"];
+const DEPARTMENT_ROLE_OPTIONS = ["hod", "faculty"];
 
 // Issue 4 fix: a single named constant for the Add User form's blank state,
 // reused every time the form must return to empty (opening Add User, a
@@ -133,20 +147,26 @@ export default function UsersPage() {
     onError: (e: unknown) => toast.error((e as {response?:{data?:{detail?:string}}})?.response?.data?.detail ?? "Failed to update user."),
   });
 
-  const rolesQuery = useQuery<{ user_id: string; assigned_roles: string[] }>({
+  // Multi-role/multi-department task (this revision) — each assignment now
+  // carries its own department (or null for institution-wide roles), and
+  // the same role can appear more than once (e.g. HOD for two different
+  // departments) — so the modal needs the full per-assignment list, not
+  // just a flat set of role names.
+  const rolesQuery = useQuery<{ user_id: string; assigned_roles: string[]; assignments: RoleAssignmentRow[] }>({
     queryKey: ["ams-user-roles", rolesUser?.id],
     queryFn: async () => (await api.get(`/auth/users/${rolesUser?.id}/roles`)).data,
     enabled: !!rolesUser,
   });
-  const assignedRoles = rolesQuery.data?.assigned_roles ?? [];
+  const assignments = rolesQuery.data?.assignments ?? [];
 
   const addRole = useMutation({
-    mutationFn: (r: string) => api.post(`/auth/users/${rolesUser?.id}/roles`, { role: r }),
+    mutationFn: (body: { role: string; department_id?: string }) => api.post(`/auth/users/${rolesUser?.id}/roles`, body),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["ams-user-roles", rolesUser?.id] }); },
     onError: (e: unknown) => toast.error((e as {response?:{data?:{detail?:string}}})?.response?.data?.detail ?? "Could not assign role."),
   });
   const removeRole = useMutation({
-    mutationFn: (r: string) => api.delete(`/auth/users/${rolesUser?.id}/roles/${r}`),
+    mutationFn: ({ role, department_id }: { role: string; department_id?: string | null }) =>
+      api.delete(`/auth/users/${rolesUser?.id}/roles/${role}`, { params: department_id ? { department_id } : undefined }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["ams-user-roles", rolesUser?.id] }); },
     onError: (e: unknown) => toast.error((e as {response?:{data?:{detail?:string}}})?.response?.data?.detail ?? "Could not remove role."),
   });
@@ -345,37 +365,71 @@ export default function UsersPage() {
         <ChangePasswordModal mode="admin-reset" targetUserId={resetPwUser.id} targetUserName={resetPwUser.full_name} onClose={() => setResetPwUser(null)} />
       )}
 
-      {/* Multi-role/role-switching task — Assigned Roles management. A
-          checkbox per real UserRole; toggling calls the assignment
-          endpoints directly (each change takes effect immediately — no
-          "Save" step, mirroring ChangePasswordModal's single-action style).
-          The backend independently enforces Super Admin/Academic Admin-only
-          access and every existing business rule (e.g. HOD requires a
-          department), so this UI only surfaces whatever error it returns. */}
+      {/* Multi-role/multi-department task (this revision, extending the
+          earlier multi-role/role-switching task) — Assigned Roles
+          management. Institution-wide roles (Super Admin/DPGS/Incharge
+          Academic Cell/Student) are plain checkboxes; HOD/Faculty are
+          checkbox GROUPS, one row per department — each (role, department)
+          pair is its own explicit, independently-toggled grant. Checking
+          HOD for a department never auto-checks Faculty for it, or vice
+          versa; toggling calls the assignment endpoints directly (each
+          change takes effect immediately — no "Save" step, mirroring
+          ChangePasswordModal's single-action style). The backend
+          independently enforces Super Admin-only access and every existing
+          business rule (HOD/Faculty require a real department, Super Admin
+          exclusivity, DPGS/Incharge single-holder, etc.) — this UI only
+          surfaces whatever error it returns; it never decides validity
+          itself. */}
       {rolesUser && (
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 max-h-[85vh] overflow-y-auto">
             <h3 className="text-xl font-bold mb-1">Assigned Roles</h3>
             <p className="text-sm text-gray-600 mb-4">{rolesUser.full_name} — {rolesUser.email}</p>
             {rolesQuery.isLoading ? (
               <div className="flex justify-center py-8"><Loader2 className="animate-spin text-gray-600" /></div>
             ) : (
-              <div className="space-y-2">
-                {ROLE_OPTIONS.map((r) => {
-                  const checked = assignedRoles.includes(r);
-                  const busy = addRole.isPending || removeRole.isPending;
-                  return (
-                    <label key={r} className="flex items-center gap-2 text-base">
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        disabled={busy}
-                        onChange={() => (checked ? removeRole.mutate(r) : addRole.mutate(r))}
-                      />
-                      {ROLES[r as keyof typeof ROLES] ?? r}
-                    </label>
-                  );
-                })}
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  {GLOBAL_ROLE_OPTIONS.map((r) => {
+                    const checked = assignments.some((a) => a.role === r);
+                    const busy = addRole.isPending || removeRole.isPending;
+                    return (
+                      <label key={r} className="flex items-center gap-2 text-base">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={busy}
+                          onChange={() => (checked ? removeRole.mutate({ role: r }) : addRole.mutate({ role: r }))}
+                        />
+                        {ROLES[r as keyof typeof ROLES] ?? r}
+                      </label>
+                    );
+                  })}
+                </div>
+                {DEPARTMENT_ROLE_OPTIONS.map((r) => (
+                  <div key={r}>
+                    <p className="text-sm font-bold text-gray-800 mb-1.5">{ROLES[r as keyof typeof ROLES] ?? r}</p>
+                    <div className="space-y-1.5 max-h-36 overflow-y-auto border border-gray-100 rounded-lg p-2">
+                      {departments.map((d) => {
+                        const checked = assignments.some((a) => a.role === r && a.department_id === d.id);
+                        const busy = addRole.isPending || removeRole.isPending;
+                        return (
+                          <label key={d.id} className="flex items-center gap-2 text-sm">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              disabled={busy}
+                              onChange={() => (checked
+                                ? removeRole.mutate({ role: r, department_id: d.id })
+                                : addRole.mutate({ role: r, department_id: d.id }))}
+                            />
+                            {d.name}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
             <div className="flex gap-3 mt-5">

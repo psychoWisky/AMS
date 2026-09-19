@@ -1,7 +1,7 @@
 "use client";
 import { usePathname, useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
-import { useRole, useAssignedRoles, useSetUser } from "@/stores/auth.store";
+import { useRole, useAssignedRoleAssignments, useActiveRoleAssignmentId, useSetUser } from "@/stores/auth.store";
 import { cn, ROLES } from "@/lib/utils";
 import {
   LayoutDashboard, CalendarDays, BookOpen, Users, ClipboardList,
@@ -86,7 +86,12 @@ const NAV = [
 export function AMSSidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
   const pathname = usePathname();
   const role = useRole();
-  const assignedRoles = useAssignedRoles();
+  // Multi-role/multi-department task (this revision) — full (role,
+  // department) assignments, not just role names, since the same role can
+  // now repeat across departments (e.g. HOD — Agriculture AND HOD —
+  // Veterinary) and each must be independently selectable.
+  const assignments = useAssignedRoleAssignments();
+  const activeAssignmentId = useActiveRoleAssignmentId();
   const setUser = useSetUser();
   const clearAuth = useAuthStore((s) => s.clearAuth);
   const router = useRouter();
@@ -104,18 +109,27 @@ export function AMSSidebar({ collapsed, onToggle }: { collapsed: boolean; onTogg
 
   const visible = NAV.filter((n) => n.roles.length === 0 || !role || n.roles.includes(role));
 
-  async function switchRole(newRole: string) {
-    if (newRole === role || switching) return;
+  // Multi-role/multi-department task — the label a user actually needs to
+  // tell "HOD — Agriculture" apart from "HOD — Veterinary"; department-less
+  // (global) assignments show just the role name.
+  function assignmentLabel(a: { role: string; department_name: string | null }): string {
+    const roleLabel = ROLES[a.role as keyof typeof ROLES] ?? a.role;
+    return a.department_name ? `${roleLabel} — ${a.department_name}` : roleLabel;
+  }
+
+  async function switchRole(assignmentId: string) {
+    if (assignmentId === activeAssignmentId || switching) return;
+    const target = assignments.find((a) => a.id === assignmentId);
     setSwitching(true);
     try {
-      const res = await api.post("/auth/switch-role", { role: newRole });
+      const res = await api.post("/auth/switch-role", { assignment_id: assignmentId });
       setUser(res.data);
       // Role-dependent lists (offerings, registrations, gradesheets, etc.)
       // are scoped server-side by active role — clear the cache so every
       // page re-fetches under the new role instead of showing stale data
       // fetched under the old one (mirrors logout's existing qc.clear()).
       qc.clear();
-      toast.success(`Switched to ${ROLES[newRole as keyof typeof ROLES] ?? newRole} mode.`);
+      toast.success(`Switched to ${target ? assignmentLabel(target) : "a different"} mode.`);
     } catch (e: unknown) {
       toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Could not switch role.");
     } finally {
@@ -171,17 +185,17 @@ export function AMSSidebar({ collapsed, onToggle }: { collapsed: boolean; onTogg
 
       {/* Bottom */}
       <div className="px-2 pb-3 shrink-0 space-y-1">
-        {assignedRoles.length > 1 && !collapsed && (
+        {assignments.length > 1 && !collapsed && (
           <div className="px-1 pb-1">
             <label className="flex items-center gap-1.5 text-sm text-gray-600 mb-1"><Repeat size={13} />Active Role</label>
             <select
-              value={role ?? ""}
+              value={activeAssignmentId ?? ""}
               disabled={switching}
               onChange={(e) => switchRole(e.target.value)}
               className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0D6E6E] disabled:opacity-60"
             >
-              {assignedRoles.map((r) => (
-                <option key={r} value={r}>{ROLES[r as keyof typeof ROLES] ?? r}</option>
+              {assignments.map((a) => (
+                <option key={a.id} value={a.id}>{assignmentLabel(a)}</option>
               ))}
             </select>
           </div>

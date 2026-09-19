@@ -56,7 +56,7 @@ async def _authorize_student_credit_view(student_id: UUID, user: User, db: Async
         raise HTTPException(403, "You can only view your own credit details.")
     if user.active_role == UserRole.HOD:
         dept_id = await resolve_student_department_id(student_id, db)
-        if dept_id and user.department_id and dept_id == user.department_id:
+        if dept_id and user.active_department_id and dept_id == user.active_department_id:
             return
         raise HTTPException(403, "You can only view students within your own department.")
     if user.active_role == UserRole.FACULTY:

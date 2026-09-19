@@ -118,16 +118,35 @@ class User(Base):
     # Multi-role/role-switching task — `role` is retained ONLY as a legacy/
     # display "primary role" column. It is kept synchronized so it always
     # equals one of the user's rows in `UserRoleAssignment` (never a role the
-    # user doesn't actually hold) and is used for: pre-existing business
-    # queries that look up "who is the HOD of department X" (e.g.
-    # enrollment.py/ppw.py's notification routing), the Users list's
-    # `role=` filter, and account seeding/display. It is NEVER read for
-    # authorization decisions about the CALLER — every `require_roles(...)`
-    # check and every inline `if user.role == ...` authorization branch was
-    # migrated to read the caller's active role instead (see
+    # user doesn't actually hold) and is used for: the Users list's `role=`
+    # filter, account seeding/display, and the legacy single-role Edit User
+    # dropdown. It is NEVER read for authorization decisions about the
+    # CALLER — every `require_roles(...)` check and every inline
+    # `if user.role == ...`/`if user.active_role == ...` authorization branch
+    # reads the caller's active role instead (see
     # app.core.dependencies.get_current_user's `active_role`/`assigned_roles`
-    # attributes, and `RefreshToken.active_role`).
+    # attributes, backed by `RefreshToken.active_role_assignment_id`).
+    # "Who is the HOD of department X" business lookups (enrollment.py/
+    # ppw.py notification routing) no longer use `User.role`/`User.department_id`
+    # either (multi-role/multi-department task, this revision) — a HOD's
+    # assignment department can now differ from this scalar column, so those
+    # lookups query `UserRoleAssignment` directly (see
+    # app.core.dependencies.find_role_holder_in_department).
     department_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_departments.id"))
+    # Multi-role/multi-department task (this revision) — `department_id`
+    # above is STILL the authoritative field for: (a) a STUDENT's own
+    # department (unchanged — students are out of scope for this task's
+    # multi-department model, see core/student_scope.py), and (b) legacy
+    # display/profile/reporting purposes for staff. It is NEVER read for
+    # STAFF (HOD/FACULTY) authorization decisions about the CALLER anymore —
+    # a HOD/FACULTY user's actual department-scoped permissions come
+    # entirely from their active `UserRoleAssignment.department_id` (see
+    # app.core.dependencies.get_current_user's `active_department_id`
+    # attribute), since one person can now hold the same staff role in more
+    # than one department simultaneously, which this single column cannot
+    # represent. Kept, not dropped: still needed for the reasons above, and
+    # as the source the multi-department migration's backfill copied FROM
+    # for each user's initial HOD/FACULTY assignment(s).
     # Bulk User/Faculty upload task (this revision) — College is part of the
     # user's own profile, deliberately INDEPENDENT of `department_id` (no
     # College<->Department relationship exists or is inferred anywhere in
@@ -224,28 +243,53 @@ class RefreshToken(Base):
     token_hash: Mapped[str]     = mapped_column(String(64), unique=True, index=True)
     is_revoked: Mapped[bool]    = mapped_column(Boolean, default=False)
     device_info: Mapped[str | None] = mapped_column(Text)
-    # Multi-role/role-switching task — each login/refresh issues a new
-    # RefreshToken row, which is this codebase's natural "session" unit (one
-    # per browser/device, rotated on every /auth/refresh). The access token
-    # issued alongside it carries this row's id as a "sid" pointer claim
-    # (looked up fresh from the DB on every request, exactly like the
-    # existing "sub" claim already is — never trusted as a value in itself).
-    # Storing the active role HERE, not on User, is what keeps role-switching
-    # in one browser/session from affecting any other concurrent session for
-    # the same account.
-    active_role: Mapped["UserRole | None"] = mapped_column(SAEnum(UserRole, name="ams_user_role"), nullable=True)
+    # Multi-role/multi-department task (this revision) — REPLACES the
+    # previous bare `active_role: UserRole | None` column. A bare role name
+    # is no longer sufficient: the same role can now exist for more than one
+    # department on the same user (e.g. HOD @ A and HOD @ B), so "the active
+    # role" must identify WHICH persisted assignment is in effect, not just
+    # a role name — a role+department pair stored as two independent
+    # columns could be edited out of sync with each other and produce a
+    # combination the user was never actually granted (e.g. HOD @ C, if C
+    # were ever written to one column without the other). Pointing at a
+    # single `UserRoleAssignment.id` makes an invalid combination
+    # structurally impossible: whatever this points to IS a real, persisted
+    # grant, atomically. ON DELETE SET NULL: if the assignment is later
+    # removed by a Super Admin, the session simply loses its active context
+    # and self-heals to a new default on the next request (see
+    # app.core.dependencies.get_current_user) rather than referencing a
+    # dangling row or blocking the assignment's deletion.
+    active_role_assignment_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("ams_user_role_assignments.id", ondelete="SET NULL"), nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    active_role_assignment: Mapped["UserRoleAssignment | None"] = relationship("UserRoleAssignment", foreign_keys=[active_role_assignment_id])
 
 
 class UserRoleAssignment(Base):
-    """Multi-role/role-switching task. The authoritative record of which
-    roles a user has been GRANTED by a Super Admin/Academic Admin — distinct
-    from `RefreshToken.active_role` (which role a given session is currently
-    USING). `User.role` is retained only as a legacy/display "primary role"
-    column (see User.role's own docstring) and is never itself read for
-    authorization after this task; `require_roles`/every inline role branch
-    reads the caller's active role (see app.core.dependencies), which is
-    always guaranteed to be one of these rows for that user.
+    """Multi-role/multi-department task (this revision, extending the
+    original multi-role/role-switching task). The authoritative record of
+    which (role, department) combinations a user has been GRANTED by a
+    Super Admin — distinct from `RefreshToken.active_role_assignment_id`
+    (which ONE of these rows a given session is currently USING).
+    `User.role`/`User.department_id` are retained only as legacy/display
+    "primary" columns (see their own docstrings) and are never read for
+    STAFF authorization after this task; every `_authorize_*` helper reads
+    the caller's active assignment instead (see app.core.dependencies).
+
+    `department_id` is nullable and department-scoping is role-dependent,
+    not a blanket rule:
+      * HOD / FACULTY — REQUIRE a real department. One row per department
+        the person actually holds that role in — HOD @ A and HOD @ B are
+        two separate rows, never one row with two departments. Holding
+        HOD @ A never implies FACULTY @ A; that would need its own,
+        separately-granted row.
+      * DPGS / INCHARGE_ACADEMIC_CELL / SUPER_ADMIN — institution-wide,
+        ALWAYS NULL. Never given a department, invented or otherwise.
+      * STUDENT — also NULL here; a student's department continues to come
+        from `User.department_id` directly (unchanged, out of scope for
+        this multi-department staff model — see `core/student_scope.py`).
 
     Reuses the existing `UserRole` enum/Postgres type rather than inventing a
     new vocabulary or repurposing the unrelated `ams_roles` master-data table
@@ -254,9 +298,22 @@ class UserRoleAssignment(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id", ondelete="CASCADE"), index=True)
     role: Mapped[UserRole] = mapped_column(SAEnum(UserRole, name="ams_user_role"), nullable=False)
+    department_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_departments.id"), nullable=True)
     assigned_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id", ondelete="SET NULL"))
     assigned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
-    __table_args__ = (UniqueConstraint("user_id", "role", name="uq_user_role_assignment"),)
+    # (user_id, role, department_id) allows the SAME role to repeat for
+    # DIFFERENT departments (HOD @ A + HOD @ B). It does NOT, by itself,
+    # prevent two NULL-department rows for the same (user_id, role) —
+    # Postgres treats every NULL as distinct in a UNIQUE constraint — so a
+    # SEPARATE partial unique index (`uq_user_role_assignment_global`,
+    # migration 0021) additionally enforces (user_id, role) uniqueness
+    # specifically WHERE department_id IS NULL, closing that gap for the
+    # global roles. The pre-existing single-institution-wide-holder partial
+    # index for DPGS/INCHARGE_ACADEMIC_CELL (migration 0016,
+    # `uq_user_role_assignment_single_holder`, keyed on `role` alone) is
+    # unchanged by this task and continues to apply on top of this.
+    __table_args__ = (UniqueConstraint("user_id", "role", "department_id", name="uq_user_role_assignment"),)
 
     user: Mapped["User"] = relationship("User", back_populates="role_assignments", foreign_keys=[user_id])
+    department: Mapped["Department | None"] = relationship("Department", foreign_keys=[department_id])

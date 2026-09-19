@@ -29,7 +29,7 @@ from pydantic import BaseModel, field_validator
 from app.db.base import get_db
 from app.core.config import settings
 from app.core.email import send_email
-from app.core.dependencies import get_current_user, require_roles
+from app.core.dependencies import get_current_user, require_roles, find_role_holder_in_department
 from app.models.user import User, UserRole, Program
 from app.models.course import Course
 from app.models.academic import AcademicCalendar, Semester
@@ -199,7 +199,7 @@ async def _resolve_my_stage(p: Ppw, cycle: PpwApprovalCycle, user: User, db: Asy
         elif stage.stage_type == "hod":
             if user.active_role == UserRole.HOD:
                 dept_id = await _student_department_id(p.student_id, db)
-                if dept_id and user.department_id and dept_id == user.department_id:
+                if dept_id and user.active_department_id and dept_id == user.active_department_id:
                     return stage
         elif stage.stage_type == "incharge_academic_cell":
             # Global role — no department match required (Section 19).
@@ -238,7 +238,7 @@ async def _authorize_ppw_view(p: Ppw, user: User, db: AsyncSession) -> None:
         raise HTTPException(404, "PPW not found.")
     if user.active_role == UserRole.HOD:
         dept_id = await _student_department_id(p.student_id, db)
-        if dept_id and user.department_id and dept_id == user.department_id:
+        if dept_id and user.active_department_id and dept_id == user.active_department_id:
             return
         raise HTTPException(404, "PPW not found.")
     raise HTTPException(403, "Insufficient permissions.")
@@ -703,7 +703,7 @@ async def list_pending_approvals(
                 "program_name": program.name if program else None,
             })
     elif user.active_role == UserRole.HOD:
-        if not user.department_id:
+        if not user.active_department_id:
             return []
         result = await db.execute(
             select(PpwApprovalStage, PpwApprovalCycle, Ppw)
@@ -723,7 +723,7 @@ async def list_pending_approvals(
                 # OWN department_id is now the authoritative field (never
                 # inferred via their Programme's department anymore, since a
                 # Programme can have many Departments).
-                User.department_id == user.department_id,
+                User.department_id == user.active_department_id,
             )
         )
         for stage, cycle, p in result.all():
@@ -974,10 +974,10 @@ async def submit_ppw(
     dept_id = await _student_department_id(user.id, db)
     hod_id = None
     if dept_id:
-        hod_result = await db.execute(
-            select(User.id).where(User.role == UserRole.HOD, User.department_id == dept_id, User.is_active == True).limit(1)
-        )
-        hod_id = hod_result.scalar_one_or_none()
+        # Multi-role/multi-department task (this revision) — resolved via
+        # UserRoleAssignment, not User.role/department_id (a HOD's
+        # assignment department can now differ from that scalar column).
+        hod_id = await find_role_holder_in_department(UserRole.HOD, dept_id, db)
 
     last_cycle_result = await db.execute(
         select(func.max(PpwApprovalCycle.cycle_number)).where(PpwApprovalCycle.ppw_id == p.id)

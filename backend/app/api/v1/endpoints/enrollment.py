@@ -77,7 +77,7 @@ from sqlalchemy.orm import selectinload
 from pydantic import BaseModel, field_validator
 
 from app.db.base import get_db
-from app.core.dependencies import get_current_user, require_roles, require_advisory_committee_established
+from app.core.dependencies import get_current_user, require_roles, require_advisory_committee_established, find_role_holder_in_department
 from app.models.user import User, UserRole, Program, Department
 from app.models.enrollment import StudentEnrollment, CourseRegistration, WithdrawalRequest
 from app.models.course import Course, CourseOffering, OfferingFaculty
@@ -167,7 +167,7 @@ async def _authorize_offering_management(offering_id: UUID, user: User, db: Asyn
     if user.active_role == UserRole.SUPER_ADMIN:
         return offering
     if user.active_role == UserRole.HOD:
-        if user.department_id and offering.department_id and user.department_id == offering.department_id:
+        if user.active_department_id and offering.department_id and user.active_department_id == offering.department_id:
             return offering
         raise HTTPException(403, "You can only manage offerings within your own department.")
     if user.active_role == UserRole.FACULTY:
@@ -194,7 +194,7 @@ async def _authorize_hod_registration(registration: CourseRegistration, user: Us
         return
     if user.active_role == UserRole.HOD:
         dept_id = await _student_department_id(registration.student_id, db)
-        if dept_id and user.department_id and dept_id == user.department_id:
+        if dept_id and user.active_department_id and dept_id == user.active_department_id:
             return
         raise HTTPException(403, "You can only approve registrations for students in your own department.")
     raise HTTPException(403, "Only the student's HOD (or an administrator) may act on this registration.")
@@ -209,7 +209,7 @@ async def _authorize_registration_view(registration: CourseRegistration, user: U
         raise HTTPException(403, "You can only view your own registration.")
     if user.active_role == UserRole.HOD:
         dept_id = await _student_department_id(registration.student_id, db)
-        if dept_id and user.department_id and dept_id == user.department_id:
+        if dept_id and user.active_department_id and dept_id == user.active_department_id:
             return
         raise HTTPException(403, "You can only view registrations within your own department.")
     ma_id = await _get_major_advisor_id(registration.student_id, db)
@@ -520,10 +520,12 @@ async def _registration_dict(r: CourseRegistration, db: AsyncSession) -> dict:
     hod_dept_id = await _student_department_id(r.student_id, db)
     hod = None
     if hod_dept_id:
-        hod_result = await db.execute(select(User).where(
-            User.role == UserRole.HOD, User.department_id == hod_dept_id, User.is_active == True,
-        ).limit(1))
-        hod = hod_result.scalar_one_or_none()
+        # Multi-role/multi-department task (this revision) — a HOD's
+        # assignment department can now differ from their legacy
+        # `User.department_id`, so "who is the HOD of this department" is
+        # resolved via `UserRoleAssignment`, never the scalar column.
+        hod_id = await find_role_holder_in_department(UserRole.HOD, hod_dept_id, db)
+        hod = await db.get(User, hod_id) if hod_id else None
 
     # Major/Minor/Supporting discipline task (this revision) — same
     # derivation approach as PPW's `_ppw_dict` (see its docstring): Major =
@@ -1028,14 +1030,14 @@ async def list_registrations(
     elif user.active_role in (UserRole.SUPER_ADMIN, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS):
         pass  # unrestricted — global roles, Section 12/13
     elif user.active_role == UserRole.HOD:
-        if not user.department_id:
+        if not user.active_department_id:
             return []
         # Programme<->Department many-to-many redesign — the student's OWN
         # department_id is authoritative now, never inferred via their
         # Programme's department (a Programme can have many Departments).
         q = (
             q.join(User, CourseRegistration.student_id == User.id)
-             .where(User.department_id == user.department_id)
+             .where(User.department_id == user.active_department_id)
         )
     elif user.active_role == UserRole.FACULTY:
         # A faculty member's registration queue = registrations where they are
@@ -1207,8 +1209,11 @@ async def _build_registration_card_context(r: CourseRegistration, db: AsyncSessi
     hod_dept_id = await _student_department_id(r.student_id, db)
     hod = None
     if hod_dept_id:
-        hod_result = await db.execute(select(User).where(User.role == UserRole.HOD, User.department_id == hod_dept_id, User.is_active == True).limit(1))
-        hod = hod_result.scalar_one_or_none()
+        # Multi-role/multi-department task (this revision) — resolved via
+        # UserRoleAssignment, not User.role/department_id (see the other
+        # call site's identical comment above in this file).
+        hod_id = await find_role_holder_in_department(UserRole.HOD, hod_dept_id, db)
+        hod = await db.get(User, hod_id) if hod_id else None
 
     # DPGS IS the final, persisted signatory (Section 17) — the ACTUAL
     # authenticated user who approved, never a live "whoever holds DPGS

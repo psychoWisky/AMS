@@ -17,7 +17,7 @@ from app.db.base import get_db
 from app.core.security import verify_password, hash_password, create_access_token, create_refresh_token, decode_token
 from app.core.dependencies import (
     get_current_user, require_roles, is_profile_complete, get_missing_profile_fields,
-    get_assigned_roles, pick_default_role,
+    get_assigned_roles, get_assigned_role_assignments, pick_default_assignment,
 )
 from app.core.config import settings
 from app.core.email import enqueue_email
@@ -183,14 +183,23 @@ class CreateFacultyRequest(BaseModel):
 
 
 def _user_dict(u: User) -> dict:
-    # Multi-role/role-switching task — `role` remains for legacy/display
-    # compatibility (see User.role's docstring); `assigned_roles`/
-    # `active_role` are the real authorization-relevant fields, populated by
-    # get_current_user/_issue_tokens onto the transient `assigned_roles`/
-    # `active_role` attributes. Falls back to `[u.role]`/`u.role` only for a
-    # caller that built a `User` without going through either of those paths.
-    assigned = getattr(u, "assigned_roles", None) or [u.role]
-    active = getattr(u, "active_role", None) or u.role
+    # Multi-role/multi-department task (this revision, extending the
+    # earlier multi-role/role-switching task) — `role`/`department_id`
+    # remain for legacy/display compatibility only (see their own model
+    # docstrings). `assigned_role_assignments`/`active_role_assignment_id`/
+    # `active_department_id` are the real authorization-relevant fields now:
+    # the same role can repeat across departments, so a flat role-name list
+    # is no longer sufficient — the frontend needs the full (role,
+    # department) pairs to render/switch between e.g. "HOD — Agriculture"
+    # and "HOD — Veterinary" as distinct, independently-selectable contexts.
+    # Populated by get_current_user/_issue_tokens onto the transient
+    # `assigned_role_assignments`/`active_role_assignment` attributes; falls
+    # back to a single synthetic legacy-role entry only for a caller that
+    # built a `User` without going through either of those paths.
+    assignments = getattr(u, "assigned_role_assignments", None) or [
+        UserRoleAssignment(user_id=u.id, role=u.role, department_id=u.department_id if u.role in (UserRole.HOD, UserRole.FACULTY) else None)
+    ]
+    active = getattr(u, "active_role_assignment", None) or assignments[0]
     return {
         "id": str(u.id),
         "email": u.email,
@@ -201,8 +210,22 @@ def _user_dict(u: User) -> dict:
         "last_name": u.last_name,
         "mobile": u.mobile,
         "role": u.role.value,
-        "assigned_roles": [r.value for r in assigned],
-        "active_role": active.value,
+        # Legacy, back-compat: distinct role NAMES only (no department
+        # detail) — kept so any not-yet-updated frontend code reading this
+        # array as `string[]` doesn't break. New code should read
+        # `assigned_role_assignments` instead.
+        "assigned_roles": sorted({a.role.value for a in assignments}),
+        "active_role": active.role.value,
+        "assigned_role_assignments": [
+            {
+                "id": str(a.id), "role": a.role.value,
+                "department_id": str(a.department_id) if a.department_id else None,
+                "department_name": a.department.name if getattr(a, "department", None) else None,
+            }
+            for a in assignments
+        ],
+        "active_role_assignment_id": str(active.id) if getattr(active, "id", None) else None,
+        "active_department_id": str(active.department_id) if active.department_id else None,
         "designation": u.designation,
         "department_id": str(u.department_id) if u.department_id else None,
         # Bulk Faculty/User Excel Upload task (this revision) — College is
@@ -223,36 +246,45 @@ def _user_dict(u: User) -> dict:
 
 
 async def _issue_tokens(user: User, request: Request, db: AsyncSession) -> TokenResponse:
-    """Multi-role/role-switching task. The access token's old `role` claim
-    was write-only dead data (confirmed by investigation: nothing ever read
-    it back — `require_roles` always re-checked the live DB row). It is
-    replaced by a `sid` claim pointing at the RefreshToken row created here,
-    which is this app's natural per-login/per-device "session" unit; that
-    row (not the token) is where the active role actually lives, re-read
-    fresh on every request (app.core.dependencies.get_current_user) — the
-    token still proves nothing about role by itself, exactly like `sub`
-    already didn't prove account validity by itself (a revoked/deactivated
-    user's token is still rejected by that same fresh DB lookup)."""
-    assigned = await get_assigned_roles(user.id, db)
-    if not assigned:
+    """Multi-role/multi-department task (extending the earlier multi-role/
+    role-switching task). The access token's old `role` claim was write-only
+    dead data (confirmed by investigation: nothing ever read it back —
+    `require_roles` always re-checked the live DB row). It is replaced by a
+    `sid` claim pointing at the RefreshToken row created here, which is this
+    app's natural per-login/per-device "session" unit; that row (not the
+    token) is where the active ASSIGNMENT (role + department together)
+    actually lives, re-read fresh on every request
+    (app.core.dependencies.get_current_user) — the token still proves
+    nothing about role by itself, exactly like `sub` already didn't prove
+    account validity by itself."""
+    assignments = await get_assigned_role_assignments(user.id, db)
+    if not assignments:
         # Defensive self-heal for a pre-migration/legacy account (see
         # get_current_user's identical fallback) — persist it so it's no
         # longer missing on the next login.
-        assigned = [user.role]
-        db.add(UserRoleAssignment(user_id=user.id, role=user.role))
+        fallback = UserRoleAssignment(
+            user_id=user.id, role=user.role,
+            department_id=user.department_id if user.role in (UserRole.HOD, UserRole.FACULTY) else None,
+        )
+        db.add(fallback)
+        await db.flush()
+        assignments = [fallback]
 
-    initial_active = pick_default_role(assigned, user.role)
+    initial_active = pick_default_assignment(assignments, None, user.role)
     rt_id = uuid_lib.uuid4()
     access_token = create_access_token(str(user.id), {"sid": str(rt_id)})
     refresh_token = create_refresh_token(str(user.id))
     token_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
     rt = RefreshToken(
         id=rt_id, user_id=user.id, token_hash=token_hash,
-        device_info=request.headers.get("user-agent", ""), active_role=initial_active,
+        device_info=request.headers.get("user-agent", ""), active_role_assignment_id=initial_active.id,
     )
     db.add(rt)
-    user.active_role = initial_active
-    user.assigned_roles = assigned
+    user.active_role_assignment = initial_active
+    user.active_role = initial_active.role
+    user.active_department_id = initial_active.department_id
+    user.assigned_roles = [a.role for a in assignments]
+    user.assigned_role_assignments = assignments
     return TokenResponse(access_token=access_token, refresh_token=refresh_token, user=_user_dict(user))
 
 
@@ -413,8 +445,16 @@ async def create_user(
     # Multi-role/role-switching task — every user must have at least one
     # UserRoleAssignment row from the moment they exist (Section 6/41's
     # "every existing user has at least one assigned role" invariant applies
-    # to every NEW user too, not only the migration backfill).
-    db.add(UserRoleAssignment(user_id=user.id, role=user.role, assigned_by=admin.id))
+    # to every NEW user too, not only the migration backfill). Multi-
+    # department task (this revision): the initial assignment's department
+    # comes from this same request's `body.department_id` for HOD/FACULTY
+    # (matching what was just set on the User row itself), NULL for every
+    # other role.
+    db.add(UserRoleAssignment(
+        user_id=user.id, role=user.role,
+        department_id=body.department_id if user.role in (UserRole.HOD, UserRole.FACULTY) else None,
+        assigned_by=admin.id,
+    ))
     try:
         await db.commit()
     except IntegrityError:
@@ -503,8 +543,16 @@ async def update_user(
     # roles"). This is purely ADDITIVE — it never removes another role a
     # Super Admin already granted via the new role-assignment endpoints.
     if body.role is not None:
+        # Multi-department task (this revision) — the assignment this legacy
+        # field can grant now needs a department dimension too, for the
+        # SAME reason effective_department_id was computed above: department-
+        # scoped roles are keyed on (role, department), not role alone.
+        assignment_department_id = effective_department_id if body.role in (UserRole.HOD, UserRole.FACULTY) else None
         existing = await db.execute(
-            select(UserRoleAssignment).where(UserRoleAssignment.user_id == target.id, UserRoleAssignment.role == body.role)
+            select(UserRoleAssignment).where(
+                UserRoleAssignment.user_id == target.id, UserRoleAssignment.role == body.role,
+                UserRoleAssignment.department_id == assignment_department_id,
+            )
         )
         if not existing.scalar_one_or_none():
             # Incharge Academic Cell / DPGS task (Section 3.1/8) — same
@@ -523,7 +571,7 @@ async def update_user(
                                f"{holder.full_name if holder else 'another user'}"
                                f"{f' ({holder.email})' if holder else ''}. Remove that assignment first.",
                     )
-            db.add(UserRoleAssignment(user_id=target.id, role=body.role, assigned_by=admin.id))
+            db.add(UserRoleAssignment(user_id=target.id, role=body.role, department_id=assignment_department_id, assigned_by=admin.id))
 
     try:
         await db.commit()
@@ -562,9 +610,9 @@ async def list_users(
     # department, regardless of any client-supplied department_id. Other
     # roles keep their existing unrestricted behavior (unchanged).
     if user.active_role == UserRole.HOD:
-        if not user.department_id:
+        if not user.active_department_id:
             return []
-        q = q.where(User.department_id == user.department_id)
+        q = q.where(User.department_id == user.active_department_id)
     elif department_id:
         q = q.where(User.department_id == department_id)
     result = await db.execute(q.order_by(User.first_name))
@@ -576,21 +624,42 @@ async def list_users(
     return users_out
 
 
-# ── Multi-role / role-switching (this revision) ─────────────────────────────
+# ── Multi-role / multi-department role assignment & switching (this revision) ──
 #
-# Assigned roles (UserRoleAssignment, DB-authoritative, Super Admin/Academic
-# Admin managed) vs. active role (RefreshToken.active_role, session-scoped —
-# see app.core.dependencies.get_current_user). `require_roles(...)` and
-# every inline role branch across the backend already read `user.active_role`
-# (never `user.role`, never anything client-supplied), so a role switch here
-# takes effect on the very next request with no new token needed.
+# Assigned assignments (UserRoleAssignment — role AND department together,
+# DB-authoritative, Super Admin managed) vs. active assignment
+# (RefreshToken.active_role_assignment_id, session-scoped — see
+# app.core.dependencies.get_current_user). `require_roles(...)` and every
+# inline role branch across the backend read `user.active_role`/
+# `user.active_department_id` (never `user.role`/`user.department_id`, never
+# anything client-supplied), so a switch here takes effect on the very next
+# request with no new token needed.
+#
+# Department rules per role, enforced below (Section 2.2-2.5):
+#   HOD / FACULTY              — department_id REQUIRED, must be a real Department.
+#   DPGS / INCHARGE_ACADEMIC_CELL / SUPER_ADMIN / STUDENT — department_id must be NULL.
+_DEPARTMENT_REQUIRED_ROLES = (UserRole.HOD, UserRole.FACULTY)
+
 
 class SwitchRoleRequest(BaseModel):
-    role: UserRole
+    # Identifies the EXACT persisted assignment to switch into — never an
+    # independent (role, department_id) pair a client could otherwise
+    # mismatch into a combination the user was never actually granted
+    # (Primary Objective's explicit "prefer assignment_id" instruction).
+    assignment_id: UUID
 
 
 class RoleAssignmentRequest(BaseModel):
     role: UserRole
+    department_id: Optional[UUID] = None
+
+
+def _assignment_dict(a: UserRoleAssignment) -> dict:
+    return {
+        "id": str(a.id), "role": a.role.value,
+        "department_id": str(a.department_id) if a.department_id else None,
+        "department_name": a.department.name if getattr(a, "department", None) else None,
+    }
 
 
 @router.post("/switch-role")
@@ -599,13 +668,20 @@ async def switch_role(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Backend-authoritative role switch (Section 9/10). Verifies the
-    requested role is actually assigned to THIS user (re-read fresh by
-    get_current_user above, never trusted from the request) before touching
-    anything — an unassigned role (including `super_admin`) is always
-    rejected with 403, regardless of what the client sends."""
-    if body.role not in user.assigned_roles:
-        raise HTTPException(status_code=403, detail="This role is not assigned to your account.")
+    """Backend-authoritative role switch. Verifies the requested assignment
+    actually belongs to THIS user (re-read fresh by get_current_user above,
+    never trusted from the request) before touching anything — an
+    assignment id the user doesn't hold (including one belonging to a
+    DIFFERENT user, or one that was just removed) is always rejected with
+    403, regardless of what the client sends. Selecting a specific
+    assignment id — not an independent role+department pair — is what makes
+    it structurally impossible for the client to manufacture a combination
+    (e.g. "HOD" + a department the user only holds "FACULTY" in) that was
+    never actually granted."""
+    assignments: list[UserRoleAssignment] = getattr(user, "assigned_role_assignments", [])
+    target_assignment = next((a for a in assignments if a.id == body.assignment_id), None)
+    if target_assignment is None:
+        raise HTTPException(status_code=403, detail="This role/department assignment does not belong to your account.")
 
     session = getattr(user, "_active_session", None)
     if session is None:
@@ -615,8 +691,10 @@ async def switch_role(
         # narrow, self-resolving window; logging in again issues one.
         raise HTTPException(status_code=401, detail="Your session does not support role switching. Please log in again.")
 
-    session.active_role = body.role
-    user.active_role = body.role
+    session.active_role_assignment_id = target_assignment.id
+    user.active_role_assignment = target_assignment
+    user.active_role = target_assignment.role
+    user.active_department_id = target_assignment.department_id
     await db.commit()
     return _user_dict(user)
 
@@ -630,8 +708,14 @@ async def get_user_roles(
     target = await db.get(User, user_id)
     if not target:
         raise HTTPException(status_code=404, detail="User not found.")
-    assigned = await get_assigned_roles(user_id, db)
-    return {"user_id": str(user_id), "assigned_roles": [r.value for r in assigned]}
+    assignments = await get_assigned_role_assignments(user_id, db)
+    return {
+        "user_id": str(user_id),
+        # Legacy, back-compat shape (distinct role names only).
+        "assigned_roles": sorted({a.role.value for a in assignments}),
+        # Full (role, department) detail — what the new Super Admin UI needs.
+        "assignments": [_assignment_dict(a) for a in assignments],
+    }
 
 
 @router.post("/users/{user_id}/roles", status_code=201)
@@ -641,32 +725,58 @@ async def add_user_role(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_roles(UserRole.SUPER_ADMIN)),
 ):
-    """Role assignment is Super Admin/Academic Admin-only (Section 12) — the
-    same authorization already used for create_user/update_user above, never
+    """Role assignment is Super Admin-only (Section 12) — the same
+    authorization already used for create_user/update_user above, never
     self-service and never reachable by a user for their own account through
     any other endpoint."""
     target = await db.get(User, user_id)
     if not target:
         raise HTTPException(status_code=404, detail="User not found.")
 
-    # Preserve the existing HOD-requires-a-department business rule
-    # (Section 29/30) — never silently assign a default department.
-    if body.role == UserRole.HOD and not target.department_id:
-        raise HTTPException(status_code=400, detail="Cannot assign HOD: this user has no department assigned. Assign a department first.")
+    # Department rule per role (Section 2.2-2.5) — HOD/FACULTY REQUIRE a
+    # real department; every other role must NOT be given one (never
+    # silently ignored — an explicit 400 if a client sends one anyway).
+    if body.role in _DEPARTMENT_REQUIRED_ROLES:
+        if not body.department_id:
+            raise HTTPException(status_code=400, detail=f"{body.role.value.title()} requires a department.")
+        dept = await db.get(Department, body.department_id)
+        if not dept:
+            raise HTTPException(status_code=400, detail="The specified department does not exist.")
+    elif body.department_id is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{_ROLE_DISPLAY_NAMES.get(body.role, body.role.value)} is institution-wide and cannot be given a department.",
+        )
 
-    existing = await db.execute(
-        select(UserRoleAssignment).where(UserRoleAssignment.user_id == user_id, UserRoleAssignment.role == body.role)
-    )
-    if existing.scalar_one_or_none():
-        raise HTTPException(status_code=409, detail="This role is already assigned to the user.")
+    # Multi-role/multi-department task (Section 2.4) — Super Admin is
+    # exclusive in both directions: it cannot be layered onto a user who
+    # already holds other roles, and no other role can be layered onto an
+    # existing Super Admin. Resolving this requires removing the conflicting
+    # assignment(s) first via this same endpoint's DELETE counterpart —
+    # exactly the existing application workflow, not a new one.
+    existing_assignments = await get_assigned_role_assignments(user_id, db)
+    existing_roles = {a.role for a in existing_assignments}
+    if body.role == UserRole.SUPER_ADMIN and (existing_roles - {UserRole.SUPER_ADMIN}):
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot assign Super Admin: this user already holds other roles. Remove them first.",
+        )
+    if UserRole.SUPER_ADMIN in existing_roles and body.role != UserRole.SUPER_ADMIN:
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot assign an additional role to a Super Admin. Super Admin is exclusive — remove it first if this account should hold a different role.",
+        )
 
-    # Incharge Academic Cell / DPGS task (Section 3.1/8) — exactly one active
-    # holder each, enforced here as a friendly, pre-flight check AND at the
-    # database level (partial unique index, migration 0016) as the
-    # race-condition-safe backstop caught below. The SAME user may hold both
-    # roles (this check only looks for a DIFFERENT existing holder of the
-    # SAME role) — that is a completely separate, still-permitted case,
-    # already handled by the plain duplicate check just above.
+    if any(a.role == body.role and a.department_id == body.department_id for a in existing_assignments):
+        raise HTTPException(status_code=409, detail="This exact role/department assignment already exists for the user.")
+
+    # Incharge Academic Cell / DPGS task — exactly one active holder each,
+    # enforced here as a friendly, pre-flight check AND at the database
+    # level (partial unique index, migration 0016) as the race-condition-
+    # safe backstop caught below. The SAME user may hold both roles (this
+    # check only looks for a DIFFERENT existing holder of the SAME role) —
+    # a completely separate, still-permitted case, already handled by the
+    # exact-duplicate check just above.
     if body.role in _SINGLE_HOLDER_ROLES:
         other = (await db.execute(
             select(UserRoleAssignment).where(UserRoleAssignment.role == body.role)
@@ -680,51 +790,75 @@ async def add_user_role(
                        f"{f' ({holder.email})' if holder else ''}. Remove that assignment first before assigning it to someone else.",
             )
 
-    db.add(UserRoleAssignment(user_id=user_id, role=body.role, assigned_by=admin.id))
+    db.add(UserRoleAssignment(user_id=user_id, role=body.role, department_id=body.department_id, assigned_by=admin.id))
     try:
         await db.commit()
     except IntegrityError:
         # Race-condition backstop (Section 8's explicit requirement) — two
-        # concurrent assignment requests for the same single-holder role can
-        # both pass the pre-flight check above; the database's own partial
-        # unique index is the actual source of truth and rejects the loser.
+        # concurrent assignment requests can both pass the pre-flight checks
+        # above; the database's own unique constraints/partial indexes are
+        # the actual source of truth and reject the loser.
         await db.rollback()
         raise HTTPException(
             status_code=409,
-            detail=f"{_ROLE_DISPLAY_NAMES.get(body.role, body.role.value)} was just assigned to another user. Please refresh and try again.",
+            detail="This assignment was just created by another request, or conflicts with a single-holder role. Please refresh and try again.",
         )
-    assigned = await get_assigned_roles(user_id, db)
-    return {"message": "Role assigned.", "assigned_roles": [r.value for r in assigned]}
+    assignments = await get_assigned_role_assignments(user_id, db)
+    return {
+        "message": "Role assigned.",
+        "assigned_roles": sorted({a.role.value for a in assignments}),
+        "assignments": [_assignment_dict(a) for a in assignments],
+    }
 
 
 @router.delete("/users/{user_id}/roles/{role}")
 async def remove_user_role(
     user_id: UUID,
     role: UserRole,
+    department_id: Optional[UUID] = None,
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_roles(UserRole.SUPER_ADMIN)),
 ):
-    """Role removal takes effect immediately (Section 10/28): any session
-    currently active in this role self-heals to a deterministic fallback on
-    its very next request (app.core.dependencies.get_current_user — the
-    session's `active_role` is re-validated against assignments on every
-    call), never remaining authorized as the removed role merely because an
-    old token/frontend cache still names it."""
+    """Role removal takes effect immediately: any session currently active
+    in the removed assignment self-heals to a deterministic fallback on its
+    very next request (app.core.dependencies.get_current_user — the
+    session's active assignment is re-validated against current assignments
+    on every call), never remaining authorized merely because an old token/
+    frontend cache still names it.
+
+    Multi-role/multi-department task — `department_id` disambiguates WHICH
+    assignment to remove when the user holds the same role in more than one
+    department (e.g. HOD @ A and HOD @ B). It may be omitted only when the
+    user holds that role in exactly one department (or not at all, for
+    global roles) — preserves today's single-department callers unchanged."""
     target = await db.get(User, user_id)
     if not target:
         raise HTTPException(status_code=404, detail="User not found.")
 
-    assigned = await get_assigned_roles(user_id, db)
-    if role not in assigned:
+    assignments = await get_assigned_role_assignments(user_id, db)
+    matching = [a for a in assignments if a.role == role]
+    if not matching:
         raise HTTPException(status_code=404, detail="This role is not assigned to the user.")
-    if len(assigned) <= 1:
+
+    if department_id is not None:
+        row = next((a for a in matching if a.department_id == department_id), None)
+        if row is None:
+            raise HTTPException(status_code=404, detail="This exact role/department assignment is not assigned to the user.")
+    elif len(matching) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail=f"This user holds {role.value} in more than one department — specify which department to remove.",
+        )
+    else:
+        row = matching[0]
+
+    if len(assignments) <= 1:
         raise HTTPException(status_code=400, detail="Cannot remove a user's only assigned role. Assign another role first.")
 
     if role == UserRole.SUPER_ADMIN:
         # Mirrors update_user's existing "at least one active Super Admin
-        # must remain" invariant, but counts by ASSIGNMENT (not the legacy
-        # scalar column) so it stays correct once a Super Admin can also
-        # hold other roles.
+        # must remain" invariant, counted by ASSIGNMENT (not the legacy
+        # scalar column).
         count_result = await db.execute(
             select(func.count(func.distinct(UserRoleAssignment.user_id)))
             .select_from(UserRoleAssignment)
@@ -734,19 +868,23 @@ async def remove_user_role(
         if count_result.scalar() <= 1:
             raise HTTPException(status_code=400, detail="Cannot remove: at least one active Super Admin must remain.")
 
-    row = (await db.execute(
-        select(UserRoleAssignment).where(UserRoleAssignment.user_id == user_id, UserRoleAssignment.role == role)
-    )).scalar_one()
     await db.delete(row)
 
-    remaining = [r for r in assigned if r != role]
-    if target.role == role:
+    remaining = [a for a in assignments if a.id != row.id]
+    if target.role == role and not any(a.role == role for a in remaining):
         # Keep the legacy display field from contradicting the assignment
-        # set it's supposed to be consistent with (Section 7).
-        target.role = pick_default_role(remaining, None)
+        # set it's supposed to be consistent with — only reassign it if NO
+        # remaining assignment still has this role (e.g. removing HOD @ A
+        # while HOD @ B remains must NOT change the legacy `role` field,
+        # since the user is still, legitimately, an HOD).
+        target.role = pick_default_assignment(remaining, None, None).role
 
     await db.commit()
-    return {"message": "Role removed.", "assigned_roles": [r.value for r in remaining]}
+    return {
+        "message": "Role removed.",
+        "assigned_roles": sorted({a.role.value for a in remaining}),
+        "assignments": [_assignment_dict(a) for a in remaining],
+    }
 
 
 # ── HOD: Add Faculty (BUSINESS_LOGIC.md Section N.2/N.3) ──────────────────────
@@ -757,7 +895,12 @@ async def create_faculty(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_roles(UserRole.HOD)),
 ):
-    if not user.department_id:
+    # Multi-role/multi-department task (this revision) — a multi-department
+    # HOD's new faculty must land in whichever department THIS session is
+    # currently acting as HOD for, never their scalar `User.department_id`
+    # (which, for a multi-department HOD, may not even be one of their
+    # actual HOD departments anymore).
+    if not user.active_department_id:
         raise HTTPException(400, "Your account has no department assigned; contact an administrator.")
 
     # Designation-management task — backend-authoritative check against active
@@ -786,7 +929,7 @@ async def create_faculty(
         designation=designation_row.name,
         address=body.address,
         role=UserRole.FACULTY,
-        department_id=user.department_id,  # never client-supplied — always the HOD's own department
+        department_id=user.active_department_id,  # never client-supplied — always the HOD's own active department
         is_active=True,
         is_verified=True,
         must_change_password=True,
@@ -794,7 +937,7 @@ async def create_faculty(
     db.add(faculty)
     try:
         await db.flush()
-        db.add(UserRoleAssignment(user_id=faculty.id, role=UserRole.FACULTY, assigned_by=user.id))
+        db.add(UserRoleAssignment(user_id=faculty.id, role=UserRole.FACULTY, department_id=user.active_department_id, assigned_by=user.id))
         # Bulk Upload SMTP timeout fix (this revision) — the credential email
         # is now enqueued into the SAME transaction/commit as the user and
         # role-assignment rows above (transactional outbox pattern), instead
@@ -1058,7 +1201,10 @@ async def _create_bulk_users(valid_rows: list[dict], db: AsyncSession) -> list[U
         await db.flush()
         ams_link = settings.AMS_FRONTEND_URL
         for u in created:
-            db.add(UserRoleAssignment(user_id=u.id, role=u.role))
+            db.add(UserRoleAssignment(
+                user_id=u.id, role=u.role,
+                department_id=u.department_id if u.role in (UserRole.HOD, UserRole.FACULTY) else None,
+            ))
             enqueue_email(
                 db, u.email,
                 "Your AVFU AMS Account",
@@ -1121,7 +1267,7 @@ async def bulk_upload_faculty(
     rather than silently substituting the correct value, per the explicit
     "AVFU wants the uploaded file itself to be correct" instruction — this
     endpoint never silently corrects a wrong Department/Role."""
-    if not user.department_id:
+    if not user.active_department_id:
         raise HTTPException(400, "Your account has no department assigned; contact an administrator.")
 
     content = await file.read()
@@ -1130,7 +1276,7 @@ async def bulk_upload_faculty(
 
     rows = parse_bulk_upload_file(file.filename or "", content, _USER_BULK_COLUMNS)
     findings, valid = await _validate_user_bulk_rows(
-        rows, db, force_role=UserRole.FACULTY, force_department_id=user.department_id,
+        rows, db, force_role=UserRole.FACULTY, force_department_id=user.active_department_id,
     )
     if findings:
         return JSONResponse(status_code=400, content={"success": False, "imported_count": 0, "errors": findings})

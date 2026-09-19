@@ -165,7 +165,7 @@ def _authorize_department_manage(department_id: Optional[UUID], user: User) -> N
     if user.active_role == UserRole.SUPER_ADMIN:
         return
     if user.active_role == UserRole.HOD:
-        if department_id and user.department_id and department_id == user.department_id:
+        if department_id and user.active_department_id and department_id == user.active_department_id:
             return
         raise HTTPException(403, "You can only manage courses/offerings within your own department.")
     raise HTTPException(403, "Insufficient permissions.")
@@ -214,7 +214,7 @@ def _authorize_availability_manage(department_id: UUID, user: User) -> None:
     if user.active_role == UserRole.SUPER_ADMIN:
         return
     if user.active_role == UserRole.HOD:
-        if user.department_id and department_id == user.department_id:
+        if user.active_department_id and department_id == user.active_department_id:
             return
         raise HTTPException(403, "You can only manage course availability for your own department.")
     raise HTTPException(403, "Insufficient permissions.")
@@ -249,12 +249,12 @@ async def list_courses_available_to_my_department(
     (Section 5). For SUPER_ADMIN (no home department), this is
     intentionally empty rather than an error — there is no meaningful "my
     department" for those roles; use GET /courses/{id}/availability instead."""
-    if not user.department_id:
+    if not user.active_department_id:
         return []
     result = await db.execute(
         select(CourseAvailability)
         .options(selectinload(CourseAvailability.course).selectinload(Course.department))
-        .where(CourseAvailability.department_id == user.department_id)
+        .where(CourseAvailability.department_id == user.active_department_id)
         .join(Course, Course.id == CourseAvailability.course_id)
         .order_by(Course.course_number)
     )
@@ -294,9 +294,9 @@ async def list_courses(
         # ownership-OR-explicit-availability (see _course_visibility_condition).
         q = q.where(_course_visibility_condition(scope["department_id"]))
     elif user.active_role == UserRole.HOD:
-        if not user.department_id:
+        if not user.active_department_id:
             return []
-        q = q.where(Course.department_id == user.department_id)
+        q = q.where(Course.department_id == user.active_department_id)
     elif department_id:
         q = q.where(Course.department_id == department_id)
     result = await db.execute(q.order_by(Course.course_number))
@@ -364,7 +364,7 @@ async def get_course(course_id: UUID, db: AsyncSession = Depends(get_db), user: 
         if not visible:
             raise HTTPException(404, "Course not found.")
     elif user.active_role == UserRole.HOD:
-        if not (user.department_id and c.department_id and user.department_id == c.department_id):
+        if not (user.active_department_id and c.department_id and user.active_department_id == c.department_id):
             raise HTTPException(403, "You can only view courses within your own department.")
     elif user.active_role == UserRole.FACULTY:
         # BUSINESS_LOGIC.md Section Q — Faculty has no generic course-catalogue
@@ -861,7 +861,7 @@ async def bulk_upload_courses(
       * no findings, and (no warnings OR warnings + valid confirmation) ->
         HTTP 201, unchanged `{success, imported_count, filename}` shape.
     """
-    if user.active_role == UserRole.HOD and not user.department_id:
+    if user.active_role == UserRole.HOD and not user.active_department_id:
         raise HTTPException(400, "Your account has no department assigned; contact an administrator.")
 
     content = await file.read()
@@ -893,7 +893,7 @@ async def bulk_upload_courses(
     # condition requirement): if another user created a conflicting course
     # between an earlier preview and this call, it is caught right here.
     rows = parse_bulk_upload_file(file.filename or "", content, _COURSE_BULK_COLUMNS)
-    force_department_id = user.department_id if user.active_role == UserRole.HOD else None
+    force_department_id = user.active_department_id if user.active_role == UserRole.HOD else None
     findings, warnings, valid = await _validate_course_bulk_rows(rows, db, force_department_id=force_department_id)
 
     # Hard duplicates / ordinary validation errors block unconditionally —
@@ -948,7 +948,7 @@ async def add_course_availability(
     c = await db.get(Course, course_id)
     if not c: raise HTTPException(404, "Course not found.")
 
-    target_department_id = body.department_id or user.department_id
+    target_department_id = body.department_id or user.active_department_id
     if not target_department_id:
         raise HTTPException(400, "department_id is required.")
     _authorize_availability_manage(target_department_id, user)
@@ -1060,9 +1060,9 @@ async def list_all_offerings(
         if user.active_role == UserRole.SUPER_ADMIN:
             pass  # unrestricted, same as _authorize_offering_management
         elif user.active_role == UserRole.HOD:
-            if not user.department_id:
+            if not user.active_department_id:
                 return []
-            q = q.where(CourseOffering.department_id == user.department_id)
+            q = q.where(CourseOffering.department_id == user.active_department_id)
         elif user.active_role == UserRole.FACULTY:
             q = q.where(CourseOffering.id.in_(
                 select(OfferingFaculty.offering_id).where(OfferingFaculty.faculty_id == user.id)
@@ -1070,11 +1070,11 @@ async def list_all_offerings(
         else:
             return []  # fail closed for roles with no defined "mine" scope
     else:
-        if user.active_role == UserRole.HOD and user.department_id:
+        if user.active_role == UserRole.HOD and user.active_department_id:
             # HOD's Offer Course / Course Management views are implicitly scoped
             # to their own department (BUSINESS_LOGIC.md L.4) — no explicit
             # department filter is part of the confirmed filter set.
-            q = q.where(CourseOffering.department_id == user.department_id)
+            q = q.where(CourseOffering.department_id == user.active_department_id)
         elif user.active_role == UserRole.FACULTY:
             # BUSINESS_LOGIC.md Section Q — Faculty has no legitimate "browse
             # all offerings" use; Teacher Courses (mine=true) is the only
@@ -1183,7 +1183,7 @@ async def get_offering(offering_id: UUID, db: AsyncSession = Depends(get_db), us
     # _authorize_offering_management in enrollment.py — same principle, this
     # endpoint previously had no such check at all beyond the student branch above).
     elif user.active_role == UserRole.HOD:
-        if not (user.department_id and o.department_id and user.department_id == o.department_id):
+        if not (user.active_department_id and o.department_id and user.active_department_id == o.department_id):
             raise HTTPException(403, "You can only view offerings within your own department.")
     elif user.active_role == UserRole.FACULTY:
         assigned = await db.execute(

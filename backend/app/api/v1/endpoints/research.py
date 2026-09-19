@@ -121,7 +121,7 @@ async def _authorize_propose_major_advisor(student_id: UUID, user: User, db: Asy
         return
     if user.active_role == UserRole.HOD:
         dept_id = await _student_department_id(student_id, db)
-        if dept_id and user.department_id and dept_id == user.department_id:
+        if dept_id and user.active_department_id and dept_id == user.active_department_id:
             return
         raise HTTPException(403, "You can only propose a Major Advisor for students in your own department.")
     raise HTTPException(403, "Only HOD (or an administrator) may propose a Major Advisor.")
@@ -150,7 +150,7 @@ async def _authorize_committee_view(committee: AdvisoryCommittee, user: User, db
         return
     if user.active_role == UserRole.HOD:
         dept_id = await _student_department_id(committee.student_id, db)
-        if dept_id and user.department_id and dept_id == user.department_id:
+        if dept_id and user.active_department_id and dept_id == user.active_department_id:
             return
         raise HTTPException(403, "You can only view committees within your own department.")
     if user.active_role == UserRole.FACULTY:
@@ -570,14 +570,14 @@ async def list_committees(db: AsyncSession = Depends(get_db), user: User = Depen
     if user.active_role in _GLOBAL_VIEW_ROLES:
         pass
     elif user.active_role == UserRole.HOD:
-        if not user.department_id:
+        if not user.active_department_id:
             return []
         # Programme<->Department many-to-many redesign — the student's OWN
         # department_id is authoritative now, never inferred via their
         # Programme's department (a Programme can have many Departments).
         q = (
             q.join(User, AdvisoryCommittee.student_id == User.id)
-             .where(User.department_id == user.department_id)
+             .where(User.department_id == user.active_department_id)
         )
     elif user.active_role == UserRole.FACULTY:
         q = q.where(AdvisoryCommittee.id.in_(
