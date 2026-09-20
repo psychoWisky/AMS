@@ -118,6 +118,7 @@ def _present(rows, names): return {n for n, c in _ids(rows, names).items() if c 
 
 
 ALL = ["UA", "UB", "UC", "UD", "UE", "UF", "S_A", "S_B", "UM", "HOD_A", "HOD_B"]
+STAFF = [n for n in ALL if n not in ("UE", "S_A", "S_B")]   # UE inactive; students are not in the staff directory
 
 
 async def _setup() -> None:
@@ -193,14 +194,14 @@ async def t_user_management_shows_real_paired_assignments():
     assert pairs("UC") == sorted([("faculty", str(B.id), B.name), ("hod", str(A.id), A.name)]), "HOD@A and FACULTY@B must stay paired"
     assert pairs("UM") == sorted([("hod", str(A.id), A.name), ("hod", str(B.id), B.name)]), pairs("UM")
     assert pairs("UD") == [("hod", str(B.id), B.name)]
-    assert pairs("S_B") == [("student", None, None)]
+    assert counts["S_A"] == 0 and counts["S_B"] == 0, "students are not part of the staff directory"
     if S["dpgs"]:
         assert pairs("G") == [("dpgs", None, None)], "a global role has no department and none is invented"
     # real persisted ids, never a fabricated "None"
     async with AsyncSessionLocal() as db:
         real = {str(i) for i in (await db.execute(select(UserRoleAssignment.id).where(UserRoleAssignment.user_id.in_([U[n] for n in ALL])))).scalars().all()}
-    shown = {a["id"] for n in ALL if n != "UE" for a in by_id[str(U[n])]["assigned_role_assignments"]}
-    assert shown <= real and "None" not in shown and len(shown) == len([1 for n in ALL if n != "UE" for _ in by_id[str(U[n])]["assigned_role_assignments"]]), "assignment ids must be the persisted ones"
+    shown = {a["id"] for n in STAFF for a in by_id[str(U[n])]["assigned_role_assignments"]}
+    assert shown <= real and "None" not in shown and len(shown) == len([1 for n in STAFF for _ in by_id[str(U[n])]["assigned_role_assignments"]]), "assignment ids must be the persisted ones"
     # legacy fields are unchanged and no session is implied
     ua = by_id[str(U["UA"])]
     assert ua["role"] == "faculty" and ua["department_id"] == str(A.id), "legacy primary fields must be untouched"
@@ -216,8 +217,8 @@ async def t_role_filter_matches_any_assignment():
     rows = await _list(S["super"], role="HOD")   # case-insensitive
     assert _present(rows, ALL) == {"UB", "UC", "UD", "UM", "HOD_A", "HOD_B"}, _present(rows, ALL)
     assert all(c <= 1 for c in _ids(rows, ALL).values()), "UM holds HOD twice but must appear once"
-    rows = await _list(S["super"], role="student")
-    assert _present(rows, ALL) == {"S_A", "S_B"}
+    r = await _call("GET", "/auth/users", S["super"], params={"role": "student"})
+    assert r.status_code == 400, "students are managed under /students, not the user directory"
     if S["dpgs"]:
         assert "G" in _present(await _list(S["super"], role="dpgs"), ["G"])
     r = await _call("GET", "/auth/users", S["super"], params={"role": "wizard"})
@@ -229,8 +230,7 @@ async def t_department_filter_uses_assignments():
     assert _present(await _list(S["super"], role="faculty", department_id=str(B)), ALL) == {"UA", "UB", "UC"}
     assert _present(await _list(S["super"], role="faculty", department_id=str(A)), ALL) == {"UA", "UF"}
     assert _present(await _list(S["super"], role="hod", department_id=str(A)), ALL) == {"UC", "UM", "HOD_A"}
-    assert _present(await _list(S["super"], department_id=str(B)), ALL) == {"UA", "UB", "UC", "UD", "UM", "HOD_B", "S_B"}, "any staff assignment in B, plus students whose own department is B"
-    assert _present(await _list(S["super"], role="student", department_id=str(A)), ALL) == {"S_A"}
+    assert _present(await _list(S["super"], department_id=str(B)), ALL) == {"UA", "UB", "UC", "UD", "UM", "HOD_B"}, "any staff assignment in B (students are not listed)"
 
 
 # ── 2. HOD Faculty Management ───────────────────────────────────────────────
@@ -252,11 +252,11 @@ async def t_hod_scope_cannot_be_overridden_by_client():
     assert forged == base, f"department_id=<other dept> must not change a HOD's scope: {forged} vs {base}"
     assert "UF" not in forged
     assert _present(await _list(TOK["HOD_B"], role="hod", department_id=str(S["A"].id)), ALL) == {"UB", "UD", "UM", "HOD_B"}, "HOD list is B's HODs only"
-    # Students keep their legacy-department scoping.
-    st = _present(await _list(TOK["HOD_B"], role="student"), ALL)
-    assert st == {"S_B"}, st
+    # A HOD can no longer list students through the directory.
+    r = await _call("GET", "/auth/users", TOK["HOD_B"], params={"role": "student"})
+    assert r.status_code == 400
     anyrole = _present(await _list(TOK["HOD_B"]), ALL)
-    assert {"UA", "UB", "UC", "UD", "UM", "HOD_B", "S_B"} <= anyrole and not (anyrole & {"UF", "S_A", "HOD_A"}), anyrole
+    assert {"UA", "UB", "UC", "UD", "UM", "HOD_B"} <= anyrole and not (anyrole & {"UF", "S_A", "S_B", "HOD_A"}), anyrole
 
 
 async def t_hod_sees_only_assignments_in_own_department():
@@ -382,9 +382,9 @@ async def main() -> None:
         for name, fn in {
             "USER MGMT: every user once; real, paired assignments; global role has no department; legacy fields intact; no session implied": t_user_management_shows_real_paired_assignments,
             "USER MGMT: role filter matches ANY assignment (Faculty, HOD, Student, DPGS), no duplicates, bad role -> 400": t_role_filter_matches_any_assignment,
-            "USER MGMT: department filter is assignment-based (students by their own department)": t_department_filter_uses_assignments,
+            "USER MGMT: department filter is assignment-based (staff only)": t_department_filter_uses_assignments,
             "FACULTY PAGE: HOD B sees FAC@A+B, HOD@B+FAC@B, HOD@A+FAC@B; not HOD@B-only, FAC@A-only, inactive, students; HOD A the mirror image": t_hod_faculty_visibility_matrix,
-            "FACULTY PAGE: a client-supplied department_id cannot widen a HOD's scope; student scoping unchanged": t_hod_scope_cannot_be_overridden_by_client,
+            "FACULTY PAGE: a client-supplied department_id cannot widen a HOD's scope; students not listed": t_hod_scope_cannot_be_overridden_by_client,
             "FACULTY PAGE: a HOD sees only assignments in their own department": t_hod_sees_only_assignments_in_own_department,
             "FACULTY PAGE: a HOD@A+HOD@B user follows the ACTIVE assignment after switching": t_multi_department_hod_uses_active_assignment,
             "QUERY QUALITY: listing users issues a constant number of queries (no N+1)": t_no_n_plus_one_queries,

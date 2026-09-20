@@ -14,6 +14,9 @@ interface User {
   department_id: string | null; program_id: string | null;
   first_name?: string; middle_name?: string | null; last_name?: string; mobile?: string | null;
   department_name?: string | null;
+  title?: string | null; employee_id?: string | null; date_of_birth?: string | null; gender?: string | null;
+  blood_group?: string | null; father_name?: string | null; abc_id?: string | null; address?: string | null;
+  college_id?: string | null;
   // Every persisted role assignment, role + department kept as a pair (see
   // GET /auth/users). `role`/`department_name` above are only the user's
   // legacy primary role / home department.
@@ -28,7 +31,13 @@ interface RoleAssignmentRow { id: string; role: string; department_id: string | 
 // options for a chosen Programme come from GET /departments?program_id=...
 interface ProgramOpt { id: string; name: string; code: string; level: string; }
 
-const ROLE_OPTIONS = Object.keys(ROLES);
+// Students are not managed here (see the Students page), so they are not a role option.
+const ROLE_OPTIONS = Object.keys(ROLES).filter((r) => r !== "student");
+const TITLES = ["Dr.", "Mr", "Mrs", "Miss"];
+const GENDERS = ["Male", "Female", "Other"];
+const BLOOD_GROUPS = ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"];
+// Profile fields the Edit dialog sends only when the admin actually changed them.
+const PROFILE_EDIT_FIELDS = ["title", "employee_id", "date_of_birth", "gender", "blood_group", "father_name", "abc_id", "address", "college_id"] as const;
 // One "Role — Department" line per real assignment; the pair is never split
 // into separate role / department lists. Institution-wide roles have no
 // department and read "Role — Global"; a Student has none either (their
@@ -56,7 +65,10 @@ const DEPARTMENT_ROLE_OPTIONS = ["hod", "faculty"];
 // successful create, and Cancel) instead of relying on stale useState from a
 // previous session of the modal.
 const EMPTY_FORM = { email: "", password: "", first_name: "", middle_name: "", last_name: "", role: "faculty", designation: "", mobile: "", department_id: "", program_id: "" };
-const EMPTY_EDIT_FORM = { email: "", first_name: "", middle_name: "", last_name: "", role: "", designation: "", mobile: "", department_id: "", program_id: "" };
+const EMPTY_EDIT_FORM = {
+  email: "", first_name: "", middle_name: "", last_name: "", role: "", designation: "", mobile: "", department_id: "", program_id: "",
+  title: "", employee_id: "", date_of_birth: "", gender: "", blood_group: "", father_name: "", abc_id: "", address: "", college_id: "",
+};
 
 export default function UsersPage() {
   const role = useRole();
@@ -67,6 +79,7 @@ export default function UsersPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [editUser, setEditUser] = useState<User | null>(null);
   const [editForm, setEditForm] = useState(EMPTY_EDIT_FORM);
+  const [editInitial, setEditInitial] = useState(EMPTY_EDIT_FORM);
   const [form, setForm] = useState(EMPTY_FORM);
   const [resetPwUser, setResetPwUser] = useState<User | null>(null);
   const [showBulkUpload, setShowBulkUpload] = useState(false);
@@ -88,6 +101,12 @@ export default function UsersPage() {
     queryKey: ["ams-departments"],
     queryFn: async () => (await api.get("/departments")).data,
     enabled: showCreate || !!editUser || !!rolesUser,
+  });
+
+  const { data: colleges = [] } = useQuery<{ id: string; name: string }[]>({
+    queryKey: ["ams-colleges-active"],
+    queryFn: async () => (await api.get("/admin/colleges")).data,
+    enabled: !!editUser,
   });
 
   const { data: programs = [] } = useQuery<ProgramOpt[]>({
@@ -146,7 +165,12 @@ export default function UsersPage() {
   });
 
   const updateUser = useMutation({
-    mutationFn: () => api.patch(`/auth/users/${editUser?.id}`, {
+    mutationFn: () => {
+      // Profile fields are sent only when changed; a blank value clears it (null).
+      const changedProfile: Record<string, string | null> = {};
+      for (const k of PROFILE_EDIT_FIELDS) if (editForm[k] !== editInitial[k]) changedProfile[k] = editForm[k] || null;
+      return api.patch(`/auth/users/${editUser?.id}`, {
+      ...changedProfile,
       email: editForm.email,
       first_name: editForm.first_name,
       middle_name: editForm.middle_name || null,
@@ -156,7 +180,8 @@ export default function UsersPage() {
       role: editForm.role,
       department_id: editForm.department_id || null,
       program_id: editForm.program_id || null,
-    }),
+    });
+    },
     onSuccess: () => { toast.success("User updated."); qc.invalidateQueries({ queryKey: ["ams-users"] }); setEditUser(null); setEditForm(EMPTY_EDIT_FORM); },
     onError: (e: unknown) => toast.error((e as {response?:{data?:{detail?:string}}})?.response?.data?.detail ?? "Failed to update user."),
   });
@@ -198,7 +223,7 @@ export default function UsersPage() {
   const closeCreate = () => { setShowCreate(false); setForm(EMPTY_FORM); };
 
   const openEdit = (u: User) => {
-    setEditForm({
+    const form = {
       email: u.email,
       first_name: u.first_name ?? u.full_name.split(" ")[0] ?? "",
       middle_name: u.middle_name ?? "",
@@ -208,17 +233,46 @@ export default function UsersPage() {
       mobile: u.mobile ?? "",
       department_id: u.department_id ?? "",
       program_id: u.program_id ?? "",
-    });
+      title: u.title ?? "",
+      employee_id: u.employee_id ?? "",
+      date_of_birth: u.date_of_birth ?? "",
+      gender: u.gender ?? "",
+      blood_group: u.blood_group ?? "",
+      father_name: u.father_name ?? "",
+      abc_id: u.abc_id ?? "",
+      address: u.address ?? "",
+      college_id: u.college_id ?? "",
+    };
+    setEditForm(form);
+    setEditInitial(form);
     setEditUser(u);
   };
-  const closeEdit = () => { setEditUser(null); setEditForm(EMPTY_EDIT_FORM); };
+  const closeEdit = () => { setEditUser(null); setEditForm(EMPTY_EDIT_FORM); setEditInitial(EMPTY_EDIT_FORM); };
+  // One labelled text/date input bound to a key of the Edit form.
+  const editInput = (label: string, key: keyof typeof EMPTY_EDIT_FORM, type = "text") => (
+    <div>
+      <label className="block text-base font-semibold text-gray-700 mb-1">{label}</label>
+      <input type={type} value={editForm[key]} onChange={(e) => setEditForm((f) => ({ ...f, [key]: e.target.value }))}
+        className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+    </div>
+  );
+  const editSelect = (label: string, key: keyof typeof EMPTY_EDIT_FORM, options: { value: string; label: string }[]) => (
+    <div>
+      <label className="block text-base font-semibold text-gray-700 mb-1">{label}</label>
+      <select value={editForm[key]} onChange={(e) => setEditForm((f) => ({ ...f, [key]: e.target.value }))}
+        className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
+        <option value="">None</option>
+        {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+      </select>
+    </div>
+  );
 
   return (
     <div className="p-6 w-full">
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2"><Users size={24} className="text-[#0D6E6E]" />User Management</h1>
-          <p className="text-gray-700 text-base mt-1">Manage faculty, students, and admin accounts</p>
+          <p className="text-gray-700 text-base mt-1">Manage staff and system accounts — students are managed under Students</p>
         </div>
         <div className="flex items-center gap-2">
           {/* Bulk Faculty/User Excel Upload task (this revision) — Super
@@ -304,10 +358,10 @@ export default function UsersPage() {
       {/* Edit modal */}
       {editUser && (
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 max-h-[90vh] overflow-y-auto">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl p-6 max-h-[90vh] overflow-y-auto">
             <h3 className="text-xl font-bold mb-1">Edit User</h3>
-            <p className="text-sm text-gray-600 mb-4">{editUser.full_name} — {editUser.email}</p>
-            <div className="space-y-3">
+            <p className="text-sm text-gray-600 mb-4">{editUser.full_name} — {editUser.email}. Role assignments are managed separately (the shield icon).</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <div>
                 <label className="block text-base font-semibold text-gray-700 mb-1">First Name</label>
                 <input value={editForm.first_name} onChange={(e) => setEditForm((f) => ({ ...f, first_name: e.target.value }))}
@@ -363,6 +417,19 @@ export default function UsersPage() {
                 {editForm.program_id && editDepartments.length === 0 && (
                   <p className="text-xs text-amber-600 mt-1">No Departments are associated with this Programme yet.</p>
                 )}
+              </div>
+              {editSelect("Title", "title", TITLES.map((t) => ({ value: t, label: t })))}
+              {editInput("Employee ID", "employee_id")}
+              {editInput("Date of Birth", "date_of_birth", "date")}
+              {editSelect("Gender", "gender", GENDERS.map((g) => ({ value: g, label: g })))}
+              {editSelect("Blood Group", "blood_group", BLOOD_GROUPS.map((g) => ({ value: g, label: g })))}
+              {editInput("Father's Name", "father_name")}
+              {editInput("ABC ID", "abc_id")}
+              {editSelect("College", "college_id", colleges.map((c) => ({ value: c.id, label: c.name })))}
+              <div className="md:col-span-2">
+                <label className="block text-base font-semibold text-gray-700 mb-1">Address</label>
+                <textarea rows={2} value={editForm.address} onChange={(e) => setEditForm((f) => ({ ...f, address: e.target.value }))}
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E] resize-none" />
               </div>
             </div>
             <div className="flex gap-3 mt-5">

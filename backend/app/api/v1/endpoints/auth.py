@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request, UploadFi
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import select, func, or_, and_
+from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel, EmailStr, field_validator, model_validator
 import openpyxl
@@ -17,8 +17,9 @@ from app.db.base import get_db
 from app.core.security import verify_password, hash_password, create_access_token, create_refresh_token, decode_token
 from app.core.dependencies import (
     get_current_user, require_roles, is_profile_complete, get_missing_profile_fields,
-    get_assigned_roles, get_assigned_role_assignments, pick_default_assignment,
+    get_assigned_roles, get_assigned_role_assignments, pick_default_assignment, staff_user_clause,
 )
+from app.core import profile_fields as pf
 from app.core.config import settings
 from app.core.email import enqueue_email
 from app.core.bulk_upload import bulk_cell_to_str, parse_bulk_upload_file
@@ -101,6 +102,47 @@ class UpdateUserRequest(BaseModel):
     student_roll: Optional[str] = None
     admission_year: Optional[int] = None
     is_active: Optional[bool] = None
+    # Super Admin edits the WHOLE user profile (the same fields a user sees on
+    # "My Profile", plus title / employee id / college). Optional text fields
+    # may be cleared by sending null or a blank string; see update_user.
+    title: Optional[str] = None
+    date_of_birth: Optional[date] = None
+    gender: Optional[str] = None
+    blood_group: Optional[str] = None
+    father_name: Optional[str] = None
+    abc_id: Optional[str] = None
+    address: Optional[str] = None
+    college_id: Optional[UUID] = None
+
+    @field_validator("title")
+    @classmethod
+    def _title(cls, v):
+        return pf.canonical_choice(v, pf.TITLES, "Title")
+
+    @field_validator("gender")
+    @classmethod
+    def _gender(cls, v):
+        return pf.canonical_choice(v, pf.GENDERS, "Gender")
+
+    @field_validator("blood_group")
+    @classmethod
+    def _blood_group(cls, v):
+        return pf.canonical_choice(v, pf.BLOOD_GROUPS, "Blood group")
+
+    @field_validator("mobile")
+    @classmethod
+    def _mobile(cls, v):
+        return pf.check_mobile(v)
+
+    @field_validator("date_of_birth")
+    @classmethod
+    def _dob(cls, v):
+        return pf.check_date_of_birth(v)
+
+    @field_validator("designation", "employee_id", "father_name", "abc_id", "address", "middle_name")
+    @classmethod
+    def _blank_to_none(cls, v):
+        return pf.blank_to_none(v)
 
 # Self-service profile edit (BUSINESS_LOGIC.md K.1). Deliberately a SEPARATE,
 # narrower schema from UpdateUserRequest — that endpoint is admin-only and
@@ -233,6 +275,9 @@ def _user_dict(u: User) -> dict:
         "college_id": str(u.college_id) if u.college_id else None,
         "program_id": str(u.program_id) if u.program_id else None,
         "student_roll": u.student_roll,
+        "employee_id": u.employee_id,
+        "admission_year": u.admission_year,
+        "is_active": u.is_active,
         "date_of_birth": u.date_of_birth.isoformat() if u.date_of_birth else None,
         "gender": u.gender,
         "blood_group": u.blood_group,
@@ -467,6 +512,11 @@ async def create_user(
     return {"message": "User created.", "id": str(user.id)}
 
 
+# Fields update_user never sets to null (unchanged legacy behavior: role/status/
+# home department/programme/names are only ever replaced, not cleared).
+_NOT_CLEARABLE_USER_FIELDS = {"email", "role", "is_active", "department_id", "program_id", "first_name", "last_name"}
+
+
 @router.patch("/users/{user_id}")
 async def update_user(
     user_id: UUID,
@@ -477,6 +527,11 @@ async def update_user(
     target = await db.get(User, user_id)
     if not target:
         raise HTTPException(status_code=404, detail="User not found.")
+    # Student accounts are managed through the Students endpoints, never through
+    # the generic user-management endpoint.
+    is_staff = (await db.execute(select(User.id).where(User.id == user_id, staff_user_clause()))).scalar_one_or_none()
+    if is_staff is None:
+        raise HTTPException(status_code=400, detail="Student accounts are managed under Students.")
 
     demoting = body.role is not None and body.role != UserRole.SUPER_ADMIN
     deactivating = body.is_active is False
@@ -530,9 +585,17 @@ async def update_user(
                 raise HTTPException(status_code=409, detail="Email already registered.")
             target.email = new_email
 
-    updates = body.model_dump(exclude_none=True)
+    if body.college_id is not None and not await db.get(College, body.college_id):
+        raise HTTPException(status_code=400, detail="The specified college does not exist.")
+
+    # Only fields actually sent are applied. A null/blank optional profile field
+    # CLEARS it; fields that must always have a value (or whose clearing is
+    # deliberately unsupported here) are ignored when null, as before.
+    updates = body.model_dump(exclude_unset=True)
     updates.pop("email", None)
     for field, value in updates.items():
+        if value is None and field in _NOT_CLEARABLE_USER_FIELDS:
+            continue
         setattr(target, field, value)
 
     # Multi-role/role-switching task — this legacy single-role field remains
@@ -595,20 +658,14 @@ def _role_holder_condition(role: Optional[UserRole], department_id: Optional[UUI
     holding HOD never implies FACULTY. Uses `IN (subquery)` rather than a join,
     so a user with several matching assignments still appears exactly once.
 
-    Students are the one deliberate exception: a student's department is not
-    an assignment property (their STUDENT assignment has no department) — it
-    is `User.department_id`, exactly as everywhere else in AMS."""
+    Students are not part of this directory at all (see `staff_user_clause`):
+    they are managed under /students, where their department is
+    `User.department_id`, as everywhere else in AMS."""
     ra = UserRoleAssignment
     if role is None and department_id is None:
         return None
     if role is None:
-        return or_(
-            User.id.in_(select(ra.user_id).where(ra.department_id == department_id)),
-            and_(User.id.in_(select(ra.user_id).where(ra.role == UserRole.STUDENT)), User.department_id == department_id),
-        )
-    if role == UserRole.STUDENT:
-        is_student = User.id.in_(select(ra.user_id).where(ra.role == UserRole.STUDENT))
-        return and_(is_student, User.department_id == department_id) if department_id else is_student
+        return User.id.in_(select(ra.user_id).where(ra.department_id == department_id))
     conditions = [ra.role == role]
     if department_id:
         conditions.append(ra.department_id == department_id)
@@ -641,6 +698,8 @@ async def list_users(
             role_enum = UserRole(role.strip().lower())
         except ValueError:
             raise HTTPException(400, "Unknown role.")
+        if role_enum == UserRole.STUDENT:
+            raise HTTPException(400, "Students are not part of the user directory; they are managed under Students.")
 
     # BUSINESS_LOGIC.md Section N.4 — HOD is always scoped to the department of
     # their ACTIVE assignment, regardless of any client-supplied department_id.
@@ -654,8 +713,10 @@ async def list_users(
 
     # Assignments (and their departments) are loaded in one batched query each
     # — no per-user queries.
+    # Students are excluded in SQL (not filtered in the browser): this is the
+    # staff/system-user directory. Student accounts live under /students.
     q = (
-        select(User).where(User.is_active == True)
+        select(User).where(User.is_active == True, staff_user_clause())
         .options(
             selectinload(User.department),
             selectinload(User.role_assignments).selectinload(UserRoleAssignment.department),

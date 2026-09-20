@@ -372,6 +372,12 @@ async def decide_selection(
                     # is NEVER inferred from the Programme (a Programme can
                     # now have several Departments).
                     department_id=c.department_id,
+                    # College is required to select a candidate and is part of
+                    # the student's own profile (`User.college_id`, section
+                    # T.5) — copied here like every other placement field, so
+                    # the account carries its college from creation. Later
+                    # edits change the account, not the admission record.
+                    college_id=c.college_id,
                     admission_year=int(c.academic_year) if c.academic_year.isdigit() else None,
                     is_active=True, is_verified=True,
                     must_change_password=True,

@@ -1,7 +1,7 @@
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, or_, and_
 from sqlalchemy.orm import selectinload
 from uuid import UUID
 from typing import Optional
@@ -158,6 +158,32 @@ def require_roles(*roles: UserRole):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions.")
         return user
     return _check
+
+
+def student_user_clause():
+    """SQL clause over `User`: this account is a STUDENT — it holds a STUDENT
+    role assignment, or (an account created by Orientation before its first
+    login, which is when `get_current_user` self-heals the missing row) it has
+    no assignment rows at all and its legacy role is STUDENT. There is no
+    separate Student table; students are `User` rows."""
+    ra = UserRoleAssignment
+    return or_(
+        User.id.in_(select(ra.user_id).where(ra.role == UserRole.STUDENT)),
+        and_(~User.id.in_(select(ra.user_id)), User.role == UserRole.STUDENT),
+    )
+
+
+def staff_user_clause():
+    """SQL clause over `User`: a non-student ("system"/staff) account — it holds
+    at least one non-STUDENT assignment (or, with no assignment rows, a
+    non-student legacy role). A person who is both staff and a student (e.g.
+    Faculty who also holds STUDENT) is staff here AND is listed as a student.
+    This is the population of the Super Admin User Management directory."""
+    ra = UserRoleAssignment
+    return or_(
+        User.id.in_(select(ra.user_id).where(ra.role != UserRole.STUDENT)),
+        and_(~User.id.in_(select(ra.user_id)), User.role != UserRole.STUDENT),
+    )
 
 
 async def find_role_holder_in_department(role: UserRole, department_id, db: AsyncSession) -> Optional[UUID]:

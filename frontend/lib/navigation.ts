@@ -79,6 +79,9 @@ export const NAV: NavItem[] = [
   // (Section 19/20), global (no department restriction).
   { label: "PPW Approvals",   icon: ClipboardCheck,  href: "/ppw/approvals", roles: ["hod","faculty","incharge_academic_cell","dpgs"] },
   { label: "Users",           icon: Users,           href: "/users",        roles: ["super_admin"] },
+  // Super Admin's global student management (all students, filters, full profile edit).
+  // Distinct from "/student-management", which is a student's OWN profile page.
+  { label: "Students",        icon: GraduationCap,   href: "/students",     roles: ["super_admin"] },
   { label: "Administration",  icon: ShieldCheck,     href: "/admin",        roles: ["super_admin"] },
   { label: "Notifications",   icon: Bell,            href: "/notifications",roles: [] },
 ];
