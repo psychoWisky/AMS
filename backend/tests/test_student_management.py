@@ -27,7 +27,7 @@ from app.db.base import AsyncSessionLocal
 from app.main import app
 from app.core.security import create_access_token
 from app.models.user import User, UserRole, RefreshToken, UserRoleAssignment, Department, Program, College
-from app.models.academic import Semester
+from app.models.academic import AcademicCalendar, Semester
 from app.models.course import CourseOffering
 from app.models.enrollment import CourseRegistration, StudentEnrollment
 from app.models.orientation import OrientationCandidate
@@ -125,6 +125,7 @@ async def _setup() -> None:
         # a calendar different from the offering's, with two of its semesters
         sems = (await db.execute(select(Semester).where(Semester.calendar_id != off.calendar_id).order_by(Semester.start_date).limit(2))).scalars().all()
         S["calX"], S["semX"], S["semY"] = sems[0].calendar_id, sems[0].id, sems[1].id
+        S["calX_label"], S["calO_label"] = (await db.get(AcademicCalendar, S["calX"])).academic_year, (await db.get(AcademicCalendar, S["calO"])).academic_year
         await db.commit()
     S["super"] = create_access_token(str(admin_id), {"sid": str(rt)})
     for code in ("C1", "C2"):
@@ -140,11 +141,11 @@ async def _setup() -> None:
     D1, D2, P1, P2 = S["D1"].id, S["D2"].id, S["P1"].id, S["P2"].id
     prof = dict(date_of_birth=date(2000, 1, 1), gender="Male", blood_group="O+", father_name="ZZTEST Father", abc_id="ABC-SM", address="ZZTEST addr", mobile="9876543210", admission_year=2026)
     # students (legacy role STUDENT). S4 gets NO assignment row (Orientation-style account) and no college.
-    await _mk_user("S1", UserRole.STUDENT, D1, program_id=P1, college_id=S["C2"], student_roll=f"ZZTEST-SM-1-{_TAG}", **prof); await _grant("S1", "student")
+    await _mk_user("S1", UserRole.STUDENT, D1, program_id=P1, college_id=S["C2"], academic_year_id=S["calX"], student_roll=f"ZZTEST-SM-1-{_TAG}", **prof); await _grant("S1", "student")
     await _mk_user("S2", UserRole.STUDENT, D2, program_id=P1, college_id=S["C2"], student_roll=f"ZZTEST-SM-2-{_TAG}", **prof); await _grant("S2", "student")
-    await _mk_user("S3", UserRole.STUDENT, D1, program_id=P2, college_id=S["C1"], student_roll=f"ZZTEST-SM-3-{_TAG}", **prof); await _grant("S3", "student")
+    await _mk_user("S3", UserRole.STUDENT, D1, program_id=P2, college_id=S["C1"], academic_year_id=S["calO"], student_roll=f"ZZTEST-SM-3-{_TAG}", **prof); await _grant("S3", "student")
     await _mk_user("S4", UserRole.STUDENT, D2, program_id=P1, student_roll=f"ZZTEST-SM-4-{_TAG}", **prof)              # no assignment row
-    await _mk_user("S5", UserRole.STUDENT, D2, program_id=P1, college_id=S["C1"], student_roll=f"ZZTEST-SM-5-{_TAG}", **prof); await _grant("S5", "student")
+    await _mk_user("S5", UserRole.STUDENT, D2, program_id=P1, college_id=S["C1"], academic_year_id=S["calX"], student_roll=f"ZZTEST-SM-5-{_TAG}", **prof); await _grant("S5", "student")
     # staff: ST = FACULTY@D1 + HOD@D2; SS = FACULTY@D1 + STUDENT (staff who is also a student)
     await _mk_user("ST", UserRole.FACULTY, D1, designation="Professor", employee_id=f"ZZTEST-EMP-{_TAG}")
     await _grant("ST", "faculty", D1); await _grant("ST", "hod", D2)
@@ -232,7 +233,10 @@ async def t_list_all_students_no_duplicates():
     s4 = next(r for r in rows if r["id"] == str(U["S4"]))
     assert s4["student_roll"].startswith("ZZTEST-SM-4") and s4["program_code"] == "MVSc" and s4["department_name"] == S["D2"].name
     s3 = next(r for r in rows if r["id"] == str(U["S3"]))
-    assert s3["latest_academic_year"] and s3["latest_semester"], "latest academic year/semester are derived from registrations"
+    assert s3["academic_year_id"] == str(S["calO"]) and s3["academic_year"] == S["calO_label"], "Academic Year is the ASSIGNED calendar (S3 is registered in calX but assigned calO)"
+    assert s3["latest_semester"], "the latest semester is still derived from registrations"
+    assert "latest_academic_year" not in s3, "Academic Year has one meaning: the assigned calendar"
+    assert s4["academic_year_id"] is None and s4["academic_year"] is None, "an unassigned student has no Academic Year"
 
 
 async def t_each_filter_independently():
@@ -244,20 +248,23 @@ async def t_each_filter_independently():
     assert got == {"S3", "S5"}, f"College C1 = User.college_id only: S3, S5 (NOT S1, whose candidate says C1 but whose account says C2): {got}"
     assert _ours((await _students(college_id=str(C2)))["items"]) == {"S1", "S2"}, "College C2: S1, S2 (NOT S5, whose candidate says C2)"
     cal = _ours((await _students(academic_year_id=str(S["calX"])))["items"])
-    assert cal == {"S1", "S3"}, cal
+    assert cal == {"S1", "S5"}, f"Academic Year = User.academic_year_id: S1 and S5 (S5 has no registrations; S3 is REGISTERED in calX but assigned calO): {cal}"
+    assert _ours((await _students(academic_year_id=str(S["calO"])))["items"]) == {"S3"}
     assert _ours((await _students(semester_id=str(S["semX"])))["items"]) == {"S1", "S3"}
     assert _ours((await _students(semester_id=str(S["semY"])))["items"]) == {"S3"}
-    assert _ours((await _students(academic_year_id=str(S["calO"]), semester_id=str(S["semO"])))["items"]) & {"S1", "S2", "S3"} == {"S2"}, "S2 has an ENROLLMENT (no registration) in this year/semester"
-    assert _count((await _students(academic_year_id=str(S["calX"])))["items"], "S3") == 1, "two matching registrations must not duplicate the student"
+    assert _ours((await _students(semester_id=str(S["semO"])))["items"]) & {"S1", "S2", "S3"} == {"S2"}, "S2 has an ENROLLMENT (no registration) in this semester"
+    assert _count((await _students(semester_id=str(S["semX"])))["items"], "S3") == 1, "two registrations must not duplicate the student"
 
 
 async def t_filters_combine_with_and():
     D1, D2, P2, C1 = S["D1"].id, S["D2"].id, S["P2"].id, S["C1"]
     assert _ours((await _students(department_id=str(D1), program_id=str(P2)))["items"]) == {"S3"}
-    assert _ours((await _students(department_id=str(D1), college_id=str(C1), academic_year_id=str(S["calX"])))["items"]) == {"S3"}
+    assert _ours((await _students(department_id=str(D2), college_id=str(C1), academic_year_id=str(S["calX"])))["items"]) == {"S5"}
+    assert _ours((await _students(department_id=str(D1), college_id=str(C1), academic_year_id=str(S["calX"])))["items"]) == set(), "S3 is in D1/C1 but assigned calO"
     assert _ours((await _students(department_id=str(D2), college_id=str(C1), semester_id=str(S["semX"])))["items"]) == set()
-    assert _ours((await _students(program_id=str(P2), semester_id=str(S["semY"]), college_id=str(C1), department_id=str(D1)))["items"]) == {"S3"}
-    assert _ours((await _students(academic_year_id=str(S["calX"]), semester_id=str(S["semY"])))["items"]) == {"S3"}
+    assert _ours((await _students(program_id=str(P2), semester_id=str(S["semY"]), college_id=str(C1), department_id=str(D1), academic_year_id=str(S["calO"])))["items"]) == {"S3"}
+    assert _ours((await _students(academic_year_id=str(S["calX"]), semester_id=str(S["semX"])))["items"]) == {"S1"}, "assigned calX AND registered in semX"
+    assert _ours((await _students(academic_year_id=str(S["calX"]), semester_id=str(S["semY"])))["items"]) == set()
 
 
 async def t_search_and_pagination():
@@ -278,7 +285,7 @@ async def t_student_detail_and_staff_are_not_students():
     r = await _call("GET", f"/students/{U['S1']}", S["super"]); assert r.status_code == 200
     d = r.json()
     for f in ("email", "first_name", "middle_name", "last_name", "student_roll", "mobile", "date_of_birth", "gender", "blood_group", "father_name", "abc_id", "address",
-              "admission_year", "program_id", "department_id", "college_id", "is_active", "latest_academic_year"):
+              "admission_year", "program_id", "department_id", "college_id", "is_active", "academic_year_id", "academic_year", "latest_semester"):
         assert f in d, f"detail is missing {f}"
     assert d["college_id"] == str(S["C2"]) and "college_from_orientation" not in d
     d4 = (await _call("GET", f"/students/{U['S4']}", S["super"])).json()
@@ -405,7 +412,7 @@ async def main() -> None:
             "USER MGMT: students absent from GET /auth/users for Super Admin and HOD; role=student -> 400; staff (and staff who are also students) listed once with paired assignments": t_user_directory_excludes_students,
             "SECURITY: /students list, detail and edit -> 403 for HOD, Faculty, Student; 401/403 unauthenticated; nothing modified": t_students_api_is_super_admin_only,
             "STUDENTS: Super Admin lists all students (incl. an account with no assignment row), each once, staff-only excluded": t_list_all_students_no_duplicates,
-            "STUDENTS: department, programme, college (User.college_id), academic year and semester filters each work alone": t_each_filter_independently,
+            "STUDENTS: department, programme, college (User.college_id), academic year (User.academic_year_id) and semester filters each work alone": t_each_filter_independently,
             "STUDENTS: filters combine with AND; no duplicates with several matching records": t_filters_combine_with_and,
             "STUDENTS: search (roll, email, full name) and pagination (no overlap, capped page size)": t_search_and_pagination,
             "STUDENTS: detail carries every profile field; a staff-only id is 404": t_student_detail_and_staff_are_not_students,

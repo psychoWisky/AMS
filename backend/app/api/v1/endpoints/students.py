@@ -16,10 +16,14 @@ What a student's fields really are (nothing is duplicated or invented):
     candidate's college onto the account when it is created (migration
     0023_backfill_student_college did the same for accounts issued earlier), and
     the Orientation candidate's own college is never consulted afterwards.
-  * Academic Year / Semester are NOT stored on the student. They are derived
-    from the student's Course Registrations and Enrollments, so the filters
-    and the "latest" columns follow those relationships and cannot be edited
-    here (they change by registering/enrolling, never by editing a profile).
+  * Academic Year — `User.academic_year_id`, the student's explicitly assigned
+    AcademicCalendar (the Super Admin-managed master behind `/academic/calendars`).
+    Nullable (unassigned is valid) and edited here. It is a separate field from
+    `User.admission_year` (an integer read by PPW / research) and from the
+    Orientation candidate's free-text label; none is derived from another.
+  * Semester is NOT stored on the student: the Semester filter and the "latest
+    semester" column are derived from Course Registrations and Enrollments,
+    which this router never rewrites (they change by registering/enrolling).
 """
 from datetime import date
 from typing import Optional
@@ -69,6 +73,7 @@ class StudentUpdate(BaseModel):
     program_id: Optional[UUID] = None
     department_id: Optional[UUID] = None
     college_id: Optional[UUID] = None
+    academic_year_id: Optional[UUID] = None
     is_active: Optional[bool] = None
 
     @field_validator("email", "program_id", "department_id", "is_active", mode="before")
@@ -115,7 +120,7 @@ async def _college_names(db: AsyncSession) -> dict:
     return {cid: name for cid, name in (await db.execute(select(College.id, College.name))).all()}
 
 
-def _student_dict(u: User, latest: Optional[tuple] = None, college_names: Optional[dict] = None) -> dict:
+def _student_dict(u: User, latest_semester: Optional[str] = None, college_names: Optional[dict] = None) -> dict:
     return {
         "id": str(u.id),
         "email": u.email,
@@ -140,15 +145,17 @@ def _student_dict(u: User, latest: Optional[tuple] = None, college_names: Option
         "department_name": u.department.name if u.department else None,
         "college_id": str(u.college_id) if u.college_id else None,
         "college_name": (college_names or {}).get(u.college_id) if u.college_id else None,
+        # The student's assigned AcademicCalendar (null = not assigned) — distinct from `admission_year`.
+        "academic_year_id": str(u.academic_year_id) if u.academic_year_id else None,
+        "academic_year": u.academic_calendar.academic_year if u.academic_calendar else None,
         "is_active": u.is_active,
         "must_change_password": u.must_change_password,
         # Derived from Course Registrations / Enrollments, never stored on the student.
-        "latest_academic_year": latest[0] if latest else None,
-        "latest_semester": latest[1] if latest else None,
+        "latest_semester": latest_semester,
     }
 
 
-_LOAD = (selectinload(User.program), selectinload(User.department))
+_LOAD = (selectinload(User.program), selectinload(User.department), selectinload(User.academic_calendar))
 
 
 async def _validate_college_programme(db: AsyncSession, college_id: Optional[UUID], program_id: Optional[UUID]) -> None:
@@ -170,33 +177,32 @@ async def _validate_college_programme(db: AsyncSession, college_id: Optional[UUI
         )
 
 
-async def _latest_academic_records(db: AsyncSession, student_ids: list[UUID]) -> dict[UUID, tuple]:
-    """student_id -> (academic year, semester name) of the most recent semester
-    (by semester start date) in which the student has a Course Registration or
-    an Enrollment. Two batched queries for the whole page — no per-student queries."""
+async def _latest_semesters(db: AsyncSession, student_ids: list[UUID]) -> dict[UUID, str]:
+    """student_id -> name of the most recent semester (by semester start date) in
+    which the student has a Course Registration or an Enrollment. Two batched
+    queries for the whole page — no per-student queries. Semester only: the
+    student's Academic Year is `User.academic_year_id`, not derived from these."""
     if not student_ids:
         return {}
     reg = (
-        select(CourseRegistration.student_id, AcademicCalendar.academic_year, Semester.name, Semester.start_date)
+        select(CourseRegistration.student_id, Semester.name, Semester.start_date)
         .select_from(CourseRegistration)
         .join(Semester, Semester.id == CourseRegistration.semester_id)
-        .join(AcademicCalendar, AcademicCalendar.id == CourseRegistration.calendar_id)
         .where(CourseRegistration.student_id.in_(student_ids))
     )
     enr = (
-        select(StudentEnrollment.student_id, AcademicCalendar.academic_year, Semester.name, Semester.start_date)
+        select(StudentEnrollment.student_id, Semester.name, Semester.start_date)
         .select_from(StudentEnrollment)
         .join(CourseOffering, CourseOffering.id == StudentEnrollment.offering_id)
         .join(Semester, Semester.id == CourseOffering.semester_id)
-        .join(AcademicCalendar, AcademicCalendar.id == CourseOffering.calendar_id)
         .where(StudentEnrollment.student_id.in_(student_ids))
     )
     best: dict[UUID, tuple] = {}
     for query in (reg, enr):
-        for sid, year, semester, start in (await db.execute(query)).all():
-            if sid not in best or start > best[sid][2]:
-                best[sid] = (year, semester, start)
-    return {sid: (v[0], v[1]) for sid, v in best.items()}
+        for sid, semester, start in (await db.execute(query)).all():
+            if sid not in best or start > best[sid][1]:
+                best[sid] = (semester, start)
+    return {sid: v[0] for sid, v in best.items()}
 
 
 @router.get("")
@@ -214,11 +220,12 @@ async def list_students(
 ):
     """All students, newest filters combined with AND, paginated. Filters are
     applied in SQL:
-      department_id / program_id / college_id — the student's own columns.
-      academic_year_id (an AcademicCalendar) / semester_id — students who have a
-        Course Registration OR an Enrollment in that year / semester (both
-        given: in that semester of that year). `IN (subquery)` is used, so a
-        student with many matching records still appears once.
+      department_id / program_id / college_id / academic_year_id — the student's
+        own columns (`academic_year_id` = the assigned AcademicCalendar).
+      semester_id — students who have a Course Registration OR an Enrollment in
+        that semester (independent of the assigned Academic Year). `IN
+        (subquery)` is used, so a student with many matching records still
+        appears once.
     `q` searches name, email, roll number and ABC ID."""
     conditions = [student_user_clause()]
     if department_id:
@@ -227,15 +234,15 @@ async def list_students(
         conditions.append(User.program_id == program_id)
     if college_id:
         conditions.append(User.college_id == college_id)
-    if academic_year_id or semester_id:
-        reg = select(CourseRegistration.student_id)
-        enr = select(StudentEnrollment.student_id).join(CourseOffering, CourseOffering.id == StudentEnrollment.offering_id)
-        if academic_year_id:
-            reg = reg.where(CourseRegistration.calendar_id == academic_year_id)
-            enr = enr.where(CourseOffering.calendar_id == academic_year_id)
-        if semester_id:
-            reg = reg.where(CourseRegistration.semester_id == semester_id)
-            enr = enr.where(CourseOffering.semester_id == semester_id)
+    if academic_year_id:
+        conditions.append(User.academic_year_id == academic_year_id)
+    if semester_id:
+        reg = select(CourseRegistration.student_id).where(CourseRegistration.semester_id == semester_id)
+        enr = (
+            select(StudentEnrollment.student_id)
+            .join(CourseOffering, CourseOffering.id == StudentEnrollment.offering_id)
+            .where(CourseOffering.semester_id == semester_id)
+        )
         conditions.append(or_(User.id.in_(reg), User.id.in_(enr)))
     if q and q.strip():
         like = f"%{q.strip()}%"
@@ -250,7 +257,7 @@ async def list_students(
         .order_by(User.student_roll.asc().nulls_last(), User.first_name, User.id)
         .offset((page - 1) * page_size).limit(page_size)
     )).scalars().all()
-    latest = await _latest_academic_records(db, [u.id for u in students])
+    latest = await _latest_semesters(db, [u.id for u in students])
     names = await _college_names(db)
     return {
         "items": [_student_dict(u, latest.get(u.id), names) for u in students],
@@ -259,8 +266,10 @@ async def list_students(
 
 
 async def _get_student(db: AsyncSession, student_id: UUID) -> User:
+    # populate_existing: after an edit the session still holds the student with its old
+    # (already-loaded) programme / department / academic-year relationships — re-read them.
     student = (await db.execute(
-        select(User).where(User.id == student_id, student_user_clause()).options(*_LOAD)
+        select(User).where(User.id == student_id, student_user_clause()).options(*_LOAD).execution_options(populate_existing=True)
     )).scalar_one_or_none()
     if not student:
         raise HTTPException(404, "Student not found.")
@@ -269,7 +278,7 @@ async def _get_student(db: AsyncSession, student_id: UUID) -> User:
 
 async def _render(db: AsyncSession, student_id: UUID) -> dict:
     student = await _get_student(db, student_id)
-    latest = await _latest_academic_records(db, [student.id])
+    latest = await _latest_semesters(db, [student.id])
     return _student_dict(student, latest.get(student.id), await _college_names(db))
 
 
@@ -288,9 +297,10 @@ async def update_student(
 ):
     """Edit any student profile field. Foreign keys are verified to exist, the
     resulting Programme/Department pair must satisfy the existing Programme<->
-    Department association (the same rule Users already obey), and — new — the
+    Department association (the same rule Users already obey), an `academic_year_id`
+    must be an existing AcademicCalendar (any status; null clears it), and the
     resulting College + Programme must be a mapped pair (`ams_college_programs`).
-    Both rules judge the COMPLETE RESULTING STATE (fields in the request replace
+    The two pair rules judge the COMPLETE RESULTING STATE (fields in the request replace
     the stored ones; the rest are read from the student), and every check runs
     before any field is written, so a rejected request changes nothing. They
     are evaluated only when the request touches a relationship field (college,
@@ -309,6 +319,8 @@ async def update_student(
         raise HTTPException(400, "The specified department does not exist.")
     if updates.get("college_id") and not await db.get(College, updates["college_id"]):
         raise HTTPException(400, "The specified college does not exist.")
+    if updates.get("academic_year_id") and not await db.get(AcademicCalendar, updates["academic_year_id"]):
+        raise HTTPException(400, "The specified academic year does not exist.")
     if "program_id" in updates or "department_id" in updates:
         await validate_program_department_pair(
             updates.get("program_id", student.program_id), updates.get("department_id", student.department_id), db,

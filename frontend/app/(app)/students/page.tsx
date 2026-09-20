@@ -8,8 +8,9 @@ import { GraduationCap, Search, Loader2, Pencil, ChevronLeft, ChevronRight } fro
 // Super Admin's global student management (route access: see lib/navigation.ts;
 // every endpoint below is independently Super Admin-only on the backend).
 // There is no separate Student table — a student is a user account. A student's
-// Academic Year / Semester are derived from their registrations and enrollments,
-// so they are filters and read-only columns here, not editable fields.
+// Academic Year is their assigned Academic Calendar (`academic_year_id`, editable
+// here, options from GET /academic/calendars); it is separate from Admission Year.
+// Semester is derived from registrations and enrollments: a filter and a read-only column.
 
 interface Student {
   id: string; email: string; full_name: string;
@@ -20,7 +21,8 @@ interface Student {
   program_id: string | null; program_name: string | null; program_code: string | null;
   department_id: string | null; department_name: string | null;
   college_id: string | null; college_name: string | null;
-  is_active: boolean; latest_academic_year: string | null; latest_semester: string | null;
+  academic_year_id: string | null; academic_year: string | null;
+  is_active: boolean; latest_semester: string | null;
 }
 interface StudentPage { items: Student[]; total: number; page: number; page_size: number; }
 interface Opt { id: string; name: string; }
@@ -35,7 +37,7 @@ const BLOOD_GROUPS = ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"];
 const EMPTY_FORM = {
   first_name: "", middle_name: "", last_name: "", student_roll: "", email: "", mobile: "", date_of_birth: "",
   gender: "", blood_group: "", father_name: "", abc_id: "", address: "", admission_year: "",
-  program_id: "", department_id: "", college_id: "", is_active: true,
+  program_id: "", department_id: "", college_id: "", academic_year_id: "", is_active: true,
 };
 type Form = typeof EMPTY_FORM;
 // Fields a student cannot exist without: replaced, never cleared.
@@ -57,7 +59,7 @@ function toForm(s: Student): Form {
     student_roll: s.student_roll ?? "", email: s.email, mobile: s.mobile ?? "", date_of_birth: s.date_of_birth ?? "",
     gender: s.gender ?? "", blood_group: s.blood_group ?? "", father_name: s.father_name ?? "", abc_id: s.abc_id ?? "",
     address: s.address ?? "", admission_year: s.admission_year ? String(s.admission_year) : "",
-    program_id: s.program_id ?? "", department_id: s.department_id ?? "", college_id: s.college_id ?? "", is_active: s.is_active,
+    program_id: s.program_id ?? "", department_id: s.department_id ?? "", college_id: s.college_id ?? "", academic_year_id: s.academic_year_id ?? "", is_active: s.is_active,
   };
 }
 
@@ -179,12 +181,12 @@ export default function StudentsPage() {
         className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
     </div>
   );
-  const select = (label: string, key: keyof Form, options: { value: string; label: string }[], required = false) => (
+  const select = (label: string, key: keyof Form, options: { value: string; label: string }[], required = false, blankLabel?: string) => (
     <div>
       <label className="block text-base font-semibold text-gray-700 mb-1">{label}{required ? " *" : ""}</label>
       <select value={String(form[key])} onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
         className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
-        <option value="">{required ? "Select…" : "None"}</option>
+        <option value="">{blankLabel ?? (required ? "Select…" : "None")}</option>
         {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
       </select>
     </div>
@@ -239,7 +241,7 @@ export default function StudentsPage() {
                   <td className="px-4 py-3 text-gray-700">{s.program_name ?? "—"}</td>
                   <td className="px-4 py-3 text-gray-700">{s.department_name ?? "—"}</td>
                   <td className="px-4 py-3 text-gray-700">{s.college_name ?? "—"}</td>
-                  <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{s.latest_academic_year ?? "—"}</td>
+                  <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{s.academic_year ?? <span className="text-gray-400">Not assigned</span>}</td>
                   <td className="px-4 py-3 text-gray-700">{s.latest_semester ?? "—"}</td>
                   <td className="px-4 py-3"><span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${s.is_active ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-600"}`}>{s.is_active ? "Active" : "Inactive"}</span></td>
                   <td className="px-4 py-3">
@@ -268,7 +270,7 @@ export default function StudentsPage() {
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl p-6 max-h-[90vh] overflow-y-auto">
             <h3 className="text-xl font-bold mb-1">Edit Student</h3>
             <p className="text-sm text-gray-600 mb-4">
-              {editing.full_name}. Academic Year and Semester are derived from the student&apos;s registrations and enrollments and cannot be edited here.
+              {editing.full_name}. Academic Year is the student&apos;s assigned academic year; Semester is derived from their registrations and enrollments and cannot be edited here.
             </p>
 
             <p className="text-sm font-bold text-gray-800 mb-2">Identity</p>
@@ -318,6 +320,12 @@ export default function StudentsPage() {
               {select("College", "college_id", colleges
                 .filter((c) => !offeringCollegeIds || offeringCollegeIds.has(c.id) || c.id === form.college_id)
                 .map((c) => ({ value: c.id, label: offeringCollegeIds && !offeringCollegeIds.has(c.id) ? `${c.name} (does not offer this programme)` : c.name })))}
+              {select("Academic Year", "academic_year_id", [
+                ...calendars.map((c) => ({ value: c.id, label: c.academic_year })),
+                // keep the student's current value selectable until the calendar list has loaded
+                ...(form.academic_year_id && !calendars.some((c) => c.id === form.academic_year_id)
+                  ? [{ value: form.academic_year_id, label: editing.academic_year ?? "Current academic year" }] : []),
+              ], false, "Not assigned")}
               {input("Admission Year", "admission_year", "number")}
               {offeredProgrammeIds && offeredProgrammeIds.size === 0 && (
                 <p className="md:col-span-2 text-xs text-amber-600">No programmes are mapped to this college yet — map them under Administration → Colleges.</p>

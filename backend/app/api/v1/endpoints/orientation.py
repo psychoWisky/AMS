@@ -19,7 +19,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel, EmailStr, ValidationError, field_validator
@@ -285,12 +285,23 @@ async def mark_attendance(
 
 
 async def _next_roll_no(academic_year: str, program_code: str, db: AsyncSession) -> str:
+    """`{academic_year}-{program.code}-{N}` with N = the highest numeric suffix
+    already used for this exact prefix, plus one (1 when none). Deliberately NOT
+    a row count: a Super Admin may edit a roll number, which lowers the count and
+    would make a count-based generator re-issue a number that is still taken.
+    Only the text AFTER the known prefix is parsed (the academic-year label may
+    itself contain '-', digits, spaces or brackets), and a suffix that is not
+    purely ASCII digits (a hand-edited roll) is ignored."""
     prefix = f"{academic_year}-{program_code}-"
-    result = await db.execute(
-        select(func.count()).select_from(User).where(User.student_roll.like(f"{prefix}%"))
-    )
-    n = (result.scalar() or 0) + 1
-    return f"{prefix}{n}"
+    rolls = (await db.execute(
+        select(User.student_roll).where(User.student_roll.startswith(prefix, autoescape=True))
+    )).scalars().all()
+    highest = 0
+    for roll in rolls:
+        suffix = roll[len(prefix):]
+        if suffix.isascii() and suffix.isdigit():
+            highest = max(highest, int(suffix))
+    return f"{prefix}{highest + 1}"
 
 
 @router.patch("/candidates/{candidate_id}/selection")

@@ -156,6 +156,14 @@ class User(Base):
     college_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_colleges.id"))
     program_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_programs.id", use_alter=True))
     admission_year: Mapped[int | None] = mapped_column()
+    # Student's explicit Academic Year — a reference to the Super Admin-managed
+    # AcademicCalendar (`ams_academic_calendars`). Deliberately a SEPARATE field
+    # from `admission_year` (the admitted-year integer other modules read) and
+    # from the Orientation candidate's free-text `academic_year` label; none of
+    # the three is derived from another. Nullable (an unassigned student is
+    # valid); no ON DELETE action, like the other transactional references to a
+    # calendar — `delete_calendar` refuses to delete a year students are assigned to.
+    academic_year_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_academic_calendars.id"), index=True)
     is_active: Mapped[bool]    = mapped_column(Boolean, default=True)
     is_verified: Mapped[bool]  = mapped_column(Boolean, default=False)
     profile_photo: Mapped[str | None] = mapped_column(String(500))
@@ -180,6 +188,7 @@ class User(Base):
     department: Mapped["Department | None"] = relationship("Department", back_populates="users", foreign_keys=[department_id])
     program: Mapped["Program | None"] = relationship("Program", foreign_keys=[program_id])
     college: Mapped["College | None"] = relationship("College", foreign_keys=[college_id])
+    academic_calendar: Mapped["AcademicCalendar | None"] = relationship("AcademicCalendar", foreign_keys=[academic_year_id])  # type: ignore[name-defined]
     role_assignments: Mapped[list["UserRoleAssignment"]] = relationship(
         "UserRoleAssignment", back_populates="user", foreign_keys="UserRoleAssignment.user_id", cascade="all, delete-orphan",
     )
@@ -342,3 +351,6 @@ class UserRoleAssignment(Base):
 
     user: Mapped["User"] = relationship("User", back_populates="role_assignments", foreign_keys=[user_id])
     department: Mapped["Department | None"] = relationship("Department", foreign_keys=[department_id])
+
+
+from app.models.academic import AcademicCalendar  # noqa: E402,F401

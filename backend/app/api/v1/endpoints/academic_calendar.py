@@ -142,10 +142,12 @@ async def delete_calendar(
     activity — course offerings, course registrations, or admit cards, either
     linked directly to the calendar or to one of its semesters — is checked
     explicitly first and blocks the delete with a clear error, mirroring
-    courses.py's delete_course pattern. Nothing else references
-    ams_academic_calendars (confirmed by inspecting every FK in the schema) —
-    Orientation/Admission/PPW records key off a plain academic_year string,
-    never this calendar row, so they can never be affected by this."""
+    courses.py's delete_course pattern. Students assigned to this year
+    (`User.academic_year_id`, migration 0024) are checked the same way — a
+    delete never unassigns or removes a student. Nothing else references
+    ams_academic_calendars — Orientation/Admission/PPW records key off a plain
+    academic_year string, never this calendar row, so they can never be
+    affected by this."""
     cal = await db.get(AcademicCalendar, cal_id)
     if not cal: raise HTTPException(404, "Calendar not found.")
     if cal.status != "draft":
@@ -164,6 +166,10 @@ async def delete_calendar(
     ).limit(1))
     if registration_exists.scalar_one_or_none():
         raise HTTPException(400, "This academic year has course registrations and cannot be deleted. Remove them first.")
+
+    student_assigned = await db.execute(select(User.id).where(User.academic_year_id == cal_id).limit(1))
+    if student_assigned.scalar_one_or_none():
+        raise HTTPException(400, "This academic year is assigned to students and cannot be deleted. Reassign or clear it on those students first.")
 
     if semester_ids:
         admit_card_exists = await db.execute(select(AdmitCard.id).where(AdmitCard.semester_id.in_(semester_ids)).limit(1))
