@@ -39,7 +39,7 @@ from app.core.dependencies import get_current_user, require_roles
 from app.core.config import settings
 from app.core.security import create_bulk_upload_confirmation_token, decode_token
 from app.core.bulk_upload import parse_bulk_upload_file
-from app.models.user import User, UserRole, Program, Department
+from app.models.user import User, UserRole, UserRoleAssignment, Program, Department
 from app.models.course import Course, CourseOffering, OfferingFaculty, CourseAvailability
 # Programme<->Department many-to-many redesign — single shared student-scope
 # resolver (app/core/student_scope.py), re-exported under this file's
@@ -1147,17 +1147,36 @@ async def list_all_offerings(
     return items
 
 
-async def _assert_faculty_in_department(faculty_ids: list[UUID], department_id: UUID, db: AsyncSession) -> None:
+async def _assert_faculty_in_department(faculty_ids: list[UUID], department_id: Optional[UUID], db: AsyncSession) -> None:
     """BUSINESS_LOGIC.md Section N (HOD Offer Course faculty selector) — backend-
-    authoritative check that every selected faculty member actually belongs to
-    the offering's department. Never trust the frontend's candidate list alone
-    (Open Question 48, now closed by this check)."""
+    authoritative check that every selected faculty member is eligible to teach
+    in the offering's department. Never trust the frontend's candidate list alone.
+
+    Eligibility is a `UserRoleAssignment(role=FACULTY, department_id=<offering
+    department>)` on an ACTIVE user — never the legacy `User.role`/
+    `User.department_id`, which cannot describe a person who is Faculty in
+    several departments. Holding HOD (or any other role) in that department
+    grants nothing here: a HOD must also hold an explicit FACULTY assignment
+    to be assignable, and a Faculty assignment in a different department does
+    not qualify. Applies to every caller, Super Admin included."""
     if not faculty_ids:
         return
-    result = await db.execute(select(User.id).where(User.id.in_(faculty_ids), User.department_id == department_id))
+    if department_id is None:
+        raise HTTPException(403, "One or more selected faculty members do not hold a Faculty assignment in this department.")
+    result = await db.execute(
+        select(User.id).where(
+            User.id.in_(faculty_ids), User.is_active == True,
+            User.id.in_(
+                select(UserRoleAssignment.user_id).where(
+                    UserRoleAssignment.role == UserRole.FACULTY,
+                    UserRoleAssignment.department_id == department_id,
+                )
+            ),
+        )
+    )
     valid_ids = {row[0] for row in result.all()}
     if valid_ids != set(faculty_ids):
-        raise HTTPException(403, "One or more selected faculty members do not belong to this department.")
+        raise HTTPException(403, "One or more selected faculty members do not hold a Faculty assignment in this department.")
 
 
 @router.post("/offerings", status_code=201)

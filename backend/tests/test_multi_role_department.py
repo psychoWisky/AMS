@@ -29,7 +29,7 @@ import sys
 import uuid
 
 import httpx
-from sqlalchemy import select, delete, update
+from sqlalchemy import select, delete
 
 from app.db.base import AsyncSessionLocal
 from app.main import app
@@ -690,7 +690,8 @@ async def test_faculty_teacher_courses_and_assigned_access_still_work():
     offering_id = None
     try:
         async with AsyncSessionLocal() as db:
-            await db.execute(update(User).where(User.id == user_id).values(department_id=_DEPT_A))
+            # No legacy User.department_id is set on purpose: the FACULTY@A assignment alone must make
+            # this user assignable to a department-A offering.
             sem = (await db.execute(select(Semester.id, Semester.calendar_id).limit(1))).one()
             await db.commit()
         await _add_role(user_id, "faculty", _DEPT_A)

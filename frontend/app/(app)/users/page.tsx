@@ -14,6 +14,10 @@ interface User {
   department_id: string | null; program_id: string | null;
   first_name?: string; middle_name?: string | null; last_name?: string; mobile?: string | null;
   department_name?: string | null;
+  // Every persisted role assignment, role + department kept as a pair (see
+  // GET /auth/users). `role`/`department_name` above are only the user's
+  // legacy primary role / home department.
+  assigned_role_assignments?: RoleAssignmentRow[];
 }
 interface DepartmentOpt { id: string; name: string; code: string; }
 // Multi-role/multi-department task (this revision) — one persisted
@@ -25,6 +29,16 @@ interface RoleAssignmentRow { id: string; role: string; department_id: string | 
 interface ProgramOpt { id: string; name: string; code: string; level: string; }
 
 const ROLE_OPTIONS = Object.keys(ROLES);
+// One "Role — Department" line per real assignment; the pair is never split
+// into separate role / department lists. Institution-wide roles have no
+// department and read "Role — Global"; a Student has none either (their
+// department lives on the user record) and reads plain.
+function assignmentLabel(a: RoleAssignmentRow): string {
+  const roleLabel = ROLES[a.role as keyof typeof ROLES] ?? a.role;
+  if (a.department_name) return `${roleLabel} — ${a.department_name}`;
+  return a.role === "student" ? roleLabel : `${roleLabel} — Global`;
+}
+
 // Multi-role/multi-department task (this revision) — the Assigned Roles
 // modal's two sections: institution-wide roles (plain checkboxes, no
 // department) vs. department-scoped roles (one checkbox per department,
@@ -161,18 +175,20 @@ export default function UsersPage() {
 
   const addRole = useMutation({
     mutationFn: (body: { role: string; department_id?: string }) => api.post(`/auth/users/${rolesUser?.id}/roles`, body),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["ams-user-roles", rolesUser?.id] }); },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["ams-user-roles", rolesUser?.id] }); qc.invalidateQueries({ queryKey: ["ams-users"] }); },
     onError: (e: unknown) => toast.error((e as {response?:{data?:{detail?:string}}})?.response?.data?.detail ?? "Could not assign role."),
   });
   const removeRole = useMutation({
     mutationFn: ({ role, department_id }: { role: string; department_id?: string | null }) =>
       api.delete(`/auth/users/${rolesUser?.id}/roles/${role}`, { params: department_id ? { department_id } : undefined }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["ams-user-roles", rolesUser?.id] }); },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["ams-user-roles", rolesUser?.id] }); qc.invalidateQueries({ queryKey: ["ams-users"] }); },
     onError: (e: unknown) => toast.error((e as {response?:{data?:{detail?:string}}})?.response?.data?.detail ?? "Could not remove role."),
   });
 
   const filtered = users.filter((u) =>
-    (!roleFilter || u.role === roleFilter) &&
+    // A user matches a role filter if ANY of their assignments has that role
+    // (the legacy primary `u.role` is only a fallback for a response without assignments).
+    (!roleFilter || (u.assigned_role_assignments ? u.assigned_role_assignments.some((a) => a.role === roleFilter) : u.role === roleFilter)) &&
     (!search || u.full_name.toLowerCase().includes(search.toLowerCase()) || u.email.toLowerCase().includes(search.toLowerCase()))
   );
 
@@ -463,7 +479,7 @@ export default function UsersPage() {
         ) : (
           <table className="w-full text-sm">
             <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10">
-              <tr>{["Name", "Email", "Role", "Designation", "Department", ...(isAdmin ? ["Action"] : [])].map((h) => (
+              <tr>{["Name", "Email", "Role", "Designation", "Department", "Assigned Roles", ...(isAdmin ? ["Action"] : [])].map((h) => (
                 <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700">{h}</th>
               ))}</tr>
             </thead>
@@ -475,6 +491,15 @@ export default function UsersPage() {
                   <td className="px-4 py-3"><span className="px-2 py-0.5 bg-[#E6F4F4] text-[#0D6E6E] rounded text-sm font-semibold">{ROLES[u.role as keyof typeof ROLES] ?? u.role}</span></td>
                   <td className="px-4 py-3 text-gray-700">{u.designation ?? "—"}</td>
                   <td className="px-4 py-3 text-gray-700">{u.department_name ?? "—"}</td>
+                  <td className="px-4 py-3 text-gray-700">
+                    {(u.assigned_role_assignments ?? []).length === 0 ? "—" : (
+                      <div className="flex flex-col gap-1">
+                        {(u.assigned_role_assignments ?? []).map((a) => (
+                          <span key={a.id}>{assignmentLabel(a)}</span>
+                        ))}
+                      </div>
+                    )}
+                  </td>
                   {isAdmin && (
                     <td className="px-4 py-3">
                       <div className="flex gap-1">

@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request, UploadFi
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_, and_
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel, EmailStr, field_validator, model_validator
 import openpyxl
@@ -585,6 +585,36 @@ async def update_user(
     return {"message": "User updated."}
 
 
+def _role_holder_condition(role: Optional[UserRole], department_id: Optional[UUID]):
+    """SQL condition over `User` for "holds `role` (in `department_id`)", judged
+    by `UserRoleAssignment` rows — NEVER by the legacy `User.role`/
+    `User.department_id` columns, which are only a display "primary role" and
+    "home department" and cannot describe a user who is e.g. FACULTY in two
+    departments or HOD in one and FACULTY in another. A HOD/FACULTY
+    assignment's own `department_id` is what places a user in a department;
+    holding HOD never implies FACULTY. Uses `IN (subquery)` rather than a join,
+    so a user with several matching assignments still appears exactly once.
+
+    Students are the one deliberate exception: a student's department is not
+    an assignment property (their STUDENT assignment has no department) — it
+    is `User.department_id`, exactly as everywhere else in AMS."""
+    ra = UserRoleAssignment
+    if role is None and department_id is None:
+        return None
+    if role is None:
+        return or_(
+            User.id.in_(select(ra.user_id).where(ra.department_id == department_id)),
+            and_(User.id.in_(select(ra.user_id).where(ra.role == UserRole.STUDENT)), User.department_id == department_id),
+        )
+    if role == UserRole.STUDENT:
+        is_student = User.id.in_(select(ra.user_id).where(ra.role == UserRole.STUDENT))
+        return and_(is_student, User.department_id == department_id) if department_id else is_student
+    conditions = [ra.role == role]
+    if department_id:
+        conditions.append(ra.department_id == department_id)
+    return User.id.in_(select(ra.user_id).where(*conditions))
+
+
 @router.get("/users")
 async def list_users(
     role: Optional[str] = None,
@@ -597,28 +627,58 @@ async def list_users(
     # endpoints remain SUPER_ADMIN-only, untouched by this task).
     user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HOD, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS)),
 ):
-    # .options(selectinload(User.department)) eager-loads the department in
-    # the same query (one extra batched SELECT, not one per row) so the
-    # Administration > Users "Department" column can display a name without
-    # N+1 queries. Scoped to this endpoint only — _user_dict() itself is not
-    # touched, so its other call sites (login/me, unaffected by this task)
-    # don't need to eager-load anything they don't already use.
-    q = select(User).where(User.is_active == True).options(selectinload(User.department))
+    """User directory. `role`/`department_id` filter by ROLE ASSIGNMENT (see
+    `_role_holder_condition`): `?role=faculty` with a department means "has a
+    FACULTY assignment in that department". Every returned user carries their
+    real, paired `assigned_role_assignments` (id, role, department) — one
+    entry per persisted `UserRoleAssignment`, never a synthesized one. The
+    legacy `role`/`department_id`/`department_name` fields are the user's
+    primary/home values, kept for display only. `active_*` fields are null
+    here: a directory listing has no session, so no assignment is "active"."""
+    role_enum: Optional[UserRole] = None
     if role:
-        q = q.where(User.role == role)
-    # BUSINESS_LOGIC.md Section N.4 — HOD is always scoped to their own
-    # department, regardless of any client-supplied department_id. Other
-    # roles keep their existing unrestricted behavior (unchanged).
-    if user.active_role == UserRole.HOD:
+        try:
+            role_enum = UserRole(role.strip().lower())
+        except ValueError:
+            raise HTTPException(400, "Unknown role.")
+
+    # BUSINESS_LOGIC.md Section N.4 — HOD is always scoped to the department of
+    # their ACTIVE assignment, regardless of any client-supplied department_id.
+    # Other roles keep their unrestricted behavior (optional department filter).
+    scope_department_id = department_id
+    is_hod = user.active_role == UserRole.HOD
+    if is_hod:
         if not user.active_department_id:
             return []
-        q = q.where(User.department_id == user.active_department_id)
-    elif department_id:
-        q = q.where(User.department_id == department_id)
+        scope_department_id = user.active_department_id
+
+    # Assignments (and their departments) are loaded in one batched query each
+    # — no per-user queries.
+    q = (
+        select(User).where(User.is_active == True)
+        .options(
+            selectinload(User.department),
+            selectinload(User.role_assignments).selectinload(UserRoleAssignment.department),
+        )
+    )
+    condition = _role_holder_condition(role_enum, scope_department_id)
+    if condition is not None:
+        q = q.where(condition)
     result = await db.execute(q.order_by(User.first_name))
     users_out = []
     for u in result.scalars().all():
+        assignments = sorted(u.role_assignments, key=lambda a: (a.role.value, a.department.name if a.department else ""))
+        if is_hod:
+            # A HOD sees a colleague's assignments in their own department (and
+            # department-less ones such as Student), not what they hold elsewhere.
+            assignments = [a for a in assignments if a.department_id is None or a.department_id == scope_department_id]
+        u.assigned_role_assignments = assignments
         d = _user_dict(u)
+        d["assigned_role_assignments"] = [_assignment_dict(a) for a in assignments]
+        d["assigned_roles"] = sorted({a.role.value for a in assignments})
+        d["active_role"] = None
+        d["active_role_assignment_id"] = None
+        d["active_department_id"] = None
         d["department_name"] = u.department.name if u.department else None
         users_out.append(d)
     return users_out

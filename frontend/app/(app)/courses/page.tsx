@@ -124,14 +124,18 @@ export default function CoursesPage() {
     enabled: !!offeringForm.calendar_id,
   });
 
+  const offeringDepartmentId = isHod ? activeDepartmentId : offeringForm.department_id;
   const { data: facultyUsers = [] } = useQuery<FacultyUser[]>({
-    // BUSINESS_LOGIC.md Section N.4 — for HOD this is scoped to their own
-    // department via the department_id param; the backend also enforces this
-    // scope server-side for HOD regardless of what's requested here.
-    queryKey: ["ams-faculty", isHod ? activeDepartmentId : "all"],
-    queryFn: async () => (await api.get("/auth/users", { params: isHod ? { department_id: activeDepartmentId } : {} }))
-      .data.filter((u: { role: string }) => ["faculty","hod"].includes(u.role)),
-    enabled: showOfferingCreate,
+    // Candidates are exactly the users holding a FACULTY role assignment in the
+    // offering's department, filtered by the backend (GET /auth/users?role=faculty
+    // is assignment-based) — no client-side role filtering. A HOD is always
+    // scoped to their ACTIVE department server-side regardless of what is sent;
+    // Super Admin's candidates follow the department chosen in the form. HOD
+    // status alone does not make someone a candidate, and the backend
+    // re-validates every selected id when the offering is saved.
+    queryKey: ["ams-faculty-candidates", offeringDepartmentId],
+    queryFn: async () => (await api.get("/auth/users", { params: { role: "faculty", department_id: offeringDepartmentId } })).data,
+    enabled: showOfferingCreate && !!offeringDepartmentId,
   });
 
   const filteredFaculty = useMemo(() => {
@@ -711,7 +715,7 @@ export default function CoursesPage() {
               ) : (
                 <div>
                   <label className="block text-base font-semibold text-gray-700 mb-1">Department *</label>
-                  <select value={offeringForm.department_id} onChange={(e) => setOfferingForm((f) => ({ ...f, department_id: e.target.value }))}
+                  <select value={offeringForm.department_id} onChange={(e) => { setOfferingForm((f) => ({ ...f, department_id: e.target.value })); setSelectedFaculty([]); setLeaderId(""); }}
                     className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
                     <option value="">Select department…</option>
                     {departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
@@ -766,7 +770,7 @@ export default function CoursesPage() {
                     {facultyOpen && (
                       <div className="mt-1 border border-gray-200 rounded-xl max-h-48 overflow-y-auto absolute z-10 bg-white w-full shadow-lg">
                         {filteredFaculty.length === 0 ? (
-                          <p className="text-sm text-gray-500 p-2">{facultyUsers.length === 0 ? "No faculty found in this department." : "No matching faculty."}</p>
+                          <p className="text-sm text-gray-500 p-2">{!offeringDepartmentId ? "Select a department first." : facultyUsers.length === 0 ? "No faculty found in this department." : "No matching faculty."}</p>
                         ) : filteredFaculty.slice(0, 20).map((f) => (
                           <button key={f.id} type="button" onMouseDown={(e) => e.preventDefault()} onClick={() => { addFaculty(f); setFacultyOpen(false); }}
                             className="w-full flex items-center justify-between text-left px-3 py-2 text-sm hover:bg-[#E6F4F4]">
