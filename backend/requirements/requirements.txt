@@ -26,3 +26,7 @@ aiofiles==24.1.0
 # shared installation, no cross-project dependency.
 Jinja2==3.1.6
 playwright==1.62.0
+# Synopsis module — merges the student's uploaded PDF with the AMS-rendered
+# front/approval pages into one A4 package, and validates uploaded PDFs.
+# Pure-Python; no LibreOffice or native dependency.
+pypdf==6.19.0

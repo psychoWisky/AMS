@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Synopsis - {{ d.student_name }}</title>
+<style>
+  @page { size: A4; margin: 16mm 15mm; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Segoe UI", "Noto Sans", Arial, sans-serif;
+    font-size: 10.5pt;
+    color: #1a1a1a;
+    line-height: 1.5;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  tr { break-inside: avoid; }
+  thead { display: table-header-group; }
+
+  .head { text-align: center; }
+  .head img { width: 64px; height: auto; margin-bottom: 4px; }
+  .univ-name { font-weight: 700; font-size: 15pt; margin: 4px 0 2px 0; }
+  .college-name { font-size: 11pt; margin: 2px 0 10px 0; }
+  .doc-title { text-align: center; text-decoration: underline; font-size: 10.5pt; margin: 14px 0 22px 0; }
+
+  .info-line { margin: 0 0 12px 0; }
+  .info-line b { font-weight: 700; }
+  .disciplines { margin: 0 0 22px 0; }
+  .section-heading { font-weight: 700; margin: 20px 0 4px 0; }
+  .research-title { font-weight: 700; margin: 0 0 24px 0; }
+  .attach-note { color: #555; font-size: 9.5pt; font-style: italic; margin-top: 28px; }
+
+  table.committee { margin-top: 6px; border-top: 1px solid #ddd; }
+  table.committee th, table.committee td {
+    text-align: left; padding: 8px 10px; border-bottom: 1px solid #ddd; vertical-align: top; font-size: 10pt;
+  }
+  table.committee th { font-weight: 700; }
+  table.committee td.name { font-weight: 700; }
+  table.committee td.advisory { font-weight: 700; }
+  .col-sl { width: 11%; white-space: nowrap; }
+  .col-action { width: 22%; }
+
+  .st-signed { color: #1e8e3e; }
+  .st-pending { color: #9a6b00; }
+  .st-reverted { color: #b3261e; font-weight: 700; }
+  .st-none { color: #777; }
+  .meta { display: block; font-size: 8.5pt; color: #555; }
+  .remark { display: block; font-size: 8.5pt; color: #b3261e; }
+
+  .declaration { margin-top: 26px; }
+  .declaration b { font-weight: 700; }
+  .sign-hod { margin: 34px 0 0 auto; width: 46%; text-align: right; }
+  .sign-line { margin-top: 26px; }
+  .approved-word { margin: 32px 0 2px 0; }
+  .workflow-note { margin-top: 18px; font-size: 9.5pt; color: #333; }
+  .footer-note { margin-top: 30px; font-size: 8pt; color: #777; text-align: center; }
+</style>
+</head>
+<body>
+
+{% macro action_cell(status, acted_at, remark) -%}
+  {%- if status == "approved" -%}
+    <span class="st-signed">&#10003; Signed</span>{% if acted_at %}<span class="meta">{{ acted_at }}</span>{% endif %}
+  {%- elif status == "reverted" -%}
+    <span class="st-reverted">&#10007; Reverted</span>{% if remark %}<span class="remark">Remark: {{ remark }}</span>{% endif %}
+  {%- elif status == "pending" or status == "not_submitted" -%}
+    <span class="st-pending">Pending</span>
+  {%- else -%}
+    <span class="st-none">&mdash;</span>
+  {%- endif -%}
+{%- endmacro %}
+
+{% if part == "front" %}
+
+  <div class="head">
+    {% if logo_data_uri %}<img src="{{ logo_data_uri }}" alt="AVFU Logo">{% endif %}
+    <p class="univ-name">{{ d.university }}</p>
+    <p class="college-name">{{ d.college_name or "—" }}</p>
+  </div>
+
+  <p class="doc-title">SYNOPSIS OF THESIS/DISSERTATION PROBLEM{% if d.program_name %} ({{ d.program_name }}){% endif %}</p>
+
+  <p class="info-line">Name of the student: {{ d.student_name }}</p>
+  <p class="info-line">Roll No : {{ d.student_roll or "—" }}</p>
+  <p class="info-line">Programme of Study : {{ d.program_name or "—" }}</p>
+  <p class="disciplines">
+    Major Discipline : {{ d.major_discipline or "—" }},&nbsp;
+    Minor Discipline : {{ d.minor_discipline or "—" }},&nbsp;
+    Supporting Discipline : {{ d.supporting_discipline or "—" }}
+  </p>
+
+  <p class="section-heading">1. Title of the Research Problem :</p>
+  <p class="research-title">{{ d.title or "—" }}</p>
+
+  <p class="attach-note">The Synopsis submitted by the student{% if d.file and d.file.page_count %} ({{ d.file.page_count }} page{{ "s" if d.file.page_count != 1 else "" }}){% endif %} follows on the next page{{ "s" if not d.file or d.file.page_count != 1 else "" }}.</p>
+
+{% else %}
+
+  <table class="committee">
+    <thead>
+      <tr><th class="col-sl">SL No</th><th>Name and Designation</th><th style="width:26%;">Advisory</th><th class="col-action">Action</th></tr>
+    </thead>
+    <tbody>
+      {% for r in d.committee_rows %}
+      <tr>
+        <td>{{ r.sl_no }}</td>
+        <td class="name">{{ r.name_designation }}</td>
+        <td class="advisory">{{ r.advisory }}</td>
+        <td>{{ action_cell(r.status, r.acted_at, r.remark) }}</td>
+      </tr>
+      {% endfor %}
+      {% if not d.committee_rows %}
+      <tr><td colspan="4" class="st-none">No Advisory Committee members.</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+
+  <div class="declaration">
+    <b>Declaration:</b><br>
+    The work could be completed with the existing facilities of the university/collaborating institutes.
+  </div>
+
+  <div class="sign-hod">
+    {{ action_cell(d.hod.status, d.hod.acted_at, d.hod.remark) }}
+    {% if d.hod.status == "approved" and d.hod.approver_name %}<span class="meta">{{ d.hod.approver_name }}{% if d.hod.department_name %} &mdash; {{ d.hod.department_name }}{% endif %}</span>{% endif %}
+    <div>Head of the Department</div>
+  </div>
+
+  {% if d.incharge.status in ("approved", "reverted", "pending") %}
+  <p class="workflow-note">
+    Incharge Academic Cell approval:
+    {% if d.incharge.status == "approved" %}Approved{% if d.incharge.approver_name %} by {{ d.incharge.approver_name }}{% endif %}{% if d.incharge.acted_at %} on {{ d.incharge.acted_at }}{% endif %}
+    {% elif d.incharge.status == "reverted" %}Reverted{% if d.incharge.remark %} &mdash; Remark: {{ d.incharge.remark }}{% endif %}
+    {% else %}Pending{% endif %}
+  </p>
+  {% endif %}
+
+  {% if d.status == "approved" %}<p class="approved-word">APPROVED</p>{% else %}<p class="approved-word">&nbsp;</p>{% endif %}
+  <div class="sign-line">
+    {{ action_cell(d.dpgs.status, d.dpgs.acted_at, d.dpgs.remark) }}
+    {% if d.dpgs.status == "approved" and d.dpgs.approver_name %}<span class="meta">{{ d.dpgs.approver_name }}</span>{% endif %}
+    <div>Director of PG Studies</div>
+  </div>
+
+  <p class="footer-note">
+    {% if d.status == "approved" %}Approved Synopsis &mdash; final approval {{ d.approved_at or "" }} &middot; approval cycle {{ d.cycle_number }}.
+    {% else %}Generated by AVFU AMS on {{ generated_at.strftime("%d-%b-%Y %H:%M") }} UTC &mdash; Synopsis status: {{ d.status_label }}.{% endif %}
+  </p>
+
+{% endif %}
+
+</body>
+</html>

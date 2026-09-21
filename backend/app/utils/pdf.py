@@ -135,3 +135,46 @@ def render_ppw_pdf(html: str) -> bytes:
         raise ChromiumRenderFailed("Chromium produced an empty PDF.")
 
     return pdf_bytes
+
+
+def render_html_documents(htmls: list[str]) -> list[bytes]:
+    """Render several HTML documents to PDFs with ONE headless-Chromium launch
+    (Synopsis renders its front and approval sections this way instead of paying
+    the browser start-up cost per section). Same contract as `render_ppw_pdf`:
+    synchronous (call from a threadpool), page size/margins from each document's
+    own @page CSS, raises ChromiumUnavailable / ChromiumRenderFailed."""
+    import asyncio, sys
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+    try:
+        from playwright.sync_api import sync_playwright
+        from playwright._impl._errors import Error as PlaywrightError
+    except ImportError as exc:
+        raise ChromiumUnavailable(f"playwright not importable: {exc}") from exc
+
+    out: list[bytes] = []
+    try:
+        with sync_playwright() as p:
+            try:
+                browser = p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            except PlaywrightError as exc:
+                raise ChromiumUnavailable(f"chromium launch failed: {exc}") from exc
+            try:
+                for html in htmls:
+                    page = browser.new_page()
+                    try:
+                        page.set_content(html, wait_until="networkidle")
+                        out.append(page.pdf(print_background=True, prefer_css_page_size=True))
+                    finally:
+                        page.close()
+            finally:
+                browser.close()
+    except ChromiumUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise ChromiumRenderFailed(str(exc)) from exc
+
+    if not out or not all(out):
+        raise ChromiumRenderFailed("Chromium produced an empty PDF.")
+    return out

@@ -1,6 +1,6 @@
 import {
   LayoutDashboard, CalendarDays, BookOpen, Users, ClipboardList,
-  BarChart3, FlaskConical, Bell, GraduationCap, FileText, ClipboardCheck, IdCard, UserCog, ShieldCheck, FileSpreadsheet,
+  BarChart3, FlaskConical, Bell, GraduationCap, FileText, ClipboardCheck, IdCard, UserCog, ShieldCheck, FileSpreadsheet, ScrollText,
   type LucideIcon,
 } from "lucide-react";
 
@@ -78,6 +78,10 @@ export const NAV: NavItem[] = [
   // Incharge Academic Cell / DPGS task — both approve PPWs after HOD
   // (Section 19/20), global (no department restriction).
   { label: "PPW Approvals",   icon: ClipboardCheck,  href: "/ppw/approvals", roles: ["hod","faculty","incharge_academic_cell","dpgs"] },
+  // Synopsis (First Synopsis) — the student's own page, and the approver inbox for every role that appears in the
+  // approval chain. Both are UX gates only; each backend endpoint authorizes independently from the active session.
+  { label: "Synopsis",         icon: ScrollText,      href: "/synopsis",     roles: ["student"] },
+  { label: "Synopsis Approvals", icon: ClipboardCheck, href: "/synopsis/approvals", roles: ["hod","faculty","incharge_academic_cell","dpgs"] },
   { label: "Users",           icon: Users,           href: "/users",        roles: ["super_admin"] },
   // Super Admin's global student management (all students, filters, full profile edit).
   // Distinct from "/student-management", which is a student's OWN profile page.

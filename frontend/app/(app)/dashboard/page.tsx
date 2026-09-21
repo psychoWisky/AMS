@@ -51,7 +51,7 @@ const STUDENT_TILES: DashboardTile[] = [
   { key: "comprehensive-exam", title: "Comprehensive Exam", description: "Comprehensive examination status", icon: CheckSquare, color: "bg-purple-50 text-purple-700", implemented: false },
   { key: "conference", title: "Conference", description: "Conference participation records", icon: Presentation, color: "bg-teal-50 text-teal-700", implemented: false },
   { key: "result-tracking", title: "Result Tracking", description: "Track your semester results", icon: TrendingUp, color: "bg-green-50 text-green-700", implemented: false },
-  { key: "synopsis", title: "Synopsis", description: "Research synopsis submission", icon: ScrollText, color: "bg-orange-50 text-orange-700", implemented: false },
+  { key: "synopsis", title: "Synopsis", description: "Research synopsis submission", icon: ScrollText, color: "bg-orange-50 text-orange-700", implemented: true, href: "/synopsis" },
   { key: "thesis", title: "Thesis", description: "Thesis submission and status", icon: BookText, color: "bg-indigo-50 text-indigo-700", implemented: false },
   { key: "feedback", title: "Feedback", description: "Submit course/faculty feedback", icon: MessageSquare, color: "bg-red-50 text-red-700", implemented: false },
 ];

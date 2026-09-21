@@ -10,3 +10,5 @@ frontend/package-lock.json
 # Server deployment files
 backend/venv/
 deploy.sh
+# Uploaded documents (Synopsis PDFs, admission documents) — personal data, never committed.
+backend/uploads/
