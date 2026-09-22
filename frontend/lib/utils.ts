@@ -32,11 +32,16 @@ export function formatDate(iso: string, style: "long" | "short" | "relative" = "
 // exactly (never guessed).
 export const ROLES = {
   super_admin: "Super Admin",
+  vice_chancellor: "Vice Chancellor",
   dpgs: "DPGS",
   incharge_academic_cell: "Incharge Academic Cell",
   hod: "Head of Department",
   faculty: "Faculty",
   student: "Student",
+  // External Examiner Selection task — a display label only. This role is never
+  // manually assignable via User Management (see users/page.tsx's ROLE_OPTIONS);
+  // an account is created automatically on VC selection.
+  external_examiner: "External Examiner",
 };
 
 export const ADMIN_ROLES = ["super_admin", "hod"];
@@ -45,7 +50,7 @@ export const ADMIN_ROLES = ["super_admin", "hod"];
 // that need to grant them the same cross-department view access Super Admin
 // already has (never user-management/role-assignment powers — those remain
 // SUPER_ADMIN-only, matched by the backend exactly).
-export const GLOBAL_ROLES = ["super_admin", "incharge_academic_cell", "dpgs"];
+export const GLOBAL_ROLES = ["super_admin", "vice_chancellor", "incharge_academic_cell", "dpgs"];
 
 // Centralized labels for CommitteeMember.role (BUSINESS_LOGIC.md M.5, Rule 29 —
 // the 5 confirmed PG/PhD Research Committee member types). `co_major_advisor` and

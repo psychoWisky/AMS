@@ -50,6 +50,10 @@ from app.core.profile_fields import blank_to_none, is_blank
 router = APIRouter(prefix="/students", tags=["Students (Super Admin)"])
 
 _MANAGE_ROLES = (UserRole.SUPER_ADMIN,)
+# VC read-only dashboard (External Examiner Selection task) — a SEPARATE tuple, used ONLY on the two
+# GET routes below. Deliberately NOT added to _MANAGE_ROLES itself, which also gates PATCH — VC must
+# never gain student-editing rights merely by being able to view the list.
+_READ_ROLES = (*_MANAGE_ROLES, UserRole.VICE_CHANCELLOR)
 
 
 class StudentUpdate(BaseModel):
@@ -216,7 +220,7 @@ async def list_students(
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(*_MANAGE_ROLES)),
+    _: User = Depends(require_roles(*_READ_ROLES)),
 ):
     """All students, newest filters combined with AND, paginated. Filters are
     applied in SQL:
@@ -285,7 +289,7 @@ async def _render(db: AsyncSession, student_id: UUID) -> dict:
 @router.get("/{student_id}")
 async def get_student(
     student_id: UUID, db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(*_MANAGE_ROLES)),
+    _: User = Depends(require_roles(*_READ_ROLES)),
 ):
     return await _render(db, student_id)
 

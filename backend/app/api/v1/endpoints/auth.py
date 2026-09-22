@@ -45,10 +45,20 @@ _FACULTY_TITLES = ("Dr.", "Mr", "Mrs", "Miss")
 # `0016_incharge_dpgs_roles` for the database-level partial unique index
 # that is the actual source of truth; the check in add_user_role() below is
 # a friendly pre-flight only.
-_SINGLE_HOLDER_ROLES = (UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS)
+#
+# External Examiner Selection task — VICE_CHANCELLOR is single-holder too
+# (migration `0026_vc_examiner_roles` widened the SAME partial unique index
+# to also cover it; see that migration's and UserRole's docstrings). It
+# belongs in this tuple for the same reason INCHARGE_ACADEMIC_CELL/DPGS do —
+# omitting it here left the DB constraint as the only enforcement, so a
+# conflicting assignment still failed (409), but with the generic
+# "conflicts with a single-holder role" message instead of naming the
+# current holder like the other two single-holder roles do.
+_SINGLE_HOLDER_ROLES = (UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS, UserRole.VICE_CHANCELLOR)
 _ROLE_DISPLAY_NAMES = {
     UserRole.INCHARGE_ACADEMIC_CELL: "Incharge Academic Cell",
     UserRole.DPGS: "DPGS",
+    UserRole.VICE_CHANCELLOR: "Vice Chancellor",
 }
 
 
@@ -522,11 +532,45 @@ async def update_user(
     user_id: UUID,
     body: UpdateUserRequest,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_roles(UserRole.SUPER_ADMIN)),
+    # External Examiner Selection task — DPGS is added here ONLY to reach the narrow,
+    # role-filtered examiner-deactivation path immediately below. It gains no other
+    # capability of this endpoint: every field/branch past that check still requires
+    # Super Admin, enforced explicitly, not by widening this dependency's meaning.
+    admin: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.DPGS)),
 ):
     target = await db.get(User, user_id)
     if not target:
         raise HTTPException(status_code=404, detail="User not found.")
+
+    if admin.active_role == UserRole.DPGS:
+        # Narrow, role-filtered permission (Section 34): DPGS may ONLY deactivate an
+        # EXTERNAL_EXAMINER account through this endpoint — nothing else about this
+        # user, and no other target role. Checked before any other logic in this
+        # function runs, so a DPGS caller can never reach the generic profile/role/
+        # department-editing paths below, whatever the request body contains.
+        if target.role != UserRole.EXTERNAL_EXAMINER:
+            raise HTTPException(status_code=403, detail="DPGS may only manage External Examiner accounts.")
+        touched = set(body.model_dump(exclude_unset=True).keys())
+        if touched != {"is_active"} or body.is_active is not False:
+            raise HTTPException(status_code=403, detail="DPGS may only deactivate an External Examiner account (is_active: false).")
+
+    if target.role == UserRole.EXTERNAL_EXAMINER and body.is_active is False:
+        # Assignment-aware deactivation (Section 8/12/23/24 of the confirmed rules) —
+        # applies to EVERY caller (Super Admin included), not just DPGS: an examiner
+        # with any assignment still `active` (this module never transitions one to
+        # `completed` — that belongs to the future Thesis module) cannot be
+        # deactivated, so their account remains usable for whichever student(s) they
+        # are still assigned to.
+        from app.models.external_examiner import ExternalExaminer, ExternalExaminerAssignment
+        active_assignment = await db.execute(
+            select(ExternalExaminerAssignment.id)
+            .join(ExternalExaminer, ExternalExaminer.id == ExternalExaminerAssignment.examiner_id)
+            .where(ExternalExaminer.user_id == target.id, ExternalExaminerAssignment.status == "active")
+            .limit(1)
+        )
+        if active_assignment.scalar_one_or_none():
+            raise HTTPException(status_code=409, detail="Cannot deactivate: this examiner has an active assignment. It must be completed or reassigned first.")
+
     # Student accounts are managed through the Students endpoints, never through
     # the generic user-management endpoint.
     is_staff = (await db.execute(select(User.id).where(User.id == user_id, staff_user_clause()))).scalar_one_or_none()
@@ -682,7 +726,9 @@ async def list_users(
     # Admin's existing unrestricted access below); they gain NO user-
     # management capability from this alone (create/update/role-assignment
     # endpoints remain SUPER_ADMIN-only, untouched by this task).
-    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HOD, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS)),
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HOD, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS, UserRole.VICE_CHANCELLOR)),
+    # External Examiner Selection task — VC gains this SAME read-only, unrestricted-scope access
+    # (its own VC dashboard's faculty listing), never any user-management capability.
 ):
     """User directory. `role`/`department_id` filter by ROLE ASSIGNMENT (see
     `_role_holder_condition`): `?role=faculty` with a department means "has a

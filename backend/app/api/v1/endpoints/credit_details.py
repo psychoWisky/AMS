@@ -38,7 +38,7 @@ router = APIRouter(prefix="/credit-details", tags=["Student Credit Details"])
 # Incharge Academic Cell / DPGS task (Section 34) — both are global,
 # read-only here, same as Super Admin (this file has no mutation endpoints
 # at all — view-only credit details, so no ownership concern to preserve).
-_ADMIN_ROLES = (UserRole.SUPER_ADMIN, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS)
+_ADMIN_ROLES = (UserRole.SUPER_ADMIN, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS, UserRole.VICE_CHANCELLOR)  # VC: read-only dashboard (this file has no mutation endpoint at all)
 
 
 # ── Authorization ────────────────────────────────────────────────────────────

@@ -43,6 +43,7 @@ from app.core.dependencies import get_current_user, require_roles
 from app.models.user import User, UserRole, Department
 from app.models.research import AdvisoryCommittee, CommitteeMember
 from app.models.synopsis import Synopsis, SynopsisApprovalCycle
+from app.models.external_examiner import ExternalExaminerSelection, ExternalExaminerApprovalCycle
 # Programme<->Department many-to-many redesign — single shared implementation
 # in app/core/student_scope.py, re-exported under this file's existing
 # private name (also imported from here by ppw.py, unchanged).
@@ -145,6 +146,20 @@ async def _assert_no_synopsis_under_approval(student_id: UUID, db: AsyncSession,
             f"Cannot {action} because this student has a Synopsis currently under approval. "
             f"The Synopsis approval workflow must be completed or reverted before {until}.",
         )
+
+
+
+async def _assert_no_external_examiner_under_approval(student_id: UUID, db: AsyncSession, action: str, until: str) -> None:
+    """Sibling of `_assert_no_synopsis_under_approval`, same mechanism, same reasoning: each External
+    Examiner Selection approval stage is bound to the exact accepted Major Advisor `CommitteeMember` row,
+    so changing the committee mid-approval would strand it. Only an ACTIVE cycle blocks anything — a
+    draft never submitted, a reverted selection, a fully approved one, or no selection at all, never do."""
+    active = await db.execute(
+        select(ExternalExaminerApprovalCycle.id).join(ExternalExaminerSelection, ExternalExaminerSelection.id == ExternalExaminerApprovalCycle.selection_id)
+        .where(ExternalExaminerSelection.student_id == student_id, ExternalExaminerApprovalCycle.status == "active").limit(1)
+    )
+    if active.scalar_one_or_none():
+        raise HTTPException(409, f"Cannot {action} because this student's External Examiner Selection is currently under approval. The approval workflow must be completed or reverted before {until}.")
 
 
 async def _get_major_advisor_member(committee: AdvisoryCommittee, db: AsyncSession) -> Optional[CommitteeMember]:
@@ -344,6 +359,7 @@ async def reassign_major_advisor(
     if not c: raise HTTPException(404, "Committee not found.")
     await _authorize_propose_major_advisor(c.student_id, user, db)
     await _assert_no_synopsis_under_approval(c.student_id, db, "change the Major Advisor", "the Major Advisor can be changed")
+    await _assert_no_external_examiner_under_approval(c.student_id, db, "change the Major Advisor", "the Major Advisor can be changed")
     ma = await _get_major_advisor_member(c, db)
     # Incharge Academic Cell / DPGS task (Section 28) — HOD may now also
     # change the Major Advisor when the committee has been returned to
@@ -402,6 +418,7 @@ async def add_member(
     if not c: raise HTTPException(404, "Committee not found.")
     await _authorize_manage_members(c, user, db)
     await _assert_no_synopsis_under_approval(c.student_id, db, "add a committee member", "the committee can be changed")
+    await _assert_no_external_examiner_under_approval(c.student_id, db, "add a committee member", "the committee can be changed")
     if c.status not in ("member_selection", "members_pending"):
         raise HTTPException(400, "Members can only be added while the committee is in member-selection stage.")
     if body.role not in _MEMBER_ROLES:
@@ -434,6 +451,7 @@ async def remove_member(
     if not c: raise HTTPException(404, "Committee not found.")
     await _authorize_manage_members(c, user, db)
     await _assert_no_synopsis_under_approval(c.student_id, db, "remove a committee member", "the committee can be changed")
+    await _assert_no_external_examiner_under_approval(c.student_id, db, "remove a committee member", "the committee can be changed")
     m = await db.get(CommitteeMember, member_id)
     if not m or m.committee_id != committee_id or m.role == "major_advisor":
         raise HTTPException(404, "Member not found.")

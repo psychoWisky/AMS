@@ -24,13 +24,35 @@ class UserRole(str, Enum):
     Neither is seeded/assigned by any code in this repository — a Super
     Admin must manually assign each one exactly once via the existing
     role-assignment endpoints (see auth.py's `add_user_role`, which enforces
-    "at most one active holder" for both — see `0016_incharge_dpgs_roles`)."""
+    "at most one active holder" for both — see `0016_incharge_dpgs_roles`).
+
+    External Examiner Selection task (this revision) — two more roles:
+
+    `VICE_CHANCELLOR` — a third GLOBAL, departmentless, single-holder role,
+    sitting above DPGS (SUPER_ADMIN > VICE_CHANCELLOR > DPGS >
+    INCHARGE_ACADEMIC_CELL > HOD > FACULTY > STUDENT for this workflow's
+    approval chain). Assigned the same way as DPGS/Incharge — manually, by a
+    Super Admin, via the existing role-assignment endpoints — and enforced
+    single-holder by the same partial-unique-index mechanism (migration
+    `0026_vc_examiner_roles`).
+
+    `EXTERNAL_EXAMINER` — an ordinary AMS user role, never assigned by a Super
+    Admin through the role-assignment endpoints: an account is created
+    automatically (`external_examiner.py`, on VC confirmation) with this as
+    its legacy `User.role`, exactly like an Orientation-created STUDENT
+    account — no `UserRoleAssignment` row is created at issuance either;
+    `get_current_user`'s existing self-heal path creates one (with no
+    department, since this role is never department-scoped) the first time
+    the examiner logs in. Distinguishes the account by role, not by an
+    additional boolean flag, consistent with every other account type."""
     SUPER_ADMIN            = "super_admin"
+    VICE_CHANCELLOR        = "vice_chancellor"
     DPGS                   = "dpgs"
     INCHARGE_ACADEMIC_CELL = "incharge_academic_cell"
     HOD                    = "hod"
     FACULTY                = "faculty"
     STUDENT                = "student"
+    EXTERNAL_EXAMINER      = "external_examiner"
 
 
 class Department(Base):

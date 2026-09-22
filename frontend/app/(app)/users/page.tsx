@@ -32,7 +32,9 @@ interface RoleAssignmentRow { id: string; role: string; department_id: string | 
 interface ProgramOpt { id: string; name: string; code: string; level: string; }
 
 // Students are not managed here (see the Students page), so they are not a role option.
-const ROLE_OPTIONS = Object.keys(ROLES).filter((r) => r !== "student");
+// External Examiner accounts are never manually created/edited through this generic form
+// either — they are provisioned automatically (see external-examiners/page.tsx's VC selection).
+const ROLE_OPTIONS = Object.keys(ROLES).filter((r) => r !== "student" && r !== "external_examiner");
 const TITLES = ["Dr.", "Mr", "Mrs", "Miss"];
 const GENDERS = ["Male", "Female", "Other"];
 const BLOOD_GROUPS = ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"];
@@ -57,7 +59,7 @@ function assignmentLabel(a: RoleAssignmentRow): string {
 // exclusivity — see auth.py's add_user_role — this UI does not need its
 // own separate copy of that rule, it just surfaces whatever the backend
 // rejects).
-const GLOBAL_ROLE_OPTIONS = ["super_admin", "dpgs", "incharge_academic_cell", "student"];
+const GLOBAL_ROLE_OPTIONS = ["super_admin", "vice_chancellor", "dpgs", "incharge_academic_cell", "student"];
 const DEPARTMENT_ROLE_OPTIONS = ["hod", "faculty"];
 
 // Issue 4 fix: a single named constant for the Add User form's blank state,

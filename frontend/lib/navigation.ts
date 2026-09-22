@@ -1,6 +1,6 @@
 import {
   LayoutDashboard, CalendarDays, BookOpen, Users, ClipboardList,
-  BarChart3, FlaskConical, Bell, GraduationCap, FileText, ClipboardCheck, IdCard, UserCog, ShieldCheck, FileSpreadsheet, ScrollText,
+  BarChart3, FlaskConical, Bell, GraduationCap, FileText, ClipboardCheck, IdCard, UserCog, ShieldCheck, FileSpreadsheet, ScrollText, UserSearch, LayoutGrid,
   type LucideIcon,
 } from "lucide-react";
 
@@ -81,6 +81,12 @@ export const NAV: NavItem[] = [
   // Synopsis (First Synopsis) — the student's own page, and the approver inbox for every role that appears in the
   // approval chain. Both are UX gates only; each backend endpoint authorizes independently from the active session.
   { label: "Synopsis",         icon: ScrollText,      href: "/synopsis",     roles: ["student"] },
+  // External Examiner Selection — the Major Advisor's own proposal page (never a student route:
+  // the student has zero access to this module, by confirmed requirement), the shared approver
+  // inbox, and the Vice Chancellor's own read-only institutional dashboard.
+  { label: "External Examiners", icon: UserSearch,    href: "/external-examiners", roles: ["faculty"] },
+  { label: "Examiner Approvals", icon: ClipboardCheck, href: "/external-examiners/approvals", roles: ["hod","faculty","incharge_academic_cell","dpgs","vice_chancellor"] },
+  { label: "VC Dashboard",     icon: LayoutGrid,      href: "/vc-dashboard", roles: ["vice_chancellor"] },
   { label: "Synopsis Approvals", icon: ClipboardCheck, href: "/synopsis/approvals", roles: ["hod","faculty","incharge_academic_cell","dpgs"] },
   { label: "Users",           icon: Users,           href: "/users",        roles: ["super_admin"] },
   // Super Admin's global student management (all students, filters, full profile edit).
