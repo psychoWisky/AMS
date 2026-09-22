@@ -88,6 +88,12 @@ export const NAV: NavItem[] = [
   { label: "Examiner Approvals", icon: ClipboardCheck, href: "/external-examiners/approvals", roles: ["hod","faculty","incharge_academic_cell","dpgs","vice_chancellor"] },
   { label: "VC Dashboard",     icon: LayoutGrid,      href: "/vc-dashboard", roles: ["vice_chancellor"] },
   { label: "Synopsis Approvals", icon: ClipboardCheck, href: "/synopsis/approvals", roles: ["hod","faculty","incharge_academic_cell","dpgs"] },
+  // Initial Thesis Management — the student's own page (create/track their ONE Initial
+  // Thesis) and the shared approver inbox for every role in the confirmed approval chain
+  // (Major Advisor/HOD/Librarian/Incharge Academic Cell/DPGS). Final Thesis is out of scope.
+  { label: "Thesis Management", icon: FileText,        href: "/thesis",        roles: ["student"] },
+  { label: "Thesis Approvals",  icon: ClipboardCheck,  href: "/thesis/approvals", roles: ["hod","faculty","librarian","incharge_academic_cell","dpgs"] },
+  { label: "My Evaluations",   icon: ClipboardCheck,  href: "/thesis/evaluations", roles: ["external_examiner"] },
   { label: "Users",           icon: Users,           href: "/users",        roles: ["super_admin"] },
   // Super Admin's global student management (all students, filters, full profile edit).
   // Distinct from "/student-management", which is a student's OWN profile page.

@@ -44,7 +44,21 @@ class UserRole(str, Enum):
     `get_current_user`'s existing self-heal path creates one (with no
     department, since this role is never department-scoped) the first time
     the examiner logs in. Distinguishes the account by role, not by an
-    additional boolean flag, consistent with every other account type."""
+    additional boolean flag, consistent with every other account type.
+
+    Initial Thesis Management task (this revision) — one more role:
+
+    `LIBRARIAN` — a GLOBAL, departmentless role, but deliberately NOT
+    single-holder (unlike DPGS/Incharge/VC): any number of users may hold it,
+    exactly like FACULTY's multiplicity. Assigned manually by a Super Admin
+    through the existing role-assignment endpoints; `department_id` must be
+    NULL (it falls outside `_DEPARTMENT_REQUIRED_ROLES` in auth.py, so this is
+    enforced automatically, with no new code). Business-document label is
+    "Chief Librarian" (see `thesis.py`'s `_STAGE_ROLE_LABELS`); the role value
+    itself stays `LIBRARIAN` — no separate "chief" distinction exists in the
+    data model. No department/library scoping was introduced for this role
+    (no evidence of one in the repository or business rules): every active
+    LIBRARIAN may act on every thesis at the Librarian stage."""
     SUPER_ADMIN            = "super_admin"
     VICE_CHANCELLOR        = "vice_chancellor"
     DPGS                   = "dpgs"
@@ -53,6 +67,7 @@ class UserRole(str, Enum):
     FACULTY                = "faculty"
     STUDENT                = "student"
     EXTERNAL_EXAMINER      = "external_examiner"
+    LIBRARIAN              = "librarian"
 
 
 class Department(Base):

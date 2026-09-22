@@ -59,7 +59,7 @@ function assignmentLabel(a: RoleAssignmentRow): string {
 // exclusivity — see auth.py's add_user_role — this UI does not need its
 // own separate copy of that rule, it just surfaces whatever the backend
 // rejects).
-const GLOBAL_ROLE_OPTIONS = ["super_admin", "vice_chancellor", "dpgs", "incharge_academic_cell", "student"];
+const GLOBAL_ROLE_OPTIONS = ["super_admin", "vice_chancellor", "dpgs", "incharge_academic_cell", "librarian", "student"];
 const DEPARTMENT_ROLE_OPTIONS = ["hod", "faculty"];
 
 // Issue 4 fix: a single named constant for the Add User form's blank state,

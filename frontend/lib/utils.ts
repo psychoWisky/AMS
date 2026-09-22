@@ -42,6 +42,11 @@ export const ROLES = {
   // manually assignable via User Management (see users/page.tsx's ROLE_OPTIONS);
   // an account is created automatically on VC selection.
   external_examiner: "External Examiner",
+  // Initial Thesis Management task — multi-holder, departmentless, like Faculty.
+  // Business-document label is "Chief Librarian" (thesis.py's signature table);
+  // the assignable role name here stays "Librarian" for consistency with every
+  // other role label in this map (a role name, not a document-signature title).
+  librarian: "Librarian",
 };
 
 export const ADMIN_ROLES = ["super_admin", "hod"];
