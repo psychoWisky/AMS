@@ -1,6 +1,6 @@
 import {
   LayoutDashboard, CalendarDays, BookOpen, Users, ClipboardList,
-  BarChart3, FlaskConical, Bell, GraduationCap, FileText, ClipboardCheck, IdCard, UserCog, ShieldCheck, FileSpreadsheet, ScrollText, UserSearch, LayoutGrid,
+  BarChart3, FlaskConical, Bell, GraduationCap, FileText, ClipboardCheck, IdCard, UserCog, ShieldCheck, FileSpreadsheet, ScrollText, UserSearch, LayoutGrid, GitBranch,
   type LucideIcon,
 } from "lucide-react";
 
@@ -94,6 +94,11 @@ export const NAV: NavItem[] = [
   { label: "Thesis Management", icon: FileText,        href: "/thesis",        roles: ["student"] },
   { label: "Thesis Approvals",  icon: ClipboardCheck,  href: "/thesis/approvals", roles: ["hod","faculty","librarian","incharge_academic_cell","dpgs"] },
   { label: "My Evaluations",   icon: ClipboardCheck,  href: "/thesis/evaluations", roles: ["external_examiner"] },
+  // Student Migration — the student's own page (create/track their applications; at most one
+  // active at a time, backend-enforced) and the single Registrar's approval inbox. No other
+  // role is involved in this workflow (Section 1 of the confirmed requirements).
+  { label: "Migration Management", icon: GitBranch,   href: "/migration",          roles: ["student"] },
+  { label: "Migration Approvals",  icon: ClipboardCheck, href: "/migration/approvals", roles: ["registrar"] },
   { label: "Users",           icon: Users,           href: "/users",        roles: ["super_admin"] },
   // Super Admin's global student management (all students, filters, full profile edit).
   // Distinct from "/student-management", which is a student's OWN profile page.

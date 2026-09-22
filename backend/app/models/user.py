@@ -58,11 +58,30 @@ class UserRole(str, Enum):
     itself stays `LIBRARIAN` — no separate "chief" distinction exists in the
     data model. No department/library scoping was introduced for this role
     (no evidence of one in the repository or business rules): every active
-    LIBRARIAN may act on every thesis at the Librarian stage."""
+    LIBRARIAN may act on every thesis at the Librarian stage.
+
+    Student Migration task (this revision) — one more role:
+
+    `REGISTRAR` — a GLOBAL, departmentless, SINGLE-HOLDER role (unlike
+    LIBRARIAN): there is confirmed to be exactly one Registrar in the
+    university, enforced by the same partial-unique-index mechanism as
+    DPGS/Incharge Academic Cell/Vice Chancellor (migration
+    `0030_registrar_role`, widening `uq_user_role_assignment_single_holder`).
+    Assigned manually by a Super Admin through the existing role-assignment
+    endpoints; `department_id` must be NULL (outside
+    `_DEPARTMENT_REQUIRED_ROLES` in auth.py, enforced automatically). Scoped
+    narrowly to the Migration module only (`migration.py`) — Registrar is
+    deliberately NOT added to any generic student-management or user-listing
+    authorization tuple. Historical note: a `REGISTRAR` value existed in this
+    enum once before, as one of four early-development dummy/testing roles
+    removed entirely by `0015_remove_legacy_roles` — that removal is
+    unrelated to this role: this is a fresh definition for a now-confirmed,
+    genuine business role, not a revival of the old dummy value."""
     SUPER_ADMIN            = "super_admin"
     VICE_CHANCELLOR        = "vice_chancellor"
     DPGS                   = "dpgs"
     INCHARGE_ACADEMIC_CELL = "incharge_academic_cell"
+    REGISTRAR              = "registrar"
     HOD                    = "hod"
     FACULTY                = "faculty"
     STUDENT                = "student"

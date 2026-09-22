@@ -47,6 +47,10 @@ export const ROLES = {
   // the assignable role name here stays "Librarian" for consistency with every
   // other role label in this map (a role name, not a document-signature title).
   librarian: "Librarian",
+  // Student Migration task — single-holder, departmentless, like DPGS/Incharge/VC
+  // (there is confirmed to be exactly one Registrar). Scoped only to the Migration
+  // module's own endpoints — never added to a generic student-management tuple.
+  registrar: "Registrar",
 };
 
 export const ADMIN_ROLES = ["super_admin", "hod"];
