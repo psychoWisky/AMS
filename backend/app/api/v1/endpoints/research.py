@@ -45,6 +45,7 @@ from app.models.research import AdvisoryCommittee, CommitteeMember
 from app.models.synopsis import Synopsis, SynopsisApprovalCycle
 from app.models.external_examiner import ExternalExaminerSelection, ExternalExaminerApprovalCycle
 from app.models.thesis import Thesis, ThesisApprovalCycle
+from app.models.progress_report import ProgressReport, ProgressReportApprovalCycle
 # Programme<->Department many-to-many redesign — single shared implementation
 # in app/core/student_scope.py, re-exported under this file's existing
 # private name (also imported from here by ppw.py, unchanged).
@@ -173,6 +174,22 @@ async def _assert_no_thesis_under_approval(student_id: UUID, db: AsyncSession, a
     )
     if active.scalar_one_or_none():
         raise HTTPException(409, f"Cannot {action} because this student's Initial Thesis is currently under approval. The approval workflow must be completed or reverted before {until}.")
+
+
+async def _assert_no_progress_report_under_approval(student_id: UUID, db: AsyncSession, action: str, until: str) -> None:
+    """Sibling of `_assert_no_synopsis_under_approval`/`_assert_no_external_examiner_under_approval`/
+    `_assert_no_thesis_under_approval`, same mechanism, same reasoning: every Progress Report
+    approval stage (Major Advisor and each committee member) is bound to the exact
+    `CommitteeMember` row, so changing the committee mid-approval would strand it. Note that a
+    Progress Report cycle here can survive several PARTIAL reverts (Committee->MA, HOD->Committee,
+    etc.) without ever leaving `status == "active"` — the lock applies throughout, exactly as
+    intended, since the workflow is still genuinely ongoing in every one of those states."""
+    active = await db.execute(
+        select(ProgressReportApprovalCycle.id).join(ProgressReport, ProgressReport.id == ProgressReportApprovalCycle.report_id)
+        .where(ProgressReport.student_id == student_id, ProgressReportApprovalCycle.status == "active").limit(1)
+    )
+    if active.scalar_one_or_none():
+        raise HTTPException(409, f"Cannot {action} because this student's Progress Report is currently under approval. The approval workflow must be completed or reverted before {until}.")
 
 
 async def _get_major_advisor_member(committee: AdvisoryCommittee, db: AsyncSession) -> Optional[CommitteeMember]:
@@ -374,6 +391,7 @@ async def reassign_major_advisor(
     await _assert_no_synopsis_under_approval(c.student_id, db, "change the Major Advisor", "the Major Advisor can be changed")
     await _assert_no_external_examiner_under_approval(c.student_id, db, "change the Major Advisor", "the Major Advisor can be changed")
     await _assert_no_thesis_under_approval(c.student_id, db, "change the Major Advisor", "the Major Advisor can be changed")
+    await _assert_no_progress_report_under_approval(c.student_id, db, "change the Major Advisor", "the Major Advisor can be changed")
     ma = await _get_major_advisor_member(c, db)
     # Incharge Academic Cell / DPGS task (Section 28) — HOD may now also
     # change the Major Advisor when the committee has been returned to
@@ -434,6 +452,7 @@ async def add_member(
     await _assert_no_synopsis_under_approval(c.student_id, db, "add a committee member", "the committee can be changed")
     await _assert_no_external_examiner_under_approval(c.student_id, db, "add a committee member", "the committee can be changed")
     await _assert_no_thesis_under_approval(c.student_id, db, "add a committee member", "the committee can be changed")
+    await _assert_no_progress_report_under_approval(c.student_id, db, "add a committee member", "the committee can be changed")
     if c.status not in ("member_selection", "members_pending"):
         raise HTTPException(400, "Members can only be added while the committee is in member-selection stage.")
     if body.role not in _MEMBER_ROLES:
@@ -468,6 +487,7 @@ async def remove_member(
     await _assert_no_synopsis_under_approval(c.student_id, db, "remove a committee member", "the committee can be changed")
     await _assert_no_external_examiner_under_approval(c.student_id, db, "remove a committee member", "the committee can be changed")
     await _assert_no_thesis_under_approval(c.student_id, db, "remove a committee member", "the committee can be changed")
+    await _assert_no_progress_report_under_approval(c.student_id, db, "remove a committee member", "the committee can be changed")
     m = await db.get(CommitteeMember, member_id)
     if not m or m.committee_id != committee_id or m.role == "major_advisor":
         raise HTTPException(404, "Member not found.")

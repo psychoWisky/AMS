@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from alembic import context
 
 from app.db.base import Base
-from app.models import user, academic, course, enrollment, grading, research, audit, orientation, admission, admit_card, ppw, email_outbox, synopsis, external_examiner, thesis, migration  # noqa: F401
+from app.models import user, academic, course, enrollment, grading, research, audit, orientation, admission, admit_card, ppw, email_outbox, synopsis, external_examiner, thesis, migration, progress_report  # noqa: F401
 
 config = context.config
 if config.config_file_name:

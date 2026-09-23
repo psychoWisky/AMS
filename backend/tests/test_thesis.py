@@ -484,14 +484,16 @@ async def t_create_thesis():
     # a second creation attempt is rejected
     r = await _call("POST", "/thesis", TOK["s1"], json={})
     assert r.status_code == 409, r.text
-    # no student_id (or any id) field is client-controlled: the endpoint declares NO
-    # request body at all, so any JSON sent is simply unread by FastAPI — the thesis
-    # created is always the CALLER's own, never the tampered id
+    # no student_id (or any id) field is client-controlled: the request schema (now that
+    # `title` is an accepted body field, for the PPW-title-fallback fix) declares extra="forbid",
+    # so a tampered student_id is rejected outright by validation, never silently accepted.
     r = await _call("POST", "/thesis", TOK["s2"], json={"student_id": str(U["s1"])})
+    assert r.status_code == 422, r.text
+    r = await _call("POST", "/thesis", TOK["s2"], json={})
     assert r.status_code == 201, r.text
     TH["s2"] = r.json()["id"]
     THESIS_IDS.append(uuid.UUID(TH["s2"]))
-    assert r.json()["title"] == "ZZTEST Research Title for s2", "the tampered student_id must be ignored; the thesis belongs to the caller"
+    assert r.json()["title"] == "ZZTEST Research Title for s2", "the thesis created is always the CALLER's own, sourced from the caller's own PPW"
     # non-students refused
     assert (await _call("POST", "/thesis", TOK["ma1"], json={})).status_code == 403
 

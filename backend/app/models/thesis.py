@@ -11,17 +11,20 @@ three differences required by this module's confirmed business rules:
   exactly), so it holds regardless of what the API does; "final" rows are
   outside that constraint and nothing here creates one.
 
-* **Title sourced from PPW, snapshotted once.** The Thesis Title is the
-  student's own `Ppw.research_title` (BUSINESS_LOGIC.md D.3/the PPW module) —
-  NOT a second, independently-typed title. `Thesis.ppw_id` references the
-  source PPW (informational, `ON DELETE SET NULL`); `Thesis.title_snapshot` is
-  copied from `Ppw.research_title` exactly once, at Thesis creation, and is
-  never resynced afterward. This prevents a later, unrelated PPW edit (the
-  student could, in principle, still edit their PPW's `research_title` while
-  it is a draft) from silently corrupting an already-created Thesis record —
-  the same reasoning as Synopsis's own `title_snapshot` on each approval
-  cycle. There is no Thesis Title input field anywhere in this module: the
-  student never types an arbitrary title.
+* **Title defaults to PPW, snapshotted once, with a manual fallback.** The
+  Thesis Title defaults to the student's own `Ppw.research_title`
+  (BUSINESS_LOGIC.md D.3/the PPW module) when that is non-blank.
+  `Thesis.ppw_id` references the source PPW (informational, `ON DELETE SET
+  NULL`, nullable — a Thesis may exist with no PPW at all); `Thesis.title_snapshot`
+  is captured exactly once, at Thesis creation, and is never resynced
+  afterward. This prevents a later, unrelated PPW edit (the student could, in
+  principle, still edit their PPW's `research_title` while it is a draft)
+  from silently corrupting an already-created Thesis record — the same
+  reasoning as Synopsis's own `title_snapshot` on each approval cycle.
+  **Fixed (this revision):** creation is never blocked merely because the
+  PPW has no title or doesn't exist — the student may supply one manually
+  (`POST /thesis`'s optional `title`) in that case; see `thesis.py`'s
+  `create_thesis` for the exact fallback logic.
 
 * **Multi-document, multi-examiner.** Unlike Synopsis's single uploaded PDF,
   a Thesis carries several distinct document categories (the thesis file

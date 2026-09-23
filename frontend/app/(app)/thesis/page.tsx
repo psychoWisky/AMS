@@ -24,6 +24,8 @@ export default function ThesisManagementPage() {
   const [software, setSoftware] = useState("");
   const [abstractText, setAbstractText] = useState("");
   const [hydratedFor, setHydratedFor] = useState<string | null>(null);
+  const [showCreate, setShowCreate] = useState(false);
+  const [titleInput, setTitleInput] = useState("");
   const fileInputs = useRef<Record<string, HTMLInputElement | null>>({});
 
   const { data: mine = [], isLoading } = useQuery<ThesisRow[]>({
@@ -49,14 +51,29 @@ export default function ThesisManagementPage() {
   }
 
   const create = useMutation({
-    mutationFn: () => api.post("/thesis", {}),
+    mutationFn: () => api.post("/thesis", titleInput.trim() ? { title: titleInput.trim() } : {}),
     onSuccess: (res) => {
       toast.success("Initial Thesis draft created.");
       qc.invalidateQueries({ queryKey: ["ams-thesis-mine"] });
+      setShowCreate(false); setTitleInput("");
       setOpenId(res.data.id);
     },
-    onError: (e) => toast.error(apiErrorMessage(e, "Could not create your Initial Thesis. Fill in your Research Title in your PPW first.")),
+    onError: (e) => toast.error(apiErrorMessage(e, "Could not create your Initial Thesis.")),
   });
+
+  // The Thesis Title defaults to the student's own PPW research title when one exists (best-effort —
+  // a missing PPW, or one with no title yet, is not an error here); the student may edit or replace
+  // it before creating, and may still create a Thesis even with no PPW title at all (backend fallback).
+  async function openCreate() {
+    setTitleInput("");
+    setShowCreate(true);
+    try {
+      const { data } = await api.get("/ppw/me");
+      if (data?.research_title) setTitleInput(data.research_title);
+    } catch {
+      // no PPW yet, or no title on it — the student simply types one in
+    }
+  }
 
   const saveDetails = useMutation({
     mutationFn: () => api.patch(`/thesis/${openId}`, {
@@ -107,12 +124,37 @@ export default function ThesisManagementPage() {
           <p className="text-gray-700 text-base mt-1">Prepare and track your Initial Thesis application.</p>
         </div>
         {!hasThesis && (
-          <button onClick={() => create.mutate()} disabled={create.isPending}
+          <button onClick={openCreate}
             className="flex items-center gap-2 px-5 py-2.5 bg-[#0D6E6E] text-white rounded-xl font-semibold hover:bg-[#178F8F] disabled:opacity-50">
-            {create.isPending ? <Loader2 size={16} className="animate-spin" /> : <Plus size={16} />} Upload Thesis
+            <Plus size={16} /> Upload Thesis
           </button>
         )}
       </div>
+
+      {showCreate && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={() => setShowCreate(false)}>
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-bold text-gray-900">Start Your Initial Thesis</h3>
+              <button onClick={() => setShowCreate(false)} aria-label="Close"><X size={20} className="text-gray-400 hover:text-gray-700" /></button>
+            </div>
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-1">Thesis Title</label>
+              <textarea rows={3} value={titleInput} onChange={(e) => setTitleInput(e.target.value)}
+                placeholder="Enter your thesis title"
+                className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+              <p className="text-xs text-gray-500 mt-1">Defaults to your PPW&apos;s Research Title when available — edit it here if needed, or type one directly if you don&apos;t have a PPW title yet.</p>
+            </div>
+            <div className="flex justify-end gap-3">
+              <button onClick={() => setShowCreate(false)} className="px-4 py-2 border border-gray-200 rounded-xl text-sm font-semibold text-gray-700 hover:bg-gray-50">Cancel</button>
+              <button onClick={() => create.mutate()} disabled={!titleInput.trim() || create.isPending}
+                className="px-4 py-2 bg-[#0D6E6E] text-white rounded-xl text-sm font-semibold hover:bg-[#178F8F] disabled:opacity-50">
+                {create.isPending ? "Creating…" : "Create"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <section className="space-y-2">
         <h2 className="text-lg font-bold text-gray-900">Thesis Applications</h2>

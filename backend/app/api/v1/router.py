@@ -2,7 +2,7 @@ from fastapi import APIRouter
 from app.api.v1.endpoints import (
     auth, academic_calendar, courses, enrollment, grading,
     research, notifications, departments, admit_card, admission,
-    credit_details, orientation, ppw, students, synopsis, external_examiner, thesis, migration,
+    credit_details, orientation, ppw, students, synopsis, external_examiner, thesis, migration, progress_report,
 )
 
 api_router = APIRouter(prefix="/api/v1")
@@ -25,3 +25,4 @@ api_router.include_router(synopsis.router)
 api_router.include_router(external_examiner.router)
 api_router.include_router(thesis.router)
 api_router.include_router(migration.router)
+api_router.include_router(progress_report.router)

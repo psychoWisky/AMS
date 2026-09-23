@@ -142,6 +142,11 @@ def _is_dev_environment() -> bool:
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
+class ThesisCreateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: Optional[str] = None
+
+
 class ThesisUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     plagiarism_student_percent: Optional[float] = None
@@ -500,12 +505,23 @@ async def _thesis_dict(t: Thesis, viewer: User, db: AsyncSession) -> dict:
 # ── Create / read ─────────────────────────────────────────────────────────────
 
 @router.post("", status_code=201)
-async def create_thesis(db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.STUDENT))):
+async def create_thesis(
+    body: ThesisCreateIn, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.STUDENT)),
+):
     """A student creates their ONE Initial Thesis. The student is always the caller — no
     student id is accepted anywhere. The database's partial unique index is the final
-    guarantee; the pre-check below only gives a friendly message. The Thesis Title is
-    copied ONCE from the student's own PPW `research_title` (never re-typed, never
-    resynced later — see thesis.py's module docstring)."""
+    guarantee; the pre-check below only gives a friendly message.
+
+    Thesis Title fallback (fixed — the PPW research title was previously REQUIRED,
+    which incorrectly blocked Thesis creation for any student whose PPW existed but
+    had a blank `research_title`, or had no PPW at all): the student's own PPW
+    `research_title` is used as the title when it is non-blank (`body.title` acts as
+    a prefill the student may confirm or edit — sending it explicitly always wins, so
+    the student can override the PPW value too). If the PPW has no usable title (or
+    no PPW exists yet), `body.title` is REQUIRED instead — creation is never blocked
+    merely because the PPW's research title is empty. Whichever title is used is
+    captured ONCE into `title_snapshot`, exactly as before, and never resynced with
+    the PPW afterward."""
     program = await db.get(Program, user.program_id) if user.program_id else None
     if not program or program.level not in _PG_PHD_LEVELS:
         raise HTTPException(403, "The Initial Thesis is available to postgraduate students only.")
@@ -513,10 +529,11 @@ async def create_thesis(db: AsyncSession = Depends(get_db), user: User = Depends
     if existing:
         raise HTTPException(409, "You already have an Initial Thesis. A student can have only one.")
     ppw = (await db.execute(select(Ppw).where(Ppw.student_id == user.id))).scalar_one_or_none()
-    title = (ppw.research_title or "").strip() if ppw else ""
+    ppw_title = (ppw.research_title or "").strip() if ppw else ""
+    title = (body.title or "").strip() or ppw_title
     if not title:
-        raise HTTPException(400, "Fill in your Research Title in your PPW before creating your Initial Thesis.")
-    t = Thesis(student_id=user.id, thesis_type="initial", ppw_id=ppw.id, title_snapshot=title, status="draft")
+        raise HTTPException(400, "Enter a Thesis Title — either fill in your Research Title in your PPW, or provide one here directly.")
+    t = Thesis(student_id=user.id, thesis_type="initial", ppw_id=ppw.id if ppw else None, title_snapshot=title, status="draft")
     db.add(t)
     try:
         await db.commit()
