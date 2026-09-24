@@ -18,8 +18,11 @@ export interface ExternalReportRow {
   id: string; name: string; status: string; report_available: boolean; submitted_at: string | null; dpgs_approved_at: string | null;
 }
 export interface Pg25Summary {
-  id: string; status: string; seminar_at: string | null; seminar_at_ist: string | null;
-  approved_at: string | null; signatures_completed: number; signatures_required: number;
+  id: string; status: string; status_label: string;
+  attempt_number: number; version_number: number;
+  seminar_at: string | null; seminar_at_ist: string | null;
+  ma_signed_at: string | null; approved_at: string | null;
+  signatures_completed: number; signatures_required: number;
 }
 export interface ThesisDetail {
   id: string; thesis_type: string; status: string; status_label: string; title: string | null;

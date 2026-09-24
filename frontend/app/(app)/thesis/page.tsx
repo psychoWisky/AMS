@@ -275,8 +275,14 @@ export default function ThesisManagementPage() {
               <h3 className="text-lg font-bold text-gray-900">2. Student Documents</h3>
               {detail.pg25 && detail.pg25.status !== "approved" && (
                 <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 text-xs text-amber-800">
-                  Thesis Seminar Certificate (PG 25): {detail.pg25.signatures_completed}/{detail.pg25.signatures_required} Advisory Committee signature(s) collected.
-                  It will appear here once fully approved, and is required before you can submit your Initial Thesis.
+                  Thesis Seminar Certificate (PG 25): {detail.pg25.status_label}
+                  {detail.pg25.status === "committee_pending" && ` (${detail.pg25.signatures_completed}/${detail.pg25.signatures_required} Advisory Committee signature(s) collected)`}.
+                  It will appear here once fully approved by your Major Advisor, Advisory Committee and HOD, and is required before you can submit your Initial Thesis.
+                </div>
+              )}
+              {!detail.pg25 && (
+                <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 text-xs text-amber-800">
+                  Your Major Advisor has not yet recorded your Thesis Seminar Certificate (PG 25). Ask them to record the seminar outcome before you can submit your Initial Thesis.
                 </div>
               )}
               <div className="bg-white rounded-2xl border border-gray-200 divide-y divide-gray-100">

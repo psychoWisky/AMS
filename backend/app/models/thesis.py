@@ -95,13 +95,9 @@ THESIS_EVALUATION_STATUSES = ("pending", "submitted", "approved")
 
 # ── PG25 (Thesis Seminar Certificate, Form No. PG 25) ──────────────────────────────────────
 # A distinct, focused workflow — NOT forced into the linear ThesisApprovalCycle/Stage engine
-# (that engine models the post-submission approval chain; PG25 happens BEFORE submission and
-# has a different shape: one HOD action + N parallel Advisory-Committee signatures, not a
-# sequence of single approvers). Exactly one PG25 record ever exists per Thesis (the seminar
-# happens once); a unique constraint on `thesis_id` is both the schema-level guarantee of that
-# and the idempotency protection against a repeated "Satisfactory" click creating a duplicate
-# workflow.
-THESIS_SEMINAR_CERTIFICATE_STATUSES = ("awaiting_committee", "approved")
+# (that engine models the post-submission approval chain; PG25 happens BEFORE submission).
+# **CORRECTED this revision**: driven by the student's own Major Advisor (not the HOD) —
+# see `ThesisSeminarCertificate`'s own docstring below for the full attempt/version lifecycle.
 THESIS_SEMINAR_SIGNATURE_STATUSES = ("pending", "signed")
 
 
@@ -305,50 +301,96 @@ class ThesisExternalEvaluation(Base):
     approver: Mapped["User | None"] = relationship("User", foreign_keys=[dpgs_approved_by])
 
 
+THESIS_SEMINAR_CERTIFICATE_STATUSES = (
+    "unsatisfactory", "generated", "committee_pending", "hod_pending", "approved", "reverted",
+)
+
+
 class ThesisSeminarCertificate(Base):
-    """One PG25 workflow per Thesis (Section 8/9 of the confirmed rules). Created ONLY by the
-    HOD's "Satisfactory" action — there is deliberately no "unsatisfactory"/draft/pending-HOD
-    row: clicking Unsatisfactory has no persisted business effect this phase (Section 14), so
-    nothing is written until Satisfactory actually fires. `seminar_at` is the IST instant the
-    HOD recorded at that moment (stored as a normal tz-aware UTC instant, like every other
-    timestamp in this schema — IST is a presentation concern, not a storage one).
-    `hod_signed_at` records the automatic HOD signature (Section 9 step 6) — always equal to
-    `recorded_at` today, but a separate column because "recorded the outcome" and "signed" are
-    two distinct, separately-named business facts, and a future explicit HOD Sign action
-    (Section 12 — currently a deliberate no-op) would only ever update THIS column, not
-    `recorded_at`. `approved_at` is set once every required Advisory Committee signature is in
-    (`status` flips to "approved") — this is the ONLY moment the certificate becomes visible to
-    the student (Section 16), enforced in the endpoint layer's serializer, never merely by
-    hiding a frontend link."""
+    """PG25 workflow (**CORRECTED this revision — see BUSINESS_LOGIC.md AD.15**: the confirmed
+    AVFU workflow is Major-Advisor-DRIVEN, not HOD-driven). One row per **seminar attempt /
+    certificate version** — NOT one row per Thesis any more (`thesis_id` is no longer unique):
+
+    * **Attempt** (`attempt_number`) advances only when the Major Advisor records a fresh
+      offline seminar outcome after a prior attempt was `unsatisfactory` — Section 4's "Offline
+      thesis seminar conducted again" — a brand-new row, `version_number` reset to 1.
+    * **Version** (`version_number`) advances only when the Major Advisor **regenerates** an
+      already-`reverted` certificate for the SAME seminar attempt (Section 12/13) — a brand-new
+      row with the same `attempt_number`, so the reverted predecessor is kept forever as
+      immutable history (never deleted, never silently reused), exactly like
+      `ThesisApprovalCycle`'s own revert-creates-a-new-cycle convention.
+
+    Lifecycle per row: `unsatisfactory` (terminal — MA records this directly, no PDF, no further
+    workflow, submission stays blocked) -> `generated` (MA clicked Satisfactory: seminar_at
+    stamped, PDF rendered, NOT yet MA-signed) -> `committee_pending` (MA clicked Submit: MA
+    signature applied via `ma_signed_at`, the student's real, accepted Advisory Committee
+    members — EXCLUDING the Major Advisor's own row, since the MA already signed via Submit —
+    each get a required `ThesisSeminarCertificateSignature`) -> `hod_pending` (every required
+    committee signature is in) -> `approved` (the student's own-department HOD gives the final
+    sign-off — `hod_approved_by`/`hod_approved_at`; ONLY NOW is this certificate visible to the
+    student and does it satisfy the Initial Thesis submission gate) . `reverted` is reachable
+    from `committee_pending` or `hod_pending` (any one authorized committee member or the HOD
+    may single-handedly revert, mirroring the main Thesis approval chain's own revert
+    convention) and is terminal for THIS row — the Major Advisor must explicitly regenerate
+    (a new `version_number` row) to try again; a reverted row can never again satisfy anything.
+
+    The partial unique index guarantees at most one row per Thesis is ever "in flight"
+    (`generated`/`committee_pending`/`hod_pending`) at a time — `unsatisfactory`/`reverted`/
+    `approved` are all terminal-for-that-row, so a fresh attempt or a regeneration is only ever
+    possible once the previous row has resolved to one of those. "The current valid PG25" for
+    any purpose (student visibility, the submission gate) is always the row with the highest
+    `(attempt_number, version_number)` for that Thesis — never merely "an approved row exists,"
+    since an OLDER approved row from a stale attempt must never satisfy a newer requirement
+    (there is no such case today since `approved` is terminal and no further rows are ever
+    created after it, but the "latest row" resolution is written generically, not as a special
+    case, precisely so this stays true if that ever changes)."""
     __tablename__ = "ams_thesis_seminar_certificates"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    thesis_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_theses.id", ondelete="CASCADE"), unique=True)
-    seminar_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    status: Mapped[str] = mapped_column(String(20), default="awaiting_committee", nullable=False)
-    recorded_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id", ondelete="SET NULL"))
+    thesis_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_theses.id", ondelete="CASCADE"), index=True)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(20), default="generated", nullable=False)
+    seminar_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
+    ma_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id", ondelete="SET NULL"))
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
-    hod_signed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    ma_signed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    hod_approved_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id", ondelete="SET NULL"))
+    hod_approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reverted_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id", ondelete="SET NULL"))
+    reverted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revert_remark: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
+    __table_args__ = (
+        UniqueConstraint("thesis_id", "attempt_number", "version_number", name="uq_pg25_attempt_version"),
+        Index(
+            "uq_pg25_one_open_per_thesis", "thesis_id", unique=True,
+            postgresql_where=text("status IN ('generated', 'committee_pending', 'hod_pending')"),
+        ),
+    )
+
     thesis: Mapped["Thesis"] = relationship("Thesis", foreign_keys=[thesis_id])
-    recorder: Mapped["User | None"] = relationship("User", foreign_keys=[recorded_by])
+    ma: Mapped["User | None"] = relationship("User", foreign_keys=[ma_id])
+    hod_approver: Mapped["User | None"] = relationship("User", foreign_keys=[hod_approved_by])
+    reverter: Mapped["User | None"] = relationship("User", foreign_keys=[reverted_by])
     signatures: Mapped[list["ThesisSeminarCertificateSignature"]] = relationship(
         "ThesisSeminarCertificateSignature", back_populates="certificate", cascade="all, delete-orphan",
     )
 
 
 class ThesisSeminarCertificateSignature(Base):
-    """One required Advisory-Committee-member signature on ONE PG25 certificate. The required
-    signer set is snapshotted at HOD-Satisfactory time from the student's REAL, live
-    `AdvisoryCommittee`/`CommitteeMember` rows (Section 10 — never a separate/invented committee
-    concept, never a hard-coded department-wide list): every `CommitteeMember` row for that
-    committee with `accepted is True`, matching exactly the same "real, accepted membership"
-    test the existing Major Advisor submission-gate already uses. `faculty_id` is the durable
-    authorization anchor (always present, even if the underlying `CommitteeMember` row is later
-    deleted — `committee_member_id` is `SET NULL` in that case, kept only for traceability).
-    `role_snapshot` is display-only."""
+    """One required Advisory-Committee-member signature on ONE PG25 certificate row (one
+    attempt/version — see `ThesisSeminarCertificate`). The required signer set is snapshotted at
+    the Major Advisor's Submit action from the student's REAL, live `AdvisoryCommittee`/
+    `CommitteeMember` rows (Section 7/10 — never a separate/invented committee concept, never a
+    hard-coded department-wide list): every `CommitteeMember` row for that committee with
+    `accepted is True`, EXCLUDING the `major_advisor` role itself (the Major Advisor already
+    signs separately via Submit, `ThesisSeminarCertificate.ma_signed_at` — never signs twice).
+    `faculty_id` is the durable authorization anchor (always present, even if the underlying
+    `CommitteeMember` row is later deleted — `committee_member_id` is `SET NULL` in that case,
+    kept only for traceability). `role_snapshot` is display-only."""
     __tablename__ = "ams_thesis_seminar_certificate_signatures"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     certificate_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_thesis_seminar_certificates.id", ondelete="CASCADE"), index=True)

@@ -267,14 +267,14 @@ async def _submit(student_key: str, expect=200) -> httpx.Response:
     return r
 
 
-# PG25 / Certificate I plumbing (this revision). One committee-signer list per student key,
-# derived directly from the `_mk_committee(...)` calls in `_setup()` below; `_MA_KEY` covers the
-# two students whose Major Advisor is NOT "ma1".
-_PG25_SIGNERS = {
-    "s1": ["ma1"], "s2": ["ma1"], "s_val": ["ma1"], "s_lib1": ["ma1"], "s_lib2": ["ma1"],
-    "s_revert": ["ma1"], "s_zero": ["ma1"], "s_examx": ["ma1"], "s_phd": ["ma1"],
-    "s_deptb": ["ma_d2"], "s_lock": ["ma_lock", "mem_lock"],
-}
+# PG25 / Certificate I plumbing (CORRECTED this revision — PG25 is Major-Advisor-driven, not
+# HOD-driven; see BUSINESS_LOGIC.md AD.15). `_PG25_COMMITTEE_SIGNERS` lists the REQUIRED
+# non-Major-Advisor committee signers per student key (derived from `_mk_committee(...)` in
+# `_setup()` below) — every other student's committee has ONLY the Major Advisor, so after
+# MA Submit there is nothing left for the Advisory Committee to do and PG25 goes straight to
+# `hod_pending`. `_MA_KEY`/`_PG25_HOD` cover the students whose Major Advisor/department HOD
+# are NOT "ma1"/"hod1".
+_PG25_COMMITTEE_SIGNERS = {"s_lock": ["mem_lock"]}
 _PG25_HOD = {"s_deptb": "hod2"}
 _MA_KEY = {"s_deptb": "ma_d2", "s_lock": "ma_lock"}
 
@@ -284,16 +284,27 @@ def _ma_key_for(student_key: str) -> str:
 
 
 async def _complete_pg25(student_key: str) -> str:
-    """Drives PG25 to fully "approved" for `student_key`'s Thesis: HOD Satisfactory, then every
-    real, accepted Advisory Committee member signs. Returns the certificate id."""
+    """Drives PG25 to fully "approved" for `student_key`'s Thesis: Major Advisor Satisfactory ->
+    Submit (MA signs) -> every required (non-MA) Advisory Committee member signs -> the
+    student's own-department HOD gives final approval. Idempotent: if PG25 is already approved
+    (e.g. a more detailed dedicated test already drove it through), returns the existing
+    certificate id without re-acting, so this helper is always safe to call unconditionally."""
     sid = TH[student_key]
+    existing = await _detail(sid, TOK[student_key])
+    if existing.get("pg25") and existing["pg25"]["status"] == "approved":
+        return existing["pg25"]["id"]
+    ma_key = _ma_key_for(student_key)
     hod_key = _PG25_HOD.get(student_key, "hod1")
-    r = await _call("POST", f"/thesis/{sid}/pg25/satisfactory", TOK[hod_key])
+    r = await _call("POST", f"/thesis/{sid}/pg25/satisfactory", TOK[ma_key])
     assert r.status_code == 201, r.text
     cert_id = r.json()["certificate_id"]
-    for fac_key in _PG25_SIGNERS[student_key]:
-        r2 = await _call("POST", f"/thesis/pg25/{cert_id}/sign", TOK[fac_key])
-        assert r2.status_code == 200, r2.text
+    r2 = await _call("POST", f"/thesis/{sid}/pg25/submit", TOK[ma_key])
+    assert r2.status_code == 200, r2.text
+    for fac_key in _PG25_COMMITTEE_SIGNERS.get(student_key, []):
+        r3 = await _call("POST", f"/thesis/pg25/{cert_id}/sign", TOK[fac_key])
+        assert r3.status_code == 200, r3.text
+    r4 = await _call("POST", f"/thesis/pg25/{cert_id}/hod-approve", TOK[hod_key])
+    assert r4.status_code == 200, r4.text
     return cert_id
 
 
@@ -661,15 +672,16 @@ async def t_submission_validation():
     r = await _submit("s_val", expect=400)
     assert "Abstract" in r.json()["detail"], r.text
     assert (await _call("PATCH", f"/thesis/{sid}", tok, json={"abstract": "ZZTEST abstract."})).status_code == 200
-    # no accepted Major Advisor -> the Advisory Committee has no accepted member -> PG25 itself
-    # (the new, now-first submission gate, Section 17) can never be completed for this student,
-    # which supersedes the old direct "no accepted Major Advisor" submission-time message as
-    # the actual blocking reason; the underlying business rule (an unaccepted Major Advisor
-    # blocks progress) is still exercised, just surfaced at the PG25 step instead.
+    # no accepted Major Advisor -> `ma1`'s committee membership for s_noma has `accepted=None`,
+    # so `_my_ma_membership` (accepted == True only) never resolves it -> ma1 cannot even START
+    # PG25 for this student (404, indistinguishable from "not your advisee") -> PG25 can never
+    # be completed -> the submission gate (Section 11/17) blocks submission. The underlying
+    # business rule (an unaccepted Major Advisor blocks progress) is still exercised, just
+    # surfaced at the PG25 step instead of the old direct submission-time message.
     await _create_thesis("s_noma")
     await _make_submittable("s_noma")
-    r = await _call("POST", f"/thesis/{TH['s_noma']}/pg25/satisfactory", TOK["hod1"])
-    assert r.status_code == 400 and "Advisory Committee" in r.json()["detail"], r.text
+    r = await _call("POST", f"/thesis/{TH['s_noma']}/pg25/satisfactory", TOK["ma1"])
+    assert r.status_code == 404, r.text
     r = await _submit("s_noma", expect=400)
     assert "PG 25" in r.json()["detail"], r.text
     # a fully complete submission succeeds and seeds exactly 6 stages, in order
@@ -1002,7 +1014,9 @@ async def t_idor_and_tampering():
 
 async def t_major_advisor_committee_lock():
     committee_id = COMMITTEE["s_lock"]
-    await _create_thesis("s_lock")
+    # s_lock's Thesis was already created by `t_pg25_committee_multi_signer_and_department_isolation`
+    # (which needed it to exercise the multi-signer PG25 committee flow); `_complete_pg25` is
+    # idempotent and simply confirms the already-approved state here.
     await _make_submittable("s_lock")
     await _complete_pg25("s_lock")
     await _submit("s_lock")
@@ -1057,57 +1071,133 @@ async def t_declaration_generate_and_upload():
     assert (await _call("POST", f"/thesis/{TH['s1']}/declaration/generate", TOK["s2"])).status_code == 404
 
 
-async def t_pg25_authorization_and_idor():
-    """Section 25/26/29: HOD scoping, committee-membership scoping, double-signing, and IDOR
-    against a real PG25 certificate belonging to a DIFFERENT student (s2, untouched by any
-    other test's submission flow)."""
+async def t_pg25_ma_driven_lifecycle_and_idor():
+    """PG25 CORRECTED: Major-Advisor-driven, using s2 (dept d1, Major Advisor ma1, a
+    single-member committee so, after Submit, there is nothing for the Advisory Committee to
+    do and the certificate goes straight to `hod_pending`) to exercise the full Unsatisfactory ->
+    Satisfactory -> Submit -> HOD-revert -> MA-regenerate -> HOD-approve lifecycle end to end,
+    plus MA/HOD authorization and IDOR."""
     sid = TH["s2"]
-    # wrong-department HOD cannot record the outcome for a d1 student
-    r = await _call("POST", f"/thesis/{sid}/pg25/satisfactory", TOK["hod2"])
-    assert r.status_code == 404, r.text
-    # own-department HOD succeeds
-    r = await _call("POST", f"/thesis/{sid}/pg25/satisfactory", TOK["hod1"])
+    # wrong faculty (not this student's Major Advisor) cannot act at all
+    assert (await _call("POST", f"/thesis/{sid}/pg25/satisfactory", TOK["ma2"])).status_code == 404
+    assert (await _call("POST", f"/thesis/{sid}/pg25/unsatisfactory", TOK["ma2"])).status_code == 404
+
+    # attempt 1: the Major Advisor marks the seminar Unsatisfactory — a REAL state change, no
+    # PG25 document, no approval workflow, submission stays blocked
+    r = await _call("POST", f"/thesis/{sid}/pg25/unsatisfactory", TOK["ma1"])
+    assert r.status_code == 201, r.text
+    d = await _detail(sid, TOK["s2"])
+    assert d["pg25"]["status"] == "unsatisfactory" and d["pg25"]["attempt_number"] == 1
+    assert d["documents"]["seminar_certificate_pg25"] is None, "Unsatisfactory must never generate a PG25 document"
+    # cannot Submit / regenerate against an unsatisfactory attempt
+    assert (await _call("POST", f"/thesis/{sid}/pg25/submit", TOK["ma1"])).status_code == 400
+    assert (await _call("POST", f"/thesis/{sid}/pg25/regenerate", TOK["ma1"])).status_code == 400
+
+    # attempt 2 (a fresh offline seminar): the Major Advisor marks it Satisfactory
+    r = await _call("POST", f"/thesis/{sid}/pg25/satisfactory", TOK["ma1"])
     assert r.status_code == 201, r.text
     cert_id = r.json()["certificate_id"]
-    # a duplicate Satisfactory click is rejected (idempotency, Section 9)
-    assert (await _call("POST", f"/thesis/{sid}/pg25/satisfactory", TOK["hod1"])).status_code == 409
-    # a faculty member NOT on s2's committee cannot sign, cannot view, cannot revert
-    assert (await _call("POST", f"/thesis/pg25/{cert_id}/sign", TOK["ma2"])).status_code == 404
-    assert (await _call("GET", f"/thesis/pg25/{cert_id}", TOK["ma2"])).status_code == 404
-    assert (await _call("POST", f"/thesis/pg25/{cert_id}/revert", TOK["ma2"])).status_code == 404
-    # PG25 not yet visible to the student as an approved document; downloading it directly 404s
     d = await _detail(sid, TOK["s2"])
-    assert d["documents"]["seminar_certificate_pg25"] is None and d["pg25"]["status"] == "awaiting_committee"
-    # the still-pending PG25 PDF cannot be fetched by the student directly, even knowing its real id
-    real_committee_doc_owner_view = await _call("GET", f"/thesis/{sid}", TOK["hod1"])
-    assert real_committee_doc_owner_view.status_code == 200
-    pg25_doc_id = real_committee_doc_owner_view.json()["documents"]["seminar_certificate_pg25"]["id"]
-    assert (await _call("GET", f"/thesis/{sid}/documents/{pg25_doc_id}/download", TOK["s2"])).status_code == 404
-    # the real committee member (ma1) signs their own required signature -> approved
-    assert (await _call("POST", f"/thesis/pg25/{cert_id}/sign", TOK["ma1"])).status_code == 200
-    r = await _call("POST", f"/thesis/pg25/{cert_id}/sign", TOK["ma1"])
-    assert r.status_code == 400, "already signed"
+    assert d["pg25"]["attempt_number"] == 2 and d["pg25"]["version_number"] == 1 and d["pg25"]["status"] == "generated"
+    # a duplicate Satisfactory click while one is already in flight is rejected (idempotency)
+    assert (await _call("POST", f"/thesis/{sid}/pg25/satisfactory", TOK["ma1"])).status_code == 409
+    assert (await _call("POST", f"/thesis/{sid}/pg25/unsatisfactory", TOK["ma1"])).status_code == 409
+    # not yet MA-signed -> cannot be approved by anyone yet; wrong MA cannot submit
+    assert (await _call("POST", f"/thesis/{sid}/pg25/submit", TOK["ma2"])).status_code == 404
+
+    # the real Major Advisor submits: MA signature applied, routed toward the (empty) committee
+    # and straight to hod_pending since s2's committee has no OTHER accepted members
+    r = await _call("POST", f"/thesis/{sid}/pg25/submit", TOK["ma1"])
+    assert r.status_code == 200 and r.json()["status"] == "hod_pending", r.text
+    d = await _detail(sid, TOK["s2"])
+    assert d["pg25"]["ma_signed_at"] is not None and d["pg25"]["status"] == "hod_pending"
+    assert d["documents"]["seminar_certificate_pg25"] is None, "still not visible to the student before HOD approval"
+
+    # wrong-department HOD cannot approve/revert a d1 student's certificate
+    assert (await _call("POST", f"/thesis/pg25/{cert_id}/hod-approve", TOK["hod2"])).status_code == 404
+    assert (await _call("POST", f"/thesis/pg25/{cert_id}/revert", TOK["hod2"], json={"remark": "x"})).status_code == 404
+    # an unrelated faculty member (not a committee signer, not the MA) is blocked everywhere
+    assert (await _call("GET", f"/thesis/pg25/{cert_id}", TOK["ma2"])).status_code == 404
+    assert (await _call("POST", f"/thesis/pg25/{cert_id}/sign", TOK["ma2"])).status_code == 404
+    # a revert remark is mandatory
+    assert (await _call("POST", f"/thesis/pg25/{cert_id}/revert", TOK["hod1"], json={"remark": ""})).status_code in (400, 422)
+
+    # own-department HOD reverts (real effect this time) -> terminal for this version
+    r = await _call("POST", f"/thesis/pg25/{cert_id}/revert", TOK["hod1"], json={"remark": "ZZTEST please clarify the seminar date"})
+    assert r.status_code == 200 and r.json()["status"] == "reverted", r.text
+    # a reverted certificate cannot be approved or re-reverted
+    assert (await _call("POST", f"/thesis/pg25/{cert_id}/hod-approve", TOK["hod1"])).status_code == 400
+    assert (await _call("POST", f"/thesis/pg25/{cert_id}/revert", TOK["hod1"], json={"remark": "again"})).status_code == 404
+    # wrong MA cannot regenerate; the real MA can
+    assert (await _call("POST", f"/thesis/{sid}/pg25/regenerate", TOK["ma2"])).status_code == 404
+    r = await _call("POST", f"/thesis/{sid}/pg25/regenerate", TOK["ma1"])
+    assert r.status_code == 201, r.text
+    cert_id_v2 = r.json()["certificate_id"]
+    assert cert_id_v2 != cert_id, "regeneration must create a NEW row, never resurrect the reverted one"
+    d = await _detail(sid, TOK["s2"])
+    assert d["pg25"]["attempt_number"] == 2 and d["pg25"]["version_number"] == 2 and d["pg25"]["status"] == "generated"
+    # the OLD (reverted) certificate is preserved as history, still independently readable
+    old = await _call("GET", f"/thesis/pg25/{cert_id}", TOK["ma1"])
+    assert old.status_code == 200 and old.json()["status"] == "reverted" and old.json()["revert_remark"]
+
+    # MA submits the regenerated version -> hod_pending again -> HOD (own dept) approves for real
+    assert (await _call("POST", f"/thesis/{sid}/pg25/submit", TOK["ma1"])).status_code == 200
+    r = await _call("POST", f"/thesis/pg25/{cert_id_v2}/hod-approve", TOK["hod1"])
+    assert r.status_code == 200 and r.json()["status"] == "approved", r.text
     d = await _detail(sid, TOK["s2"])
     assert d["pg25"]["status"] == "approved" and d["documents"]["seminar_certificate_pg25"] is not None
-    assert (await _call("GET", f"/thesis/{sid}/documents/{pg25_doc_id}/download", TOK["s2"])).status_code == 200
-    # HOD list: s2 now shows "approved"; the HOD Sign / Unsatisfactory / committee Revert buttons
-    # are all reachable (authorized) but are confirmed no-ops (Section 12/13/14)
+    doc_id = d["documents"]["seminar_certificate_pg25"]["id"]
+    assert (await _call("GET", f"/thesis/{sid}/documents/{doc_id}/download", TOK["s2"])).status_code == 200
+    # re-approving / re-reverting an already-approved certificate is refused
+    assert (await _call("POST", f"/thesis/pg25/{cert_id_v2}/hod-approve", TOK["hod1"])).status_code == 400
+    assert (await _call("POST", f"/thesis/pg25/{cert_id_v2}/revert", TOK["hod1"], json={"remark": "x"})).status_code == 404
+    # a fresh attempt can no longer be started once approved
+    assert (await _call("POST", f"/thesis/{sid}/pg25/satisfactory", TOK["ma1"])).status_code == 409
+
+    # HOD's inbox no longer lists s2 (nothing left pending their approval)
     hod_rows = (await _call("GET", "/thesis/pg25/hod", TOK["hod1"])).json()
-    row = next(r for r in hod_rows if r["thesis_id"] == sid)
-    assert row["status"] == "approved" and row["can_act"] is False
-    r = await _call("POST", f"/thesis/{sid}/pg25/hod-sign", TOK["hod1"])
-    assert r.status_code == 200 and "no additional action" in r.json()["message"].lower()
-    r = await _call("POST", f"/thesis/{sid}/pg25/unsatisfactory", TOK["hod1"])
-    assert r.status_code == 200 and "no further business behavior" in r.json()["message"].lower()
-    r = await _call("POST", f"/thesis/pg25/{cert_id}/revert", TOK["ma1"])
-    assert r.status_code == 200 and "no business effect" in r.json()["message"].lower()
-    d_after = await _detail(sid, TOK["s2"])
-    assert d_after["pg25"]["status"] == "approved", "the no-op buttons must not have changed PG25 state"
-    # Home / Pending for ma1
-    home = (await _call("GET", "/thesis/pg25/mine/home", TOK["ma1"])).json()
-    assert any(r["thesis_id"] == sid for r in home)
-    pending = (await _call("GET", "/thesis/pg25/mine/pending", TOK["ma1"])).json()
-    assert not any(r["thesis_id"] == sid for r in pending), "already signed -> no longer in Pending"
+    assert not any(r["thesis_id"] == sid for r in hod_rows)
+    # student isolation: another student cannot see/act on s2's certificate by id
+    assert (await _call("GET", f"/thesis/pg25/{cert_id_v2}", TOK["s1"])).status_code in (401, 403, 404)
+    assert (await _call("POST", f"/thesis/pg25/{cert_id_v2}/sign", TOK["s2"])).status_code in (401, 403, 404)
+
+
+async def t_pg25_committee_multi_signer_and_department_isolation():
+    """PG25 CORRECTED, multi-signer committee (s_lock: Major Advisor ma_lock + committee member
+    mem_lock) — exercises real committee sign/IDOR/status-transition/Home-Pending behavior that
+    a solo-Major-Advisor committee (s2, above) cannot. s_lock's Thesis is created here (needed
+    before `t_major_advisor_committee_lock` runs later and reuses it); `_complete_pg25` is
+    idempotent, so that later test's own call simply confirms the already-approved state."""
+    await _create_thesis("s_lock")
+    sid = TH["s_lock"]
+    r = await _call("POST", f"/thesis/{sid}/pg25/satisfactory", TOK["ma_lock"])
+    assert r.status_code == 201, r.text
+    cert_id = r.json()["certificate_id"]
+    assert (await _call("POST", f"/thesis/{sid}/pg25/submit", TOK["ma_lock"])).status_code == 200
+    d = await _detail(sid, TOK["s_lock"])
+    assert d["pg25"]["status"] == "committee_pending" and d["pg25"]["signatures_required"] == 1
+
+    # an unrelated faculty member cannot sign, view, or revert
+    assert (await _call("POST", f"/thesis/pg25/{cert_id}/sign", TOK["ma2"])).status_code == 404
+    assert (await _call("GET", f"/thesis/pg25/{cert_id}", TOK["ma2"])).status_code == 404
+    assert (await _call("POST", f"/thesis/pg25/{cert_id}/revert", TOK["ma2"], json={"remark": "x"})).status_code == 404
+    # the Major Advisor (already signed via Submit) has no separate committee signature row
+    assert (await _call("POST", f"/thesis/pg25/{cert_id}/sign", TOK["ma_lock"])).status_code == 404
+    # appears in mem_lock's Pending, not yet in Home
+    pending = (await _call("GET", "/thesis/pg25/mine/pending", TOK["mem_lock"])).json()
+    assert any(r["certificate_id"] == cert_id for r in pending)
+    home = (await _call("GET", "/thesis/pg25/mine/home", TOK["mem_lock"])).json()
+    assert not any(r["certificate_id"] == cert_id for r in home)
+
+    # the real committee member signs -> status moves to hod_pending (only one required signer)
+    r = await _call("POST", f"/thesis/pg25/{cert_id}/sign", TOK["mem_lock"])
+    assert r.status_code == 200 and r.json()["status"] == "hod_pending", r.text
+    assert (await _call("POST", f"/thesis/pg25/{cert_id}/sign", TOK["mem_lock"])).status_code == 400, "already approved"
+    # wrong-department HOD blocked; own-department HOD approves
+    assert (await _call("POST", f"/thesis/pg25/{cert_id}/hod-approve", TOK["hod2"])).status_code == 404
+    assert (await _call("POST", f"/thesis/pg25/{cert_id}/hod-approve", TOK["hod1"])).status_code == 200
+    home = (await _call("GET", "/thesis/pg25/mine/home", TOK["mem_lock"])).json()
+    assert any(r["certificate_id"] == cert_id for r in home)
 
 
 async def t_certificate_i_authorization_and_regeneration():
@@ -1115,8 +1205,8 @@ async def t_certificate_i_authorization_and_regeneration():
     person rejected; approval blocked until generated; and — using s_revert's already-exercised
     revert/resubmit history from `t_revert_matrix` — an OBSOLETE Certificate I from an earlier,
     reverted cycle does NOT satisfy the newest cycle's requirement."""
-    # s2: PG25 was already approved by t_pg25_authorization_and_idor; complete the remaining
-    # submission preconditions and submit to reach major_advisor_pending.
+    # s2: PG25 was already approved by t_pg25_ma_driven_lifecycle_and_idor; complete the
+    # remaining submission preconditions and submit to reach major_advisor_pending.
     sid = TH["s2"]
     await _make_submittable("s2")
     await _submit("s2")
@@ -1182,9 +1272,10 @@ async def main() -> None:
             "EXAMINER ACCESS: doc scope limited to 3 types; cross-student thesis/evaluation-id pairing blocked despite a real assignment on both sides": t_examiner_access_and_cross_student_authorization,
             "DEPARTMENT ISOLATION: HOD-A cannot act on/see a Dept-B student; unrelated Major Advisor cannot act": t_department_isolation,
             "IDOR/TAMPERING: foreign document/thesis ids -> 404; query params inert; extra body fields -> 422 (extra=forbid)": t_idor_and_tampering,
-            "COMMITTEE LOCK: reassign/add/remove blocked (409, 'Initial Thesis') while active; unauthorized still 403 first; released after revert/approval": t_major_advisor_committee_lock,
             "DECLARATION: Generate produces a real, dynamic, AVFU-branded PDF with no AAU text; Upload versions the SAME slot; non-owner blocked": t_declaration_generate_and_upload,
-            "PG25: own-dept HOD only, idempotent Satisfactory, committee-only sign, IDOR-blocked pending download, no-op Sign/Unsatisfactory/Revert, Home/Pending scoping": t_pg25_authorization_and_idor,
+            "PG25 (MA-driven): wrong-MA blocked, Unsatisfactory is real, Satisfactory->Submit->HOD-revert->MA-regenerate->HOD-approve, IDOR, stale/reverted never satisfies anything": t_pg25_ma_driven_lifecycle_and_idor,
+            "PG25 (multi-signer committee): real committee sign/IDOR/Home-Pending scoping, department-isolated HOD final approval": t_pg25_committee_multi_signer_and_department_isolation,
+            "COMMITTEE LOCK: reassign/add/remove blocked (409, 'Initial Thesis') while active; unauthorized still 403 first; released after revert/approval": t_major_advisor_committee_lock,
             "CERTIFICATE I: only the real Major Advisor generates, MA approval blocked until generated, no AAU branding, regenerated (never reused) across revert/resubmission cycles": t_certificate_i_authorization_and_regeneration,
         }.items():
             await _run(name, fn)
