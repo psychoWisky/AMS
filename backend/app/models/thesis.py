@@ -76,7 +76,21 @@ THESIS_DOCUMENT_TYPES = (
     "thesis_file", "plagiarism_student_report", "plagiarism_library_report",
     "payment_receipt", "seminar_proceedings", "clearance",
     "declaration_annexure1", "seminar_certificate_pg25", "certificate_i_pg27",
+    # Final Thesis only (this revision) — see FINAL_THESIS_DOCUMENT_TYPES below.
+    "pg05a", "pg05b", "pg25a_certificate", "viva_voce_certificate",
 )
+# Which of the above belong to which `thesis_type` — enforced in the endpoint layer (upload/
+# generate/serializer), never merely by frontend hiding. `thesis_file`/the two plagiarism
+# document types are shared by both (every Thesis, regardless of type, needs its own thesis
+# file and its own plagiarism check — Section 26 of the Final Thesis rules: a Final Thesis's
+# plagiarism data must be entirely its own, never inherited from Initial, which is guaranteed
+# for free by Final Thesis being a SEPARATE `Thesis` row/thesis_id).
+_SHARED_DOCUMENT_TYPES = {"thesis_file", "plagiarism_student_report", "plagiarism_library_report"}
+INITIAL_THESIS_DOCUMENT_TYPES = _SHARED_DOCUMENT_TYPES | {
+    "payment_receipt", "seminar_proceedings", "clearance", "declaration_annexure1",
+    "seminar_certificate_pg25", "certificate_i_pg27",
+}
+FINAL_THESIS_DOCUMENT_TYPES = _SHARED_DOCUMENT_TYPES | {"pg05a", "pg05b", "pg25a_certificate", "viva_voce_certificate"}
 # "annexure_iv" REMOVED (this revision) — no longer a required Initial Thesis document
 # (confirmed business decision). It is deliberately absent from this tuple so it can never be
 # uploaded/downloaded/listed again; see the accompanying migration for the (empty, verified)
@@ -89,7 +103,7 @@ CONFIDENTIAL_DOCUMENT_TYPES = {"plagiarism_library_report"}
 # These two are NEVER student-uploaded — they are system-generated (HOD / Major Advisor) and
 # only ever appear in `ams_thesis_documents` via the dedicated generation endpoints below,
 # never via the generic `POST /thesis/{id}/documents/{type}` upload route.
-SYSTEM_GENERATED_DOCUMENT_TYPES = {"seminar_certificate_pg25", "certificate_i_pg27"}
+SYSTEM_GENERATED_DOCUMENT_TYPES = {"seminar_certificate_pg25", "certificate_i_pg27", "pg25a_certificate", "viva_voce_certificate"}
 
 THESIS_EVALUATION_STATUSES = ("pending", "submitted", "approved")
 
@@ -125,8 +139,13 @@ class Thesis(Base):
     __table_args__ = (
         CheckConstraint("thesis_type IN ('initial', 'final')", name="ck_thesis_type"),
         # One INITIAL Thesis per student, enforced by the database (mirrors Synopsis's
-        # uq_synopsis_first_per_student exactly). "final" rows are exempt — reserved for later.
+        # uq_synopsis_first_per_student exactly).
         Index("uq_thesis_initial_per_student", "student_id", unique=True, postgresql_where=text("thesis_type = 'initial'")),
+        # One FINAL Thesis per student (this revision — Final Thesis is now implemented as a
+        # separate `Thesis` row, never a version/cycle of the Initial one). Database-enforced,
+        # exactly mirroring the Initial constraint above — the endpoint-layer pre-check in
+        # `create_thesis` only gives a friendly message.
+        Index("uq_thesis_final_per_student", "student_id", unique=True, postgresql_where=text("thesis_type = 'final'")),
     )
 
     student: Mapped["User"] = relationship("User", foreign_keys=[student_id])
@@ -403,6 +422,136 @@ class ThesisSeminarCertificateSignature(Base):
     __table_args__ = (UniqueConstraint("certificate_id", "faculty_id", name="uq_thesis_pg25_signature_faculty"),)
 
     certificate: Mapped["ThesisSeminarCertificate"] = relationship("ThesisSeminarCertificate", back_populates="signatures")
+    committee_member: Mapped["CommitteeMember | None"] = relationship("CommitteeMember", foreign_keys=[committee_member_id])
+    faculty: Mapped["User"] = relationship("User", foreign_keys=[faculty_id])
+
+
+FINAL_CERTIFICATE_KINDS = ("pg25a", "viva")
+# Shared status vocabulary across both kinds — not every status is reachable by every kind:
+# `unsatisfactory` is Viva-only (a seminar/generation event never "fails" for PG25(A) — the
+# student simply generates it whenever ready); `ma_pending` is PG25(A)-only (the Major Advisor
+# is a genuine SEPARATE sequential approver there, since the STUDENT generates+signs it, unlike
+# Viva where the Major Advisor's own generate+Submit act already IS their contribution to the
+# chain, so there is no separate later "MA approves" step for Viva).
+FINAL_CERTIFICATE_STATUSES = (
+    "unsatisfactory", "generated", "ma_pending", "committee_pending",
+    "hod_pending", "incharge_pending", "dpgs_pending", "approved", "reverted",
+)
+
+
+class FinalCertificate(Base):
+    """PG-25(A) and Viva Voce Certificate — the two Final-Thesis-only, pre/peri-submission
+    generated-document workflows (BUSINESS_LOGIC.md AD.21+). Deliberately ONE shared, focused
+    table for both (`kind` discriminates), reusing the exact attempt/version/revert/regenerate
+    architecture already proven by the Initial Thesis's `ThesisSeminarCertificate` correction —
+    NOT a generic workflow engine: the status vocabulary and the five participant roles
+    (generator, Major Advisor, Advisory Committee, HOD, Incharge Academic Cell, DPGS) are fixed
+    and explicit, not configurable.
+
+    **Attempt vs version** (identical convention to `ThesisSeminarCertificate`): `attempt_number`
+    advances only for Viva's Unsatisfactory -> fresh-viva-later case (a brand-new real-world
+    event); `version_number` advances only when the driving role (Major Advisor for Viva,
+    Student for PG-25(A)) regenerates after any approver reverts — a brand-new row, the reverted
+    predecessor kept forever as immutable history, never reused or resurrected.
+
+    **Kind-specific generator**: PG-25(A) is generated and auto-signed by the STUDENT
+    (`generated_by_id` = student, `student_signed_at` set at generation) then explicitly
+    *submitted* by the student, at which point the resolved Major Advisor becomes a genuine
+    separate sequential approver (`ma_id`/`ma_acted_at`, status `ma_pending` until they act).
+    Viva is generated by the MAJOR ADVISOR (`generated_by_id` = `ma_id` = the same person) via
+    Satisfactory, and their own Submit action sets `ma_acted_at` directly — no separate
+    `ma_pending` phase exists for Viva.
+
+    **Shared tail** (both kinds, identical shape): every accepted Advisory Committee member
+    EXCLUDING the Major Advisor (`FinalCertificateSignature`, one row per signer) -> HOD
+    (own-department, `hod_approved_by/at`) -> Incharge Academic Cell (`incharge_approved_by/at`
+    — role-only, single-holder, exactly like the main Thesis chain's own Incharge stage) -> DPGS
+    (`dpgs_approved_by/at`, single-holder) -> `approved`. **Incharge Academic Cell participates
+    in this approval chain but is NEVER a named signatory on the generated PDF** (Section 6/13
+    of the confirmed Final Thesis rules) — `incharge_approved_by` exists purely for internal
+    audit/authorization state, never rendered into `pg25a_certificate.html`/
+    `viva_voce_certificate.html`.
+
+    `reverted` is reachable from `ma_pending`/`committee_pending`/`hod_pending`/
+    `incharge_pending`/`dpgs_pending` (any one currently-authorized approver may single-handedly
+    revert, mirroring every other revert convention in this repository) and is terminal for that
+    row. The partial unique index guarantees at most one row per `(thesis_id, kind)` is ever "in
+    flight" at a time; "the current valid certificate" for any purpose (student visibility, the
+    Final Thesis submission gate) is always the row with the highest `(attempt_number,
+    version_number)` for that `(thesis_id, kind)` pair — a stale/reverted/superseded row can
+    never satisfy anything."""
+    __tablename__ = "ams_final_certificates"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    thesis_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_theses.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(20), default="generated", nullable=False)
+    # The seminar/viva-relevant instant this row centers on: for Viva, the actual viva date/time
+    # (IST-presented, stored as tz-aware UTC like every other timestamp in this schema); for
+    # PG-25(A), simply the generation instant (the reference form has no separate "event" date
+    # distinct from when it was drawn up).
+    event_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
+    generated_by_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id", ondelete="SET NULL"))
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    student_signed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ma_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id", ondelete="SET NULL"))
+    ma_acted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    hod_approved_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id", ondelete="SET NULL"))
+    hod_approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    incharge_approved_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id", ondelete="SET NULL"))
+    incharge_approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    dpgs_approved_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id", ondelete="SET NULL"))
+    dpgs_approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reverted_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id", ondelete="SET NULL"))
+    reverted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revert_remark: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+    __table_args__ = (
+        CheckConstraint("kind IN ('pg25a', 'viva')", name="ck_final_certificate_kind"),
+        UniqueConstraint("thesis_id", "kind", "attempt_number", "version_number", name="uq_final_certificate_attempt_version"),
+        Index(
+            "uq_finalcert_one_open_per_kind", "thesis_id", "kind", unique=True,
+            postgresql_where=text("status IN ('generated', 'ma_pending', 'committee_pending', 'hod_pending', 'incharge_pending', 'dpgs_pending')"),
+        ),
+    )
+
+    thesis: Mapped["Thesis"] = relationship("Thesis", foreign_keys=[thesis_id])
+    generator: Mapped["User | None"] = relationship("User", foreign_keys=[generated_by_id])
+    ma: Mapped["User | None"] = relationship("User", foreign_keys=[ma_id])
+    hod_approver: Mapped["User | None"] = relationship("User", foreign_keys=[hod_approved_by])
+    incharge_approver: Mapped["User | None"] = relationship("User", foreign_keys=[incharge_approved_by])
+    dpgs_approver: Mapped["User | None"] = relationship("User", foreign_keys=[dpgs_approved_by])
+    reverter: Mapped["User | None"] = relationship("User", foreign_keys=[reverted_by])
+    signatures: Mapped[list["FinalCertificateSignature"]] = relationship(
+        "FinalCertificateSignature", back_populates="certificate", cascade="all, delete-orphan",
+    )
+
+
+class FinalCertificateSignature(Base):
+    """One required Advisory-Committee-member signature on ONE `FinalCertificate` row —
+    identical shape/semantics to `ThesisSeminarCertificateSignature`. The required signer set is
+    snapshotted at submission time from the student's REAL, live `AdvisoryCommittee`/
+    `CommitteeMember` rows: every accepted member EXCLUDING `major_advisor` (who is handled as
+    the separate `ma_id`/`ma_acted_at` sequential step, never duplicated here). Resolved from the
+    ACTUAL accepted committee membership — never a hardcoded fixed set of named roles (Co-Major
+    Advisor/Member Major/Member Minor/Supporting/Members from Others, as the AAU reference forms
+    happen to show) and never a client-supplied approver list."""
+    __tablename__ = "ams_final_certificate_signatures"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    certificate_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_final_certificates.id", ondelete="CASCADE"), index=True)
+    committee_member_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_committee_members.id", ondelete="SET NULL"))
+    faculty_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id"), nullable=False)
+    role_snapshot: Mapped[str] = mapped_column(String(30), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
+    signed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (UniqueConstraint("certificate_id", "faculty_id", name="uq_final_certificate_signature_faculty"),)
+
+    certificate: Mapped["FinalCertificate"] = relationship("FinalCertificate", back_populates="signatures")
     committee_member: Mapped["CommitteeMember | None"] = relationship("CommitteeMember", foreign_keys=[committee_member_id])
     faculty: Mapped["User"] = relationship("User", foreign_keys=[faculty_id])
 

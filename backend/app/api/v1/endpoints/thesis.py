@@ -54,11 +54,14 @@ from app.core.dependencies import get_current_user, require_roles
 from app.core.email import send_email
 from app.core.student_scope import resolve_student_department_id
 from app.db.base import get_db
+from app.models.enrollment import CourseRegistration
 from app.models.external_examiner import ExternalExaminer, ExternalExaminerAssignment
 from app.models.ppw import Ppw
 from app.models.research import AdvisoryCommittee, CommitteeMember
 from app.models.thesis import (
-    CONFIDENTIAL_DOCUMENT_TYPES, SYSTEM_GENERATED_DOCUMENT_TYPES, THESIS_DOCUMENT_TYPES,
+    CONFIDENTIAL_DOCUMENT_TYPES, FINAL_CERTIFICATE_KINDS, FINAL_THESIS_DOCUMENT_TYPES, INITIAL_THESIS_DOCUMENT_TYPES,
+    SYSTEM_GENERATED_DOCUMENT_TYPES, THESIS_DOCUMENT_TYPES,
+    FinalCertificate, FinalCertificateSignature,
     Thesis, ThesisApprovalCycle, ThesisApprovalStage, ThesisDocument, ThesisExternalEvaluation,
     ThesisSeminarCertificate, ThesisSeminarCertificateSignature, ThesisSignature,
 )
@@ -121,7 +124,7 @@ _EXAMINER_DOCUMENT_TYPES = {"thesis_file", "plagiarism_student_report", "plagiar
 # `inspect_pdf`/`InvalidPdf` infrastructure Migration/Progress Report already use — never by
 # filename/extension alone). Every other student document type not listed here (currently only
 # `plagiarism_student_report`) keeps the original, unrelated .docx validation this phase.
-_PDF_DOCUMENT_TYPES = {"payment_receipt", "seminar_proceedings", "clearance", "declaration_annexure1"}
+_PDF_DOCUMENT_TYPES = {"payment_receipt", "seminar_proceedings", "clearance", "declaration_annexure1", "pg05a", "pg05b"}
 
 _MAX_BYTES = settings.MAX_FILE_SIZE_MB * 1024 * 1024
 _STORED_NAME_RE = re.compile(r"^[0-9a-f]{32}\.(docx|pdf)$")
@@ -424,6 +427,62 @@ async def _all_certificates(thesis_id: UUID, db: AsyncSession) -> list[ThesisSem
     )).scalars().all())
 
 
+# ── Final Thesis: PG-25(A) / Viva Voce Certificate helpers ────────────────────────────────────
+
+_FINAL_CERT_LOAD_OPTIONS = (
+    selectinload(FinalCertificate.signatures).selectinload(FinalCertificateSignature.faculty),
+    selectinload(FinalCertificate.generator), selectinload(FinalCertificate.ma),
+    selectinload(FinalCertificate.hod_approver), selectinload(FinalCertificate.incharge_approver),
+    selectinload(FinalCertificate.dpgs_approver),
+)
+
+
+async def _get_final_certificate(thesis_id: UUID, kind: str, db: AsyncSession) -> Optional[FinalCertificate]:
+    """The CURRENT valid `kind` certificate for this Thesis — the highest `(attempt_number,
+    version_number)` — never merely "an approved row exists somewhere"."""
+    return (await db.execute(
+        select(FinalCertificate).options(*_FINAL_CERT_LOAD_OPTIONS)
+        .where(FinalCertificate.thesis_id == thesis_id, FinalCertificate.kind == kind)
+        .order_by(FinalCertificate.attempt_number.desc(), FinalCertificate.version_number.desc())
+        .limit(1)
+    )).scalar_one_or_none()
+
+
+async def _get_final_certificate_by_id(certificate_id: UUID, db: AsyncSession) -> Optional[FinalCertificate]:
+    return (await db.execute(
+        select(FinalCertificate).options(
+            *_FINAL_CERT_LOAD_OPTIONS, selectinload(FinalCertificate.thesis).selectinload(Thesis.student),
+        ).where(FinalCertificate.id == certificate_id)
+    )).scalar_one_or_none()
+
+
+_FINAL_CERT_STATUS_LABELS = {
+    "unsatisfactory": "Unsatisfactory", "generated": "Generated", "ma_pending": "Awaiting Major Advisor",
+    "committee_pending": "Awaiting Advisory Committee", "hod_pending": "Awaiting HOD Approval",
+    "incharge_pending": "Awaiting Incharge Academic Cell Approval", "dpgs_pending": "Awaiting DPGS Approval",
+    "approved": "Approved", "reverted": "Reverted",
+}
+
+
+def _final_cert_summary(cert: Optional[FinalCertificate]) -> Optional[dict]:
+    if not cert:
+        return None
+    return {
+        "id": str(cert.id), "kind": cert.kind, "status": cert.status,
+        "status_label": _FINAL_CERT_STATUS_LABELS.get(cert.status, cert.status),
+        "attempt_number": cert.attempt_number, "version_number": cert.version_number,
+        "event_at": _iso(cert.event_at), "event_at_ist": _ist_str(cert.event_at),
+        "student_signed_at": _iso(cert.student_signed_at), "ma_acted_at": _iso(cert.ma_acted_at),
+        "approved_at": _iso(cert.approved_at),
+        "signatures_completed": sum(1 for s in cert.signatures if s.status == "signed"),
+        "signatures_required": len(cert.signatures),
+    }
+
+
+def _my_final_cert_signature(cert: FinalCertificate, user: User) -> Optional[FinalCertificateSignature]:
+    return next((s for s in cert.signatures if s.faculty_id == user.id), None)
+
+
 async def _my_examiner_evaluation(t: Thesis, user: User) -> Optional[ThesisExternalEvaluation]:
     """The caller's OWN evaluation row on THIS thesis, or None — resolved from the actual
     ExternalExaminerAssignment chain (assignment.examiner.user_id == caller), never from an
@@ -452,22 +511,35 @@ async def _authorize_view(t: Thesis, user: User, db: AsyncSession) -> None:
         if await _my_examiner_evaluation(t, user):
             return
         raise _not_found()
-    # PG25 (corrected — Major-Advisor-driven, BUSINESS_LOGIC.md AD.15) happens BEFORE submission
-    # — while `t.status` is still "draft" — so the Major Advisor driving it, the Advisory
-    # Committee members signing it, and (once it reaches final approval) the student's own-
-    # department HOD all need to see this Thesis before the normal post-submission visibility
-    # rules (below) would otherwise apply.
-    if role in (UserRole.HOD, UserRole.FACULTY):
-        cert = await _get_certificate(t.id, db)
-        if cert:
-            if cert.ma_id == user.id:
+    # PG25/PG-25(A)/Viva all happen BEFORE (or independent of) main submission — while
+    # `t.status` is still "draft" — so the Major Advisor driving them, the Advisory Committee
+    # members signing them, and (once each reaches its own later stage) the student's own-
+    # department HOD / Incharge Academic Cell / DPGS all need to see this Thesis before the
+    # normal post-submission visibility rules (below) would otherwise apply.
+    if role in (UserRole.HOD, UserRole.FACULTY, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS):
+        pre_certs: list = []
+        if t.thesis_type == "initial":
+            c = await _get_certificate(t.id, db)
+            if c:
+                pre_certs.append(c)
+        else:
+            for kind in ("pg25a", "viva"):
+                c = await _get_final_certificate(t.id, kind, db)
+                if c:
+                    pre_certs.append(c)
+        for cert in pre_certs:
+            if getattr(cert, "ma_id", None) == user.id:
                 return
             if any(sig.faculty_id == user.id for sig in cert.signatures):
                 return
-            if role == UserRole.HOD and cert.status in ("hod_pending", "approved"):
+            if role == UserRole.HOD and cert.status in ("hod_pending", "incharge_pending", "dpgs_pending", "approved"):
                 dept_id = await resolve_student_department_id(t.student_id, db)
                 if dept_id and user.active_department_id and dept_id == user.active_department_id:
                     return
+            if role == UserRole.INCHARGE_ACADEMIC_CELL and cert.status in ("incharge_pending", "dpgs_pending", "approved"):
+                return
+            if role == UserRole.DPGS and cert.status in ("dpgs_pending", "approved"):
+                return
     if t.status == "draft":
         raise _not_found()
     if role in (UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS, UserRole.LIBRARIAN):
@@ -654,7 +726,10 @@ async def _thesis_dict(t: Thesis, viewer: User, db: AsyncSession) -> dict:
     my_stage = await _find_my_stage(t, viewer, db) if viewer.active_role in _APPROVER_ROLES else None
     is_examiner = viewer.active_role == UserRole.EXTERNAL_EXAMINER
     my_evaluation = await _my_examiner_evaluation(t, viewer) if is_examiner else None
-    cert = await _get_certificate(t.id, db)
+    is_final = t.thesis_type == "final"
+    cert = None if is_final else await _get_certificate(t.id, db)
+    pg25a_cert = await _get_final_certificate(t.id, "pg25a", db) if is_final else None
+    viva_cert = await _get_final_certificate(t.id, "viva", db) if is_final else None
 
     revert_info = None
     if t.status == "reverted" and cycle and cycle.status == "reverted":
@@ -666,15 +741,23 @@ async def _thesis_dict(t: Thesis, viewer: User, db: AsyncSession) -> dict:
             "reverted_at": _iso(cycle.reverted_at), "remark": cycle.revert_remark,
         }
 
-    doc_types = _EXAMINER_DOCUMENT_TYPES if is_examiner else THESIS_DOCUMENT_TYPES
+    if is_examiner:
+        doc_types = _EXAMINER_DOCUMENT_TYPES
+    else:
+        doc_types = FINAL_THESIS_DOCUMENT_TYPES if is_final else INITIAL_THESIS_DOCUMENT_TYPES
     documents = {}
     for dt in doc_types:
-        # The student never sees PG25 as an available Student Document until the CURRENT
-        # attempt/version is fully approved (MA-generated + MA-signed + every required Advisory
-        # Committee member signed + HOD final approval) — enforced HERE, server-side, never by
-        # frontend hiding; every other viewer (MA/HOD/committee/other approvers/Super Admin)
-        # sees it as soon as it exists, since they are the ones actively working on it.
+        # The student never sees a generated approval-workflow document as an available Student
+        # Document until the CURRENT attempt/version is fully approved — enforced HERE, server-
+        # side, never by frontend hiding; every other viewer (MA/HOD/committee/Incharge/DPGS/
+        # Super Admin) sees it as soon as it exists, since they are actively working on it.
         if dt == "seminar_certificate_pg25" and viewer.active_role == UserRole.STUDENT and (not cert or cert.status != "approved"):
+            documents[dt] = None
+            continue
+        if dt == "pg25a_certificate" and viewer.active_role == UserRole.STUDENT and (not pg25a_cert or pg25a_cert.status != "approved"):
+            documents[dt] = None
+            continue
+        if dt == "viva_voce_certificate" and viewer.active_role == UserRole.STUDENT and (not viva_cert or viva_cert.status != "approved"):
             documents[dt] = None
             continue
         documents[dt] = _document_dict(_latest_document(t, dt))
@@ -694,7 +777,9 @@ async def _thesis_dict(t: Thesis, viewer: User, db: AsyncSession) -> dict:
         "plagiarism_library_percent": t.plagiarism_library_percent,
         "abstract": t.abstract if not is_examiner else None,
         "documents": documents,
-        "pg25": _pg25_summary(cert),
+        "pg25": _pg25_summary(cert) if not is_final else None,
+        "pg25a": _final_cert_summary(pg25a_cert) if is_final else None,
+        "viva": _final_cert_summary(viva_cert) if is_final else None,
         "is_owner": viewer.active_role == UserRole.STUDENT and t.student_id == viewer.id,
         "can_edit": viewer.active_role == UserRole.STUDENT and t.student_id == viewer.id and t.status in _EDITABLE_STATUSES,
         "revert_info": revert_info,
@@ -717,39 +802,59 @@ async def _thesis_dict(t: Thesis, viewer: User, db: AsyncSession) -> dict:
 async def create_thesis(
     body: ThesisCreateIn, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.STUDENT)),
 ):
-    """A student creates their ONE Initial Thesis. The student is always the caller — no
-    student id is accepted anywhere. The database's partial unique index is the final
-    guarantee; the pre-check below only gives a friendly message.
+    """A student creates their Thesis. The student is always the caller — no student id is
+    accepted anywhere, and `thesis_type` is NEVER accepted from the client (Section 40 of the
+    confirmed Final Thesis rules — `ThesisCreateIn` has no such field at all, so a client body
+    of `{"thesis_type": "final"}` is simply ignored/rejected by the schema, never trusted).
 
-    Thesis Title fallback (fixed — the PPW research title was previously REQUIRED,
-    which incorrectly blocked Thesis creation for any student whose PPW existed but
-    had a blank `research_title`, or had no PPW at all): the student's own PPW
-    `research_title` is used as the title when it is non-blank (`body.title` acts as
-    a prefill the student may confirm or edit — sending it explicitly always wins, so
-    the student can override the PPW value too). If the PPW has no usable title (or
-    no PPW exists yet), `body.title` is REQUIRED instead — creation is never blocked
-    merely because the PPW's research title is empty. Whichever title is used is
-    captured ONCE into `title_snapshot`, exactly as before, and never resynced with
-    the PPW afterward."""
+    **Server-determined classification** (this revision): the FIRST call ever for a student
+    creates `thesis_type="initial"`. A SECOND call is only accepted once that Initial Thesis has
+    reached `status == "approved"` — pending, reverted, or otherwise incomplete Initial Thesis
+    blocks Final Thesis creation entirely — and creates a genuinely SEPARATE
+    `thesis_type="final"` row (never a version/cycle of the Initial one), so Final Thesis gets
+    its own independent documents/plagiarism-data/approval-history for free. A THIRD call is
+    always rejected (`409`) — one Initial + one Final is the maximum, each independently
+    database-enforced (`uq_thesis_initial_per_student`/`uq_thesis_final_per_student`); the
+    checks below only give a friendly message.
+
+    Thesis Title fallback (unchanged for Initial): the student's own PPW `research_title` is
+    used when non-blank; `body.title` is a prefill/override. For a Final Thesis, the title
+    instead defaults to the Initial Thesis's own `title_snapshot` (the same research, now in its
+    final form) — `body.title` may still override it. Whichever title is used is captured ONCE
+    into `title_snapshot` and never resynced afterward, exactly as before."""
     program = await db.get(Program, user.program_id) if user.program_id else None
     if not program or program.level not in _PG_PHD_LEVELS:
-        raise HTTPException(403, "The Initial Thesis is available to postgraduate students only.")
-    existing = (await db.execute(select(Thesis.id).where(Thesis.student_id == user.id, Thesis.thesis_type == "initial"))).scalar_one_or_none()
-    if existing:
-        raise HTTPException(409, "You already have an Initial Thesis. A student can have only one.")
-    ppw = (await db.execute(select(Ppw).where(Ppw.student_id == user.id))).scalar_one_or_none()
-    ppw_title = (ppw.research_title or "").strip() if ppw else ""
-    title = (body.title or "").strip() or ppw_title
+        raise HTTPException(403, "The Thesis is available to postgraduate students only.")
+    existing_final = (await db.execute(select(Thesis.id).where(Thesis.student_id == user.id, Thesis.thesis_type == "final"))).scalar_one_or_none()
+    if existing_final:
+        raise HTTPException(409, "You already have a Final Thesis. A student can have only one.")
+    existing_initial = (await db.execute(select(Thesis).where(Thesis.student_id == user.id, Thesis.thesis_type == "initial"))).scalar_one_or_none()
+
+    if existing_initial:
+        if existing_initial.status != "approved":
+            raise HTTPException(409, "Your Initial Thesis must be fully approved before you can start your Final Thesis.")
+        thesis_type = "final"
+        ppw_id = existing_initial.ppw_id
+        default_title = (existing_initial.title_snapshot or "").strip()
+        message = "Final Thesis draft created."
+    else:
+        thesis_type = "initial"
+        ppw = (await db.execute(select(Ppw).where(Ppw.student_id == user.id))).scalar_one_or_none()
+        ppw_id = ppw.id if ppw else None
+        default_title = (ppw.research_title or "").strip() if ppw else ""
+        message = "Initial Thesis draft created."
+
+    title = (body.title or "").strip() or default_title
     if not title:
         raise HTTPException(400, "Enter a Thesis Title — either fill in your Research Title in your PPW, or provide one here directly.")
-    t = Thesis(student_id=user.id, thesis_type="initial", ppw_id=ppw.id if ppw else None, title_snapshot=title, status="draft")
+    t = Thesis(student_id=user.id, thesis_type=thesis_type, ppw_id=ppw_id, title_snapshot=title, status="draft")
     db.add(t)
     try:
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        raise HTTPException(409, "You already have an Initial Thesis. A student can have only one.")
-    return {"id": str(t.id), "message": "Initial Thesis draft created.", "title": title}
+        raise HTTPException(409, f"You already have a {'Final' if thesis_type == 'final' else 'Initial'} Thesis. A student can have only one.")
+    return {"id": str(t.id), "message": message, "title": title, "thesis_type": thesis_type}
 
 
 @router.get("/mine")
@@ -883,7 +988,19 @@ async def upload_document(
     if document_type not in _STUDENT_DOCUMENT_TYPES:
         raise HTTPException(404, "Unknown document type.")
     t = await _get_thesis(thesis_id, db)
-    _require_owned_editable_thesis(t, user)
+    if t.student_id != user.id:
+        raise _not_found()
+    # A document type belongs to exactly one Thesis type's document set (Section 4/20 of the
+    # confirmed Final Thesis rules) — e.g. PG-05(A)/(B) are Final-Thesis-only, Payment
+    # Receipt/Clearance/Declaration are Initial-Thesis-only; thesis_file and both plagiarism
+    # report types are shared by both. Checked BEFORE the editability check, same priority
+    # ordering as every other "wrong id/type" 404 in this module — an approved/submitted
+    # Thesis of the WRONG type for this document is "unknown type here," never merely "locked."
+    allowed = FINAL_THESIS_DOCUMENT_TYPES if t.thesis_type == "final" else INITIAL_THESIS_DOCUMENT_TYPES
+    if document_type not in allowed:
+        raise HTTPException(404, "Unknown document type.")
+    if t.status not in _EDITABLE_STATUSES:
+        raise HTTPException(400, "This Thesis is under approval or approved and can no longer be edited.")
     data, digest, content_type = await _validate_upload_for_type(document_type, file)
     next_version = max((d.version_number for d in t.documents if d.document_type == document_type), default=0) + 1
     stored_name = f"{secrets.token_hex(16)}.{_stored_ext_for(document_type)}"
@@ -951,12 +1068,16 @@ async def download_document(
         raise HTTPException(404, "Document not found.")
     if user.active_role == UserRole.EXTERNAL_EXAMINER and doc.document_type not in _EXAMINER_DOCUMENT_TYPES:
         raise HTTPException(404, "Document not found.")
+    # Re-verified here too, never trusted merely because it was absent from the `documents`
+    # dict — a student who somehow learns a real document_id must still be blocked.
     if user.active_role == UserRole.STUDENT and doc.document_type == "seminar_certificate_pg25":
-        # Re-verified here too, never trusted merely because it was absent from the `documents`
-        # dict — a student who somehow learns a real document_id must still be blocked (Section
-        # 16/26: "backend authorization must enforce this").
         cert = await _get_certificate(t.id, db)
         if not cert or cert.status != "approved":
+            raise HTTPException(404, "Document not found.")
+    if user.active_role == UserRole.STUDENT and doc.document_type in ("pg25a_certificate", "viva_voce_certificate"):
+        kind = "pg25a" if doc.document_type == "pg25a_certificate" else "viva"
+        fcert = await _get_final_certificate(t.id, kind, db)
+        if not fcert or fcert.status != "approved":
             raise HTTPException(404, "Document not found.")
     data = _read_stored(t.id, doc.stored_filename)
     return Response(
@@ -1019,20 +1140,45 @@ async def submit_thesis(thesis_id: UUID, db: AsyncSession = Depends(get_db), use
     t = await _get_thesis(thesis_id, db)
     if t.student_id != user.id:
         raise _not_found()
+    is_final = t.thesis_type == "final"
+    label = "Final Thesis" if is_final else "Initial Thesis"
     if t.status not in _EDITABLE_STATUSES:
-        raise HTTPException(400, "This Initial Thesis is already under approval or approved.")
-    # PG25 gate (Section 11 of the corrected rules): `_get_certificate` always resolves the
-    # CURRENT attempt/version (highest attempt_number/version_number) — an old, superseded, or
-    # reverted certificate can never satisfy this, even if an earlier version was once approved.
-    cert = await _get_certificate(t.id, db)
-    if not cert or cert.status != "approved":
-        raise HTTPException(400, "Your Thesis Seminar Certificate (PG 25) must be fully approved — generated and signed by your Major Advisor, approved by your Advisory Committee, and finally approved by your HOD — before you can submit your Initial Thesis.")
+        raise HTTPException(400, f"This {label} is already under approval or approved.")
+
+    if is_final:
+        # Final Thesis prerequisites (Sections 4/20 of the confirmed rules): PG-05(A)/(B)
+        # uploaded, PG-25(A) and Viva Voce Certificate both fully approved for the CURRENT
+        # attempt/version (never a stale/reverted one, never Initial Thesis's own PG25). Neither
+        # Certificate I nor the old PG25 workflow apply to Final Thesis at all.
+        if not _latest_document(t, "pg05a"):
+            raise HTTPException(400, "Upload Form No. PG-05(A) before submitting.")
+        if not _latest_document(t, "pg05b"):
+            raise HTTPException(400, "Upload Form No. PG-05(B) before submitting.")
+        pg25a = await _get_final_certificate(t.id, "pg25a", db)
+        if not pg25a or pg25a.status != "approved":
+            raise HTTPException(400, "Form No. PG-25(A) must be fully approved — generated and signed by you, approved by your Major Advisor, your Advisory Committee, your HOD, Incharge Academic Cell, and DPGS — before you can submit your Final Thesis.")
+        viva = await _get_final_certificate(t.id, "viva", db)
+        if not viva or viva.status != "approved":
+            raise HTTPException(400, "Your Viva Voce Certificate must be fully approved — generated by your Major Advisor and approved by your Advisory Committee, HOD, Incharge Academic Cell, and DPGS — before you can submit your Final Thesis.")
+    else:
+        # PG25 gate (Section 11 of the corrected rules): `_get_certificate` always resolves the
+        # CURRENT attempt/version (highest attempt_number/version_number) — an old, superseded,
+        # or reverted certificate can never satisfy this, even if an earlier version was once
+        # approved.
+        cert = await _get_certificate(t.id, db)
+        if not cert or cert.status != "approved":
+            raise HTTPException(400, "Your Thesis Seminar Certificate (PG 25) must be fully approved — generated and signed by your Major Advisor, approved by your Advisory Committee, and finally approved by your HOD — before you can submit your Initial Thesis.")
+
     if not _latest_document(t, "thesis_file"):
         raise HTTPException(400, "Upload your Thesis File (.docx) before submitting.")
     if t.plagiarism_student_percent is None:
         raise HTTPException(400, "Enter your plagiarism percentage before submitting.")
     if not (t.plagiarism_software_name or "").strip():
         raise HTTPException(400, "Enter the plagiarism-check software name before submitting.")
+    # A Final Thesis is its own, separate `Thesis` row (`thesis_id` differs from Initial's) —
+    # `_latest_document(t, ...)` is already scoped to THIS row, so Initial Thesis's own
+    # plagiarism report can never satisfy this check for Final Thesis (Section 26 of the
+    # confirmed rules: never query by `student_id` alone for this reason).
     if not _latest_document(t, "plagiarism_student_report"):
         raise HTTPException(400, "Upload your plagiarism report before submitting.")
     if not (t.abstract or "").strip():
@@ -1044,7 +1190,7 @@ async def submit_thesis(thesis_id: UUID, db: AsyncSession = Depends(get_db), use
     )).scalar_one_or_none()
     major = next((m for m in committee.members if m.role == "major_advisor"), None) if committee else None
     if not major or major.accepted is not True:
-        raise HTTPException(400, "Your Major Advisor must be assigned and must have accepted before you can submit your Initial Thesis.")
+        raise HTTPException(400, f"Your Major Advisor must be assigned and must have accepted before you can submit your {label}.")
     if not major.faculty or not major.faculty.is_active:
         raise HTTPException(400, "Your Major Advisor's account is inactive. Ask your HOD to assign a replacement.")
 
@@ -1057,7 +1203,10 @@ async def submit_thesis(thesis_id: UUID, db: AsyncSession = Depends(get_db), use
     seq = 1
     db.add(ThesisApprovalStage(cycle_id=cycle.id, sequence=seq, stage_type="major_advisor", role_label=_STAGE_ROLE_LABELS["major_advisor"],
                                committee_member_id=major.id, assignee_id=major.faculty_id))
-    for stage_type in ("hod", "librarian", "incharge_academic_cell", "dpgs", "dpgs_final"):
+    # Final Thesis chain (Section 21/27): major_advisor -> hod -> librarian -> incharge -> dpgs,
+    # NO External Examiner, NO second DPGS-final stage. Initial Thesis chain is unchanged.
+    remaining_stages = ("hod", "librarian", "incharge_academic_cell", "dpgs") if is_final else ("hod", "librarian", "incharge_academic_cell", "dpgs", "dpgs_final")
+    for stage_type in remaining_stages:
         seq += 1
         db.add(ThesisApprovalStage(cycle_id=cycle.id, sequence=seq, stage_type=stage_type, role_label=_STAGE_ROLE_LABELS[stage_type]))
     t.status = "major_advisor_pending"
@@ -1066,8 +1215,8 @@ async def submit_thesis(thesis_id: UUID, db: AsyncSession = Depends(get_db), use
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        raise HTTPException(409, "This Initial Thesis already has an active approval cycle.")
-    return {"message": "Initial Thesis submitted for approval.", "status": t.status, "cycle_number": next_number}
+        raise HTTPException(409, f"This {label} already has an active approval cycle.")
+    return {"message": f"{label} submitted for approval.", "status": t.status, "cycle_number": next_number}
 
 
 # ── OTP / approve / revert ────────────────────────────────────────────────────
@@ -1581,6 +1730,582 @@ async def _pg25_pdf_context(t: Thesis, cert: ThesisSeminarCertificate, db: Async
     }
 
 
+async def _require_final_thesis(t: Thesis) -> None:
+    if t.thesis_type != "final":
+        raise _not_found()
+
+
+async def _resolve_committee_and_ma(student_id: UUID, db: AsyncSession):
+    committee = (await db.execute(
+        select(AdvisoryCommittee).options(selectinload(AdvisoryCommittee.members).selectinload(CommitteeMember.faculty))
+        .where(AdvisoryCommittee.student_id == student_id)
+    )).scalar_one_or_none()
+    major = next((m for m in committee.members if m.role == "major_advisor" and m.accepted is True), None) if committee else None
+    return committee, major
+
+
+async def _final_cert_pdf_context(t: Thesis, cert: FinalCertificate, db: AsyncSession) -> dict:
+    program = t.student.program
+    committee_rows = []
+    for s in cert.signatures:
+        faculty = (await db.execute(select(User).where(User.id == s.faculty_id))).scalar_one_or_none()
+        committee_rows.append({
+            "role_label": s.role_snapshot, "name": _person_name(faculty) or "—",
+            "designation": faculty.designation if faculty else None, "status": s.status,
+        })
+    ma_user = cert.ma
+    return {
+        "university": UNIVERSITY_NAME, "college_name": t.student.college.name if t.student.college else None,
+        "student_name": t.student.full_name, "student_roll": t.student.student_roll,
+        "degree_name": t.student.program.name if t.student.program else None,
+        "degree_level": program.level if program else None,
+        "department_name": t.student.department.name if t.student.department else None,
+        "title": t.title_snapshot,
+        "viva_at": _ist_str(cert.event_at), "attempt_number": cert.attempt_number, "version_number": cert.version_number,
+        "ma_name": _person_name(ma_user), "ma_designation": ma_user.designation if ma_user else None,
+        "ma_signed": bool(cert.ma_acted_at), "student_signed": bool(cert.student_signed_at),
+        "committee_rows": committee_rows, "status": cert.status, "status_label": _FINAL_CERT_STATUS_LABELS.get(cert.status, cert.status),
+        "hod_approved": cert.hod_approved_at is not None, "dpgs_approved": cert.dpgs_approved_at is not None,
+        "generated_at": _now().strftime("%d-%b-%Y %H:%M:%S"),
+    }
+
+
+async def _render_final_cert_pdf(t: Thesis, cert: FinalCertificate, user_id: UUID, db: AsyncSession) -> None:
+    template = "pg25a_certificate.html" if cert.kind == "pg25a" else "viva_voce_certificate.html"
+    document_type = "pg25a_certificate" if cert.kind == "pg25a" else "viva_voce_certificate"
+    pdf_bytes = await _render_or_503(template, await _final_cert_pdf_context(t, cert, db))
+    await _store_generated_pdf(t, document_type, pdf_bytes, user_id, db)
+
+
+# ── Final Thesis: PG-25(A) — student-generated ────────────────────────────────────────────────
+
+@router.post("/{thesis_id}/pg25a/generate", status_code=201)
+async def pg25a_generate(thesis_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.STUDENT))):
+    """Section 7: the student generates PG-25(A) — auto-signed by the student immediately
+    (`student_signed_at`), NOT yet submitted to the Major Advisor (a separate, later action)."""
+    t = await _get_thesis(thesis_id, db)
+    if t.student_id != user.id:
+        raise _not_found()
+    await _require_final_thesis(t)
+    latest = await _get_final_certificate(t.id, "pg25a", db)
+    if latest and latest.status != "reverted":
+        raise HTTPException(409, "A PG-25(A) attempt is already in progress or approved for this Final Thesis.")
+    if latest:
+        raise HTTPException(400, "A reverted PG-25(A) exists — use Regenerate, not Generate.")
+    now = _now()
+    cert = FinalCertificate(
+        thesis_id=t.id, kind="pg25a", attempt_number=1, version_number=1, status="generated",
+        event_at=now, generated_by_id=user.id, generated_at=now, student_signed_at=now,
+    )
+    db.add(cert)
+    await db.flush()
+    await db.refresh(cert, attribute_names=["signatures", "generator", "ma"])
+    await _render_final_cert_pdf(t, cert, user.id, db)
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(409, "A PG-25(A) attempt is already in progress or approved for this Final Thesis.")
+    return {"message": "PG-25(A) generated and signed. Click Submit to route it to your Major Advisor.", "certificate_id": str(cert.id)}
+
+
+@router.post("/{thesis_id}/pg25a/submit")
+async def pg25a_submit(thesis_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.STUDENT))):
+    """Section 8: routes the generated, student-signed PG-25(A) to the student's actual,
+    accepted Major Advisor — resolved server-side, never a client-supplied id."""
+    t = await _get_thesis(thesis_id, db)
+    if t.student_id != user.id:
+        raise _not_found()
+    await _require_final_thesis(t)
+    cert = await _get_final_certificate(t.id, "pg25a", db)
+    if not cert or cert.status != "generated":
+        raise HTTPException(400, "Generate PG-25(A) before submitting it.")
+    _, major = await _resolve_committee_and_ma(t.student_id, db)
+    if not major or not major.faculty:
+        raise HTTPException(400, "Your Major Advisor must be assigned and must have accepted before you can submit PG-25(A).")
+    cert.ma_id = major.faculty_id
+    cert.status = "ma_pending"
+    await db.commit()
+    return {"message": "PG-25(A) submitted to your Major Advisor.", "status": cert.status}
+
+
+@router.post("/{thesis_id}/pg25a/regenerate", status_code=201)
+async def pg25a_regenerate(thesis_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.STUDENT))):
+    """Section 10: after any approver reverts, the STUDENT regenerates — a new `version_number`
+    row for the same attempt; the reverted row is kept forever as history, never reused."""
+    t = await _get_thesis(thesis_id, db)
+    if t.student_id != user.id:
+        raise _not_found()
+    await _require_final_thesis(t)
+    latest = await _get_final_certificate(t.id, "pg25a", db)
+    if not latest or latest.status != "reverted":
+        raise HTTPException(400, "There is no reverted PG-25(A) to regenerate.")
+    now = _now()
+    cert = FinalCertificate(
+        thesis_id=t.id, kind="pg25a", attempt_number=latest.attempt_number, version_number=latest.version_number + 1,
+        status="generated", event_at=now, generated_by_id=user.id, generated_at=now, student_signed_at=now,
+    )
+    db.add(cert)
+    await db.flush()
+    await db.refresh(cert, attribute_names=["signatures", "generator", "ma"])
+    await _render_final_cert_pdf(t, cert, user.id, db)
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(409, "A PG-25(A) attempt is already in progress or approved for this Final Thesis.")
+    return {"message": "PG-25(A) regenerated — click Submit to sign and re-route it.", "certificate_id": str(cert.id)}
+
+
+# ── Final Thesis: Viva Voce Certificate — Major-Advisor-generated ─────────────────────────────
+
+@router.get("/viva/ma")
+async def list_viva_ma(
+    academic_year_id: Optional[UUID] = None, semester_id: Optional[UUID] = None,
+    db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.FACULTY, UserRole.HOD)),
+):
+    """Section 14: the Major Advisor's own advisee list for Viva — every student whose REAL,
+    accepted Advisory Committee names the caller as `major_advisor`, and who already has a
+    Final Thesis draft. **Correction (this audit)**: an earlier pass claimed no per-student
+    Semester field exists anywhere in AMS — that was wrong. `CourseRegistration` already carries
+    a genuine, unique `(student_id, semester_id)` record (`calendar_id` for the Academic Year),
+    the same authoritative source Progress Report itself already relies on
+    (`uq_progress_report_student_semester`). Both filters are real and server-side: a student is
+    only included when they have an actual `CourseRegistration` row matching the requested
+    Academic Year/Semester — never a client-asserted label."""
+    student_ids = (await db.execute(
+        select(AdvisoryCommittee.student_id).join(CommitteeMember, CommitteeMember.committee_id == AdvisoryCommittee.id)
+        .where(CommitteeMember.faculty_id == user.id, CommitteeMember.role == "major_advisor", CommitteeMember.accepted == True)  # noqa: E712
+    )).scalars().all()
+    if not student_ids:
+        return []
+    if academic_year_id or semester_id:
+        reg_q = select(CourseRegistration.student_id).where(CourseRegistration.student_id.in_(student_ids))
+        if academic_year_id:
+            reg_q = reg_q.where(CourseRegistration.calendar_id == academic_year_id)
+        if semester_id:
+            reg_q = reg_q.where(CourseRegistration.semester_id == semester_id)
+        student_ids = (await db.execute(reg_q)).scalars().all()
+        if not student_ids:
+            return []
+    theses = (await db.execute(
+        select(Thesis).options(*_LOAD_OPTIONS).where(Thesis.student_id.in_(student_ids), Thesis.thesis_type == "final")
+    )).unique().scalars().all()
+    rows = []
+    for i, t in enumerate(theses, start=1):
+        cert = await _get_final_certificate(t.id, "viva", db)
+        status = cert.status if cert else "not_started"
+        rows.append({
+            "sl_no": i, "thesis_id": str(t.id), "student_roll": t.student.student_roll, "student_name": t.student.full_name,
+            "event_at": _iso(cert.event_at) if cert else None, "event_at_ist": _ist_str(cert.event_at) if cert else None,
+            "status": status, "status_label": _FINAL_CERT_STATUS_LABELS.get(status, "Not Started"),
+            "ma_signed": bool(cert and cert.ma_acted_at),
+            "can_satisfactory": cert is None or cert.status == "unsatisfactory",
+            "can_unsatisfactory": cert is None or cert.status == "unsatisfactory",
+            "can_submit": bool(cert and cert.status == "generated"),
+            "can_regenerate": bool(cert and cert.status == "reverted"),
+        })
+    return rows
+
+
+@router.post("/{thesis_id}/viva/satisfactory", status_code=201)
+async def viva_satisfactory(thesis_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.FACULTY, UserRole.HOD))):
+    """Section 15: the Major Advisor records a satisfactory viva — generates the certificate
+    (NOT yet submitted/signed; Submit is a separate, later action)."""
+    t = await _get_thesis(thesis_id, db)
+    await _require_final_thesis(t)
+    if not await _my_ma_membership(user, t.student_id, db):
+        raise _not_found()
+    latest = await _get_final_certificate(t.id, "viva", db)
+    if latest and latest.status != "unsatisfactory":
+        raise HTTPException(409, "A Viva attempt is already in progress or approved for this student.")
+    now = _now()
+    cert = FinalCertificate(
+        thesis_id=t.id, kind="viva", attempt_number=(latest.attempt_number + 1 if latest else 1), version_number=1,
+        status="generated", event_at=now, generated_by_id=user.id, generated_at=now, ma_id=user.id,
+    )
+    db.add(cert)
+    await db.flush()
+    await db.refresh(cert, attribute_names=["signatures", "generator", "ma"])
+    await _render_final_cert_pdf(t, cert, user.id, db)
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(409, "A Viva attempt is already in progress or approved for this student.")
+    return {"message": "Viva recorded as satisfactory. Certificate generated — click Submit to sign and route it.", "certificate_id": str(cert.id)}
+
+
+@router.post("/{thesis_id}/viva/unsatisfactory", status_code=201)
+async def viva_unsatisfactory(thesis_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.FACULTY, UserRole.HOD))):
+    """Section 16: a REAL, terminal action — no certificate, no approval chain, submission gate
+    stays blocked. The student must undergo another viva; the Major Advisor can then start a
+    fresh attempt (`attempt_number + 1`) with Satisfactory."""
+    t = await _get_thesis(thesis_id, db)
+    await _require_final_thesis(t)
+    if not await _my_ma_membership(user, t.student_id, db):
+        raise _not_found()
+    latest = await _get_final_certificate(t.id, "viva", db)
+    if latest and latest.status != "unsatisfactory":
+        raise HTTPException(409, "A Viva attempt is already in progress or approved for this student.")
+    now = _now()
+    cert = FinalCertificate(
+        thesis_id=t.id, kind="viva", attempt_number=(latest.attempt_number + 1 if latest else 1), version_number=1,
+        status="unsatisfactory", event_at=now, generated_by_id=user.id, generated_at=now, ma_id=user.id,
+    )
+    db.add(cert)
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(409, "A Viva attempt is already in progress or approved for this student.")
+    return {"message": "Viva recorded as unsatisfactory. The student must undergo another viva; record the new attempt here.", "certificate_id": str(cert.id)}
+
+
+@router.post("/{thesis_id}/viva/submit")
+async def viva_submit(thesis_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.FACULTY, UserRole.HOD))):
+    """Section 15: the Major Advisor's Submit — applies their own signature (`ma_acted_at`) and
+    resolves the student's REAL, accepted Advisory Committee (excluding the Major Advisor's own
+    row) into required signatures."""
+    t = await _get_thesis(thesis_id, db)
+    await _require_final_thesis(t)
+    if not await _my_ma_membership(user, t.student_id, db):
+        raise _not_found()
+    cert = await _get_final_certificate(t.id, "viva", db)
+    if not cert or cert.status != "generated":
+        raise HTTPException(400, "Generate the Viva Voce Certificate (Satisfactory) before submitting it.")
+    committee, _ = await _resolve_committee_and_ma(t.student_id, db)
+    required = [m for m in (committee.members if committee else []) if m.accepted is True and m.role != "major_advisor"]
+    now = _now()
+    cert.ma_acted_at = now
+    for m in required:
+        db.add(FinalCertificateSignature(certificate_id=cert.id, committee_member_id=m.id, faculty_id=m.faculty_id, role_snapshot=m.role, status="pending"))
+    await db.flush()
+    await db.refresh(cert, attribute_names=["signatures"])
+    cert.status = "hod_pending" if not required else "committee_pending"
+    await _render_final_cert_pdf(t, cert, user.id, db)
+    await db.commit()
+    return {"message": "Viva Voce Certificate signed and submitted.", "status": cert.status}
+
+
+@router.post("/{thesis_id}/viva/regenerate", status_code=201)
+async def viva_regenerate(thesis_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.FACULTY, UserRole.HOD))):
+    """Section 17: after any approver reverts, the Major Advisor regenerates — a new
+    `version_number` row for the same attempt; the reverted row is kept forever as history."""
+    t = await _get_thesis(thesis_id, db)
+    await _require_final_thesis(t)
+    if not await _my_ma_membership(user, t.student_id, db):
+        raise _not_found()
+    latest = await _get_final_certificate(t.id, "viva", db)
+    if not latest or latest.status != "reverted":
+        raise HTTPException(400, "There is no reverted Viva Voce Certificate to regenerate.")
+    now = _now()
+    cert = FinalCertificate(
+        thesis_id=t.id, kind="viva", attempt_number=latest.attempt_number, version_number=latest.version_number + 1,
+        status="generated", event_at=latest.event_at, generated_by_id=user.id, generated_at=now, ma_id=user.id,
+    )
+    db.add(cert)
+    await db.flush()
+    await db.refresh(cert, attribute_names=["signatures", "generator", "ma"])
+    await _render_final_cert_pdf(t, cert, user.id, db)
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(409, "A Viva attempt is already in progress or approved for this student.")
+    return {"message": "Viva Voce Certificate regenerated — click Submit to sign and re-route it.", "certificate_id": str(cert.id)}
+
+
+# ── Final Thesis certificates: shared MA/Committee/HOD/Incharge/DPGS actions (both kinds) ─────
+
+@router.post("/finalcert/{certificate_id}/ma-approve")
+async def finalcert_ma_approve(certificate_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.FACULTY, UserRole.HOD))):
+    """PG-25(A) only (Section 8): the Major Advisor's approval after the student's Submit. Viva
+    has no separate post-generation MA-approval phase (the Major Advisor's own generate+Submit
+    already IS their contribution), so this always 400s for a `viva` certificate."""
+    cert = await _get_final_certificate_by_id(certificate_id, db)
+    if not cert or cert.ma_id != user.id:
+        raise HTTPException(404, "Certificate not found.")
+    if cert.status != "ma_pending":
+        raise HTTPException(400, "This certificate is not currently awaiting Major Advisor approval.")
+    committee, _ = await _resolve_committee_and_ma(cert.thesis.student_id, db)
+    required = [m for m in (committee.members if committee else []) if m.accepted is True and m.role != "major_advisor"]
+    cert.ma_acted_at = _now()
+    for m in required:
+        db.add(FinalCertificateSignature(certificate_id=cert.id, committee_member_id=m.id, faculty_id=m.faculty_id, role_snapshot=m.role, status="pending"))
+    await db.flush()
+    await db.refresh(cert, attribute_names=["signatures"])
+    cert.status = "hod_pending" if not required else "committee_pending"
+    t = await _get_thesis(cert.thesis_id, db)
+    await _render_final_cert_pdf(t, cert, user.id, db)
+    await db.commit()
+    return {"message": "Approved.", "status": cert.status}
+
+
+@router.post("/finalcert/{certificate_id}/sign")
+async def finalcert_committee_sign(certificate_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.FACULTY, UserRole.HOD))):
+    """Only the authenticated committee member's OWN required signature — resolved from the real
+    `faculty_id` on their OWN row, never any id in the request."""
+    cert = await _get_final_certificate_by_id(certificate_id, db)
+    if not cert:
+        raise HTTPException(404, "Certificate not found.")
+    sig = _my_final_cert_signature(cert, user)
+    if not sig:
+        raise HTTPException(404, "Certificate not found.")
+    if cert.status != "committee_pending":
+        raise HTTPException(400, "This certificate is not currently awaiting Advisory Committee approval.")
+    if sig.status == "signed":
+        raise HTTPException(400, "You have already approved this certificate.")
+    sig.status = "signed"
+    sig.signed_at = _now()
+    await db.flush()
+    await db.refresh(cert, attribute_names=["signatures"])
+    if all(s.status == "signed" for s in cert.signatures):
+        cert.status = "hod_pending"
+    t = await _get_thesis(cert.thesis_id, db)
+    await _render_final_cert_pdf(t, cert, user.id, db)
+    await db.commit()
+    return {"message": "Approved.", "status": cert.status}
+
+
+@router.post("/finalcert/{certificate_id}/hod-approve")
+async def finalcert_hod_approve(certificate_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.HOD))):
+    cert = await _get_final_certificate_by_id(certificate_id, db)
+    if not cert:
+        raise HTTPException(404, "Certificate not found.")
+    dept_id = await resolve_student_department_id(cert.thesis.student_id, db)
+    if not dept_id or not user.active_department_id or dept_id != user.active_department_id:
+        raise HTTPException(404, "Certificate not found.")
+    if cert.status != "hod_pending":
+        raise HTTPException(400, "This certificate is not currently awaiting HOD approval.")
+    cert.hod_approved_by = user.id
+    cert.hod_approved_at = _now()
+    cert.status = "incharge_pending"
+    t = await _get_thesis(cert.thesis_id, db)
+    await _render_final_cert_pdf(t, cert, user.id, db)
+    await db.commit()
+    return {"message": "Approved.", "status": cert.status}
+
+
+@router.post("/finalcert/{certificate_id}/incharge-approve")
+async def finalcert_incharge_approve(certificate_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.INCHARGE_ACADEMIC_CELL))):
+    """Incharge Academic Cell is a role-only, single-holder approval stage — no department/
+    committee scoping exists anywhere else in this repository for this role either. Incharge
+    NEVER appears as a named signatory on the generated PDF (Section 6/13/23 of the confirmed
+    rules) — `incharge_approved_by/at` exist purely for internal audit/authorization state."""
+    cert = await _get_final_certificate_by_id(certificate_id, db)
+    if not cert:
+        raise HTTPException(404, "Certificate not found.")
+    if cert.status != "incharge_pending":
+        raise HTTPException(400, "This certificate is not currently awaiting Incharge Academic Cell approval.")
+    cert.incharge_approved_by = user.id
+    cert.incharge_approved_at = _now()
+    cert.status = "dpgs_pending"
+    await db.commit()
+    return {"message": "Approved.", "status": cert.status}
+
+
+@router.post("/finalcert/{certificate_id}/dpgs-approve")
+async def finalcert_dpgs_approve(certificate_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.DPGS))):
+    cert = await _get_final_certificate_by_id(certificate_id, db)
+    if not cert:
+        raise HTTPException(404, "Certificate not found.")
+    if cert.status != "dpgs_pending":
+        raise HTTPException(400, "This certificate is not currently awaiting DPGS approval.")
+    now = _now()
+    cert.dpgs_approved_by = user.id
+    cert.dpgs_approved_at = now
+    cert.approved_at = now
+    cert.status = "approved"
+    t = await _get_thesis(cert.thesis_id, db)
+    await _render_final_cert_pdf(t, cert, user.id, db)
+    await db.commit()
+    return {"message": "Approved.", "status": cert.status}
+
+
+@router.post("/finalcert/{certificate_id}/revert")
+async def finalcert_revert(certificate_id: UUID, body: RevertIn, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(*_APPROVER_ROLES))):
+    """Any one currently-authorized approver (Major Advisor at `ma_pending`, a real committee
+    signer at `committee_pending`, the student's own-department HOD at `hod_pending`, Incharge
+    at `incharge_pending`, or DPGS at `dpgs_pending`) may single-handedly revert, mirroring every
+    other revert convention in this repository. Terminal for that row — the driving role
+    (student for PG-25(A), Major Advisor for Viva) must regenerate to try again."""
+    remark = (body.remark or "").strip()
+    if not remark:
+        raise HTTPException(400, "A remark is required when reverting.")
+    cert = await _get_final_certificate_by_id(certificate_id, db)
+    if not cert:
+        raise HTTPException(404, "Certificate not found.")
+    authorized = False
+    if cert.status == "ma_pending" and cert.ma_id == user.id:
+        authorized = True
+    elif cert.status == "committee_pending" and _my_final_cert_signature(cert, user) is not None:
+        authorized = True
+    elif cert.status == "hod_pending" and user.active_role == UserRole.HOD:
+        dept_id = await resolve_student_department_id(cert.thesis.student_id, db)
+        authorized = bool(dept_id and user.active_department_id and dept_id == user.active_department_id)
+    elif cert.status == "incharge_pending" and user.active_role == UserRole.INCHARGE_ACADEMIC_CELL:
+        authorized = True
+    elif cert.status == "dpgs_pending" and user.active_role == UserRole.DPGS:
+        authorized = True
+    if not authorized:
+        raise HTTPException(404, "Certificate not found.")
+    cert.status = "reverted"
+    cert.reverted_by = user.id
+    cert.reverted_at = _now()
+    cert.revert_remark = remark
+    await db.commit()
+    return {"message": "Reverted for regeneration.", "status": cert.status}
+
+
+@router.get("/finalcert/mine/home")
+async def finalcert_home(kind: Optional[str] = None, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.FACULTY, UserRole.HOD))):
+    """Approved certificates (either kind, or filtered via `?kind=pg25a`/`?kind=viva`) the
+    caller is an actual required Advisory Committee signer on."""
+    q = (
+        select(FinalCertificate).options(
+            selectinload(FinalCertificate.signatures), selectinload(FinalCertificate.thesis).selectinload(Thesis.student),
+        ).join(FinalCertificateSignature, FinalCertificateSignature.certificate_id == FinalCertificate.id)
+        .where(FinalCertificateSignature.faculty_id == user.id, FinalCertificate.status == "approved")
+    )
+    if kind in FINAL_CERTIFICATE_KINDS:
+        q = q.where(FinalCertificate.kind == kind)
+    certs = (await db.execute(q)).unique().scalars().all()
+    return [{
+        "sl_no": i, "certificate_id": str(c.id), "kind": c.kind, "thesis_id": str(c.thesis_id),
+        "student_name": c.thesis.student.full_name, "student_roll": c.thesis.student.student_roll,
+        "status": c.status, "status_label": "Approved",
+    } for i, c in enumerate(certs, start=1)]
+
+
+@router.get("/finalcert/mine/pending")
+async def finalcert_pending(kind: Optional[str] = None, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.FACULTY, UserRole.HOD))):
+    """Certificates awaiting the caller's OWN required Advisory Committee signature."""
+    q = (
+        select(FinalCertificateSignature).options(
+            selectinload(FinalCertificateSignature.certificate).selectinload(FinalCertificate.thesis).selectinload(Thesis.student),
+        ).join(FinalCertificate, FinalCertificate.id == FinalCertificateSignature.certificate_id)
+        .where(FinalCertificateSignature.faculty_id == user.id, FinalCertificateSignature.status == "pending", FinalCertificate.status == "committee_pending")
+    )
+    if kind in FINAL_CERTIFICATE_KINDS:
+        q = q.where(FinalCertificate.kind == kind)
+    sigs = (await db.execute(q)).unique().scalars().all()
+    rows = []
+    for i, sig in enumerate(sigs, start=1):
+        c = sig.certificate
+        rows.append({
+            "sl_no": i, "certificate_id": str(c.id), "kind": c.kind, "thesis_id": str(c.thesis_id),
+            "student_roll": c.thesis.student.student_roll, "student_name": c.thesis.student.full_name,
+            "event_at": _iso(c.event_at), "event_at_ist": _ist_str(c.event_at),
+            "status": c.status, "status_label": _FINAL_CERT_STATUS_LABELS.get(c.status, c.status),
+        })
+    return rows
+
+
+@router.get("/finalcert/ma-pending")
+async def finalcert_ma_pending(db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.FACULTY, UserRole.HOD))):
+    """PG-25(A) certificates awaiting the caller's OWN Major Advisor approval."""
+    certs = (await db.execute(
+        select(FinalCertificate).options(
+            selectinload(FinalCertificate.thesis).selectinload(Thesis.student),
+        ).where(FinalCertificate.ma_id == user.id, FinalCertificate.status == "ma_pending", FinalCertificate.kind == "pg25a")
+    )).unique().scalars().all()
+    return [{
+        "sl_no": i, "certificate_id": str(c.id), "thesis_id": str(c.thesis_id),
+        "student_roll": c.thesis.student.student_roll, "student_name": c.thesis.student.full_name,
+        "status": c.status, "status_label": _FINAL_CERT_STATUS_LABELS.get(c.status, c.status),
+    } for i, c in enumerate(certs, start=1)]
+
+
+@router.get("/finalcert/hod")
+async def finalcert_hod_inbox(kind: Optional[str] = None, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.HOD))):
+    """HOD's final-inbox for PG-25(A)/Viva — own department only, `hod_pending` only."""
+    if not user.active_department_id:
+        return []
+    theses = (await db.execute(
+        select(Thesis).options(*_LOAD_OPTIONS).join(User, User.id == Thesis.student_id)
+        .where(User.department_id == user.active_department_id, Thesis.thesis_type == "final")
+    )).unique().scalars().all()
+    kinds = (kind,) if kind in FINAL_CERTIFICATE_KINDS else FINAL_CERTIFICATE_KINDS
+    rows = []
+    for t in theses:
+        for k in kinds:
+            c = await _get_final_certificate(t.id, k, db)
+            if c and c.status == "hod_pending":
+                rows.append(c)
+    rows.sort(key=lambda c: c.event_at)
+    return [{
+        "sl_no": i, "certificate_id": str(c.id), "kind": c.kind, "thesis_id": str(c.thesis_id),
+        "student_roll": c.thesis.student.student_roll if c.thesis.student else None,
+        "event_at": _iso(c.event_at), "event_at_ist": _ist_str(c.event_at),
+        "status": c.status, "status_label": _FINAL_CERT_STATUS_LABELS.get(c.status, c.status),
+    } for i, c in enumerate(rows, start=1)]
+
+
+@router.get("/finalcert/incharge")
+async def finalcert_incharge_inbox(kind: Optional[str] = None, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.INCHARGE_ACADEMIC_CELL))):
+    """Incharge Academic Cell's inbox — role-only (single-holder), no department scoping."""
+    q = select(FinalCertificate).options(selectinload(FinalCertificate.thesis).selectinload(Thesis.student)).where(FinalCertificate.status == "incharge_pending")
+    if kind in FINAL_CERTIFICATE_KINDS:
+        q = q.where(FinalCertificate.kind == kind)
+    rows = (await db.execute(q)).unique().scalars().all()
+    return [{
+        "sl_no": i, "certificate_id": str(c.id), "kind": c.kind, "thesis_id": str(c.thesis_id),
+        "student_roll": c.thesis.student.student_roll, "student_name": c.thesis.student.full_name,
+        "status": c.status, "status_label": _FINAL_CERT_STATUS_LABELS.get(c.status, c.status),
+    } for i, c in enumerate(rows, start=1)]
+
+
+@router.get("/finalcert/dpgs")
+async def finalcert_dpgs_inbox(kind: Optional[str] = None, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.DPGS))):
+    """DPGS's inbox — role-only (single-holder), no department scoping."""
+    q = select(FinalCertificate).options(selectinload(FinalCertificate.thesis).selectinload(Thesis.student)).where(FinalCertificate.status == "dpgs_pending")
+    if kind in FINAL_CERTIFICATE_KINDS:
+        q = q.where(FinalCertificate.kind == kind)
+    rows = (await db.execute(q)).unique().scalars().all()
+    return [{
+        "sl_no": i, "certificate_id": str(c.id), "kind": c.kind, "thesis_id": str(c.thesis_id),
+        "student_roll": c.thesis.student.student_roll, "student_name": c.thesis.student.full_name,
+        "status": c.status, "status_label": _FINAL_CERT_STATUS_LABELS.get(c.status, c.status),
+    } for i, c in enumerate(rows, start=1)]
+
+
+@router.get("/finalcert/{certificate_id}")
+async def get_final_cert_detail(
+    certificate_id: UUID, db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(UserRole.STUDENT, UserRole.HOD, UserRole.FACULTY, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS, UserRole.SUPER_ADMIN)),
+):
+    cert = await _get_final_certificate_by_id(certificate_id, db)
+    if not cert:
+        raise HTTPException(404, "Certificate not found.")
+    authorized = user.active_role == UserRole.SUPER_ADMIN or cert.ma_id == user.id or _my_final_cert_signature(cert, user) is not None
+    if not authorized and user.active_role == UserRole.STUDENT:
+        authorized = cert.thesis.student_id == user.id
+    if not authorized and user.active_role == UserRole.HOD:
+        dept_id = await resolve_student_department_id(cert.thesis.student_id, db)
+        authorized = bool(dept_id and user.active_department_id and dept_id == user.active_department_id)
+    if not authorized and user.active_role in (UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS):
+        authorized = True
+    if not authorized:
+        raise HTTPException(404, "Certificate not found.")
+    return {
+        "id": str(cert.id), "kind": cert.kind, "thesis_id": str(cert.thesis_id), "status": cert.status,
+        "status_label": _FINAL_CERT_STATUS_LABELS.get(cert.status, cert.status),
+        "attempt_number": cert.attempt_number, "version_number": cert.version_number,
+        "event_at": _iso(cert.event_at), "event_at_ist": _ist_str(cert.event_at),
+        "student_name": cert.thesis.student.full_name, "student_roll": cert.thesis.student.student_roll,
+        "ma_name": _person_name(cert.ma), "ma_acted_at": _iso(cert.ma_acted_at),
+        "hod_approved_by": _person_name(cert.hod_approver), "hod_approved_at": _iso(cert.hod_approved_at),
+        "incharge_approved_at": _iso(cert.incharge_approved_at),
+        "dpgs_approved_by": _person_name(cert.dpgs_approver), "approved_at": _iso(cert.approved_at),
+        "revert_remark": cert.revert_remark, "reverted_at": _iso(cert.reverted_at),
+        "signatures": [{
+            "role_label": s.role_snapshot, "name": _person_name(s.faculty), "status": s.status,
+            "signed_at": _iso(s.signed_at), "is_me": s.faculty_id == user.id,
+        } for s in cert.signatures],
+    }
+
+
 @router.post("/{thesis_id}/approval/approve")
 async def approve_stage(
     thesis_id: UUID, body: ApproveIn, request: Request, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(*_APPROVER_ROLES)),
@@ -1595,7 +2320,10 @@ async def approve_stage(
     if stage.stage_type == "librarian" and (t.plagiarism_library_percent is None or not any(d.document_type == "plagiarism_library_report" for d in t.documents)):
         raise HTTPException(400, "Enter the Library plagiarism percentage and upload the Library plagiarism report before approving.")
 
-    if stage.stage_type == "major_advisor" and not any(d.document_type == "certificate_i_pg27" and d.cycle_id == cycle.id for d in t.documents):
+    # Certificate I is an INITIAL-Thesis-only requirement (Section 25 of the Final Thesis
+    # rules) — it is not part of the Final Thesis document set and must never gate a Final
+    # Thesis's Major Advisor stage.
+    if stage.stage_type == "major_advisor" and t.thesis_type == "initial" and not any(d.document_type == "certificate_i_pg27" and d.cycle_id == cycle.id for d in t.documents):
         raise HTTPException(400, "Generate Certificate I (Form No. PG 27) for this submission before approving.")
 
     if stage.stage_type in _SIGNATORY_STAGES:
@@ -1610,6 +2338,13 @@ async def approve_stage(
         t.status = "incharge_pending"
     elif stage.stage_type == "incharge_academic_cell":
         t.status = "dpgs_pending"
+    elif stage.stage_type == "dpgs" and t.thesis_type == "final":
+        # Final Thesis has NO External Examiner stage (Section 21/27 of the Final Thesis rules)
+        # — DPGS approval is the last stage in the chain, full stop.
+        t.status = "approved"
+        t.approved_at = now
+        cycle.status = "approved"
+        cycle.completed_at = now
     elif stage.stage_type == "dpgs":
         assignments = (await db.execute(
             select(ExternalExaminerAssignment).where(ExternalExaminerAssignment.student_id == t.student_id, ExternalExaminerAssignment.status == "active")

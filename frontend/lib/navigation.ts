@@ -98,6 +98,11 @@ export const NAV: NavItem[] = [
   // seminar outcome for their own department; Faculty sign as Advisory Committee members. HOD
   // can also be an Advisory Committee member on OTHER students' theses, hence both roles here.
   { label: "Thesis Seminar Certificate (PG 25)", icon: ClipboardList, href: "/thesis/pg25", roles: ["hod","faculty"] },
+  // Final Thesis's two independent generated-document workflows (Form PG-25(A), Viva Voce
+  // Certificate) — Major Advisor/Committee (faculty, possibly also HOD holding a committee
+  // seat), HOD final-department approval, and (new for Final Thesis) Incharge Academic Cell /
+  // DPGS, who never had an Initial-Thesis-PG25 equivalent screen.
+  { label: "Final Thesis Approvals", icon: ClipboardList, href: "/thesis/final-approvals", roles: ["hod","faculty","incharge_academic_cell","dpgs"] },
   { label: "My Evaluations",   icon: ClipboardCheck,  href: "/thesis/evaluations", roles: ["external_examiner"] },
   // Student Migration — the student's own page (create/track their applications; at most one
   // active at a time, backend-enforced) and the single Registrar's approval inbox. No other

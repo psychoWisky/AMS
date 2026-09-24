@@ -1,7 +1,7 @@
 "use client";
-// Shared building blocks for Initial Thesis Management (the student's own page + the shared
-// approver inbox). Everything shown here is returned by the backend; nothing is derived or
-// trusted client-side. Final Thesis is out of scope — nothing here assumes it exists.
+// Shared building blocks for Thesis Management (Initial AND Final — the student's own page +
+// the shared approver inbox). Everything shown here is returned by the backend; nothing is
+// derived or trusted client-side.
 
 export interface ThesisDocumentInfo {
   id: string; version: number; original_filename: string; size_bytes: number;
@@ -24,13 +24,21 @@ export interface Pg25Summary {
   ma_signed_at: string | null; approved_at: string | null;
   signatures_completed: number; signatures_required: number;
 }
+export interface FinalCertSummary {
+  id: string; kind: "pg25a" | "viva"; status: string; status_label: string;
+  attempt_number: number; version_number: number;
+  event_at: string | null; event_at_ist: string | null;
+  student_signed_at: string | null; ma_acted_at: string | null; approved_at: string | null;
+  signatures_completed: number; signatures_required: number;
+}
 export interface ThesisDetail {
-  id: string; thesis_type: string; status: string; status_label: string; title: string | null;
+  id: string; thesis_type: "initial" | "final"; status: string; status_label: string; title: string | null;
   student: { name: string; roll_no: string | null; degree_name: string | null; department_name: string | null; college_name: string | null };
   plagiarism_student_percent: number | null; plagiarism_software_name: string | null; plagiarism_library_percent: number | null;
   abstract: string | null;
   documents: Record<string, ThesisDocumentInfo | null>;
   pg25: Pg25Summary | null;
+  pg25a: FinalCertSummary | null; viva: FinalCertSummary | null;
   is_owner: boolean; can_edit: boolean;
   revert_info: RevertInfo | null;
   my_pending_stage: { stage_type: string; role_label: string; requires_otp: boolean } | null;
@@ -39,10 +47,9 @@ export interface ThesisDetail {
   external_report?: ExternalReportRow[]; external_evaluation_completed?: boolean;
 }
 
-// The final 7 Student Documents (confirmed business decision — Annexure-IV REMOVED, no longer
-// a required Initial Thesis document). PG25 and Certificate I are system-generated only — a
-// student never uploads either; they simply appear here once available (Section 16/23 of the
-// confirmed rules).
+// Initial Thesis's 7 Student Documents (Annexure-IV REMOVED). PG25 and Certificate I are
+// system-generated only — a student never uploads either; they simply appear here once
+// available.
 export const STUDENT_DOCUMENT_LABELS: Record<string, string> = {
   thesis_file: "Thesis File",
   plagiarism_student_report: "Plagiarism Report (Student)",
@@ -53,11 +60,22 @@ export const STUDENT_DOCUMENT_LABELS: Record<string, string> = {
   seminar_certificate_pg25: "Thesis Seminar Certificate (Form No. PG 25)",
   certificate_i_pg27: "Certificate I (Form No. PG 27)",
 };
+// Final Thesis's exactly-4 Student Documents (no Certificate I, no Annexure-IV, no External
+// Examiner documents). PG-05(A)/(B) are plain student uploads; PG-25(A) is student-generated;
+// the Viva Voce Certificate is Major-Advisor-generated.
+export const FINAL_DOCUMENT_LABELS: Record<string, string> = {
+  pg05a: "Form No. PG-05(A)", pg05b: "Form No. PG-05(B)",
+  pg25a_certificate: "Form No. PG-25(A)", viva_voce_certificate: "Viva Voce Certificate",
+};
 // These support "print"/view framing in the UI (generated business-form documents).
-export const PRINTABLE_DOCUMENT_TYPES = new Set(["declaration_annexure1", "seminar_certificate_pg25", "certificate_i_pg27"]);
-// System-generated only — never a plain student "Upload" button; Declaration additionally
-// gets a "Generate" action (Section 6/7), PG25/Certificate I get no student-facing action at all.
-export const SYSTEM_GENERATED_DOCUMENT_TYPES = new Set(["seminar_certificate_pg25", "certificate_i_pg27"]);
+export const PRINTABLE_DOCUMENT_TYPES = new Set([
+  "declaration_annexure1", "seminar_certificate_pg25", "certificate_i_pg27",
+  "pg25a_certificate", "viva_voce_certificate",
+]);
+// System-generated only — never a plain student "Upload" button.
+export const SYSTEM_GENERATED_DOCUMENT_TYPES = new Set([
+  "seminar_certificate_pg25", "certificate_i_pg27", "pg25a_certificate", "viva_voce_certificate",
+]);
 
 export function formatDateTime(iso: string | null | undefined): string {
   if (!iso) return "—";

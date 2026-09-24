@@ -6,16 +6,19 @@ import { toast } from "sonner";
 import { FileText, Loader2, Plus, Upload, Eye, X } from "lucide-react";
 import {
   ExternalReportTable, RevertNotice, SignatureTable, StageTimeline, StudentInfoCard, ThesisStatusBadge,
-  STUDENT_DOCUMENT_LABELS, PRINTABLE_DOCUMENT_TYPES, SYSTEM_GENERATED_DOCUMENT_TYPES, apiErrorMessage, type ThesisDetail,
+  STUDENT_DOCUMENT_LABELS, FINAL_DOCUMENT_LABELS, PRINTABLE_DOCUMENT_TYPES, SYSTEM_GENERATED_DOCUMENT_TYPES, apiErrorMessage, type ThesisDetail,
 } from "@/components/ui/thesis-parts";
 
-// The student's own Thesis Management page. There is at most ONE Initial Thesis per student
-// (backend-enforced by a database partial unique index — this page never assumes more).
-// Final Thesis is explicitly out of scope; nothing here creates one.
+// The student's own Thesis Management page. There is at most ONE Initial Thesis and at most
+// ONE Final Thesis per student (both backend-enforced by database partial unique indexes). The
+// server alone decides which type a new `POST /thesis` call creates — this page never sends a
+// thesis_type and never assumes a Final Thesis is creatable; it just lets the backend accept or
+// reject the request and shows the result.
 
 interface ThesisRow { id: string; title: string | null; thesis_type_label: string; status: string; status_label: string }
 
 const STUDENT_DOC_TYPES = Object.keys(STUDENT_DOCUMENT_LABELS);
+const FINAL_DOC_TYPES = Object.keys(FINAL_DOCUMENT_LABELS);
 
 export default function ThesisManagementPage() {
   const qc = useQueryClient();
@@ -53,12 +56,12 @@ export default function ThesisManagementPage() {
   const create = useMutation({
     mutationFn: () => api.post("/thesis", titleInput.trim() ? { title: titleInput.trim() } : {}),
     onSuccess: (res) => {
-      toast.success("Initial Thesis draft created.");
+      toast.success(res.data?.message || "Thesis draft created.");
       qc.invalidateQueries({ queryKey: ["ams-thesis-mine"] });
       setShowCreate(false); setTitleInput("");
       setOpenId(res.data.id);
     },
-    onError: (e) => toast.error(apiErrorMessage(e, "Could not create your Initial Thesis.")),
+    onError: (e) => toast.error(apiErrorMessage(e, "Could not create your Thesis.")),
   });
 
   // The Thesis Title defaults to the student's own PPW research title when one exists (best-effort —
@@ -101,10 +104,26 @@ export default function ThesisManagementPage() {
     onError: (e) => toast.error(apiErrorMessage(e, "Could not generate the Student Declaration.")),
   });
 
+  const generatePg25a = useMutation({
+    mutationFn: () => api.post(`/thesis/${openId}/pg25a/generate`),
+    onSuccess: () => { toast.success("Form PG-25(A) generated and signed — click Submit to route it to your Major Advisor."); refetch(); },
+    onError: (e) => toast.error(apiErrorMessage(e, "Could not generate Form PG-25(A).")),
+  });
+  const submitPg25a = useMutation({
+    mutationFn: () => api.post(`/thesis/${openId}/pg25a/submit`),
+    onSuccess: () => { toast.success("Form PG-25(A) submitted to your Major Advisor."); refetch(); },
+    onError: (e) => toast.error(apiErrorMessage(e, "Could not submit Form PG-25(A).")),
+  });
+  const regeneratePg25a = useMutation({
+    mutationFn: () => api.post(`/thesis/${openId}/pg25a/regenerate`),
+    onSuccess: () => { toast.success("Form PG-25(A) regenerated — click Submit to sign and re-route it."); refetch(); },
+    onError: (e) => toast.error(apiErrorMessage(e, "Could not regenerate Form PG-25(A).")),
+  });
+
   const submit = useMutation({
     mutationFn: () => api.post(`/thesis/${openId}/submit`),
-    onSuccess: () => { toast.success("Initial Thesis submitted for approval."); refetch(); qc.invalidateQueries({ queryKey: ["ams-thesis-mine"] }); },
-    onError: (e) => toast.error(apiErrorMessage(e, "Could not submit your Initial Thesis.")),
+    onSuccess: (res) => { toast.success(res.data?.message || "Thesis submitted for approval."); refetch(); qc.invalidateQueries({ queryKey: ["ams-thesis-mine"] }); },
+    onError: (e) => toast.error(apiErrorMessage(e, "Could not submit your Thesis.")),
   });
 
   function openDetail(id: string) {
@@ -120,19 +139,23 @@ export default function ThesisManagementPage() {
     fileInputs.current[type]?.click();
   }
 
-  const hasThesis = mine.length > 0;
+  // The backend alone decides what a new creation becomes (Initial first, Final only once
+  // Initial is approved) — this page just offers the action whenever fewer than 2 Thesis rows
+  // exist yet, and surfaces the backend's own rejection message (e.g. "must be approved first")
+  // via a toast if the student isn't actually eligible yet.
+  const canCreateAnother = mine.length < 2;
 
   return (
     <div className="p-6 w-full max-w-5xl space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2"><FileText size={24} className="text-[#0D6E6E]" />Thesis Management</h1>
-          <p className="text-gray-700 text-base mt-1">Prepare and track your Initial Thesis application.</p>
+          <p className="text-gray-700 text-base mt-1">Prepare and track your Initial and Final Thesis applications.</p>
         </div>
-        {!hasThesis && (
+        {canCreateAnother && (
           <button onClick={openCreate}
             className="flex items-center gap-2 px-5 py-2.5 bg-[#0D6E6E] text-white rounded-xl font-semibold hover:bg-[#178F8F] disabled:opacity-50">
-            <Plus size={16} /> Upload Thesis
+            <Plus size={16} /> {mine.length === 0 ? "Start Initial Thesis" : "Start Final Thesis"}
           </button>
         )}
       </div>
@@ -141,7 +164,7 @@ export default function ThesisManagementPage() {
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={() => setShowCreate(false)}>
           <div className="bg-white rounded-2xl max-w-lg w-full p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between">
-              <h3 className="text-lg font-bold text-gray-900">Start Your Initial Thesis</h3>
+              <h3 className="text-lg font-bold text-gray-900">{mine.length === 0 ? "Start Your Initial Thesis" : "Start Your Final Thesis"}</h3>
               <button onClick={() => setShowCreate(false)} aria-label="Close"><X size={20} className="text-gray-400 hover:text-gray-700" /></button>
             </div>
             <div>
@@ -165,7 +188,7 @@ export default function ThesisManagementPage() {
       <section className="space-y-2">
         <h2 className="text-lg font-bold text-gray-900">Thesis Applications</h2>
         {isLoading ? <Loader2 className="animate-spin text-gray-500" /> : mine.length === 0 ? (
-          <p className="text-sm text-gray-600">You have not started an Initial Thesis yet.</p>
+          <p className="text-sm text-gray-600">You have not started your Initial Thesis yet.</p>
         ) : (
           <div className="bg-white rounded-2xl border border-gray-200 overflow-x-auto">
             <table className="w-full text-sm">
@@ -273,29 +296,50 @@ export default function ThesisManagementPage() {
             {/* 2. Student Documents */}
             <section className="space-y-3">
               <h3 className="text-lg font-bold text-gray-900">2. Student Documents</h3>
-              {detail.pg25 && detail.pg25.status !== "approved" && (
+              {detail.thesis_type === "initial" && detail.pg25 && detail.pg25.status !== "approved" && (
                 <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 text-xs text-amber-800">
                   Thesis Seminar Certificate (PG 25): {detail.pg25.status_label}
                   {detail.pg25.status === "committee_pending" && ` (${detail.pg25.signatures_completed}/${detail.pg25.signatures_required} Advisory Committee signature(s) collected)`}.
                   It will appear here once fully approved by your Major Advisor, Advisory Committee and HOD, and is required before you can submit your Initial Thesis.
                 </div>
               )}
-              {!detail.pg25 && (
+              {detail.thesis_type === "initial" && !detail.pg25 && (
                 <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 text-xs text-amber-800">
                   Your Major Advisor has not yet recorded your Thesis Seminar Certificate (PG 25). Ask them to record the seminar outcome before you can submit your Initial Thesis.
                 </div>
               )}
+              {detail.thesis_type === "final" && (
+                <>
+                  {detail.pg25a && detail.pg25a.status !== "approved" && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 text-xs text-amber-800">
+                      Form PG-25(A): {detail.pg25a.status_label}. It will appear here once fully approved by your Major Advisor, Advisory Committee, HOD, Incharge Academic Cell and DPGS.
+                    </div>
+                  )}
+                  {detail.viva && detail.viva.status !== "approved" && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 text-xs text-amber-800">
+                      Viva Voce Certificate: {detail.viva.status_label}. Your Major Advisor generates this once your offline viva is complete.
+                    </div>
+                  )}
+                  {!detail.viva && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 text-xs text-amber-800">
+                      Your Major Advisor has not yet recorded your Viva outcome.
+                    </div>
+                  )}
+                </>
+              )}
               <div className="bg-white rounded-2xl border border-gray-200 divide-y divide-gray-100">
-                {STUDENT_DOC_TYPES.filter((t) => t !== "thesis_file" && t !== "plagiarism_student_report").map((type) => {
+                {(detail.thesis_type === "final" ? FINAL_DOC_TYPES : STUDENT_DOC_TYPES.filter((t) => t !== "thesis_file" && t !== "plagiarism_student_report")).map((type) => {
                   const doc = detail.documents[type];
+                  const label = detail.thesis_type === "final" ? FINAL_DOCUMENT_LABELS[type] : STUDENT_DOCUMENT_LABELS[type];
                   const printable = PRINTABLE_DOCUMENT_TYPES.has(type);
                   const systemGenerated = SYSTEM_GENERATED_DOCUMENT_TYPES.has(type);
                   const isDeclaration = type === "declaration_annexure1";
-                  const accept = type === "thesis_file" ? ".docx" : ".pdf";
+                  const isPg25a = type === "pg25a_certificate";
+                  const accept = ".pdf";
                   return (
                     <div key={type} className="flex items-center justify-between px-5 py-3">
                       <div>
-                        <p className="text-sm font-semibold text-gray-800">{STUDENT_DOCUMENT_LABELS[type]}</p>
+                        <p className="text-sm font-semibold text-gray-800">{label}</p>
                         {doc ? <p className="text-xs text-gray-500">{doc.original_filename}</p> : (
                           <p className="text-xs text-gray-400">{systemGenerated ? "Not yet available" : "Not uploaded"}</p>
                         )}
@@ -306,6 +350,24 @@ export default function ThesisManagementPage() {
                           <button onClick={() => generateDeclaration.mutate()} disabled={generateDeclaration.isPending}
                             className="flex items-center gap-1 px-3 py-1.5 bg-gray-700 text-white rounded-lg text-xs font-semibold hover:bg-gray-800 disabled:opacity-50">
                             {generateDeclaration.isPending ? "Generating…" : "Generate"}
+                          </button>
+                        )}
+                        {detail.can_edit && isPg25a && detail.pg25a?.status === "reverted" && (
+                          <button onClick={() => regeneratePg25a.mutate()} disabled={regeneratePg25a.isPending}
+                            className="px-3 py-1.5 bg-amber-600 text-white rounded-lg text-xs font-semibold hover:bg-amber-700 disabled:opacity-50">
+                            {regeneratePg25a.isPending ? "Regenerating…" : "Regenerate"}
+                          </button>
+                        )}
+                        {detail.can_edit && isPg25a && !detail.pg25a && (
+                          <button onClick={() => generatePg25a.mutate()} disabled={generatePg25a.isPending}
+                            className="flex items-center gap-1 px-3 py-1.5 bg-gray-700 text-white rounded-lg text-xs font-semibold hover:bg-gray-800 disabled:opacity-50">
+                            {generatePg25a.isPending ? "Generating…" : "Generate"}
+                          </button>
+                        )}
+                        {detail.can_edit && isPg25a && detail.pg25a?.status === "generated" && (
+                          <button onClick={() => submitPg25a.mutate()} disabled={submitPg25a.isPending}
+                            className="px-3 py-1.5 bg-[#0D6E6E] text-white rounded-lg text-xs font-semibold hover:bg-[#178F8F] disabled:opacity-50">
+                            {submitPg25a.isPending ? "Submitting…" : "Submit"}
                           </button>
                         )}
                         {detail.can_edit && !systemGenerated && (
@@ -344,12 +406,22 @@ export default function ThesisManagementPage() {
                   className="px-4 py-2 bg-[#0D6E6E] text-white rounded-xl text-sm font-semibold hover:bg-[#178F8F] disabled:opacity-50">
                   {saveDetails.isPending ? "Saving…" : "Save Changes"}
                 </button>
-                <button onClick={() => { if (confirm("Submit this Initial Thesis for approval? You will not be able to edit it until it is reverted.")) submit.mutate(); }}
-                  disabled={submit.isPending || detail.pg25?.status !== "approved"}
-                  title={detail.pg25?.status !== "approved" ? "Your Thesis Seminar Certificate (PG 25) must be fully approved before you can submit." : undefined}
-                  className="px-4 py-2 bg-green-600 text-white rounded-xl text-sm font-semibold hover:bg-green-700 disabled:opacity-50">
-                  {submit.isPending ? "Submitting…" : "Submit Thesis"}
-                </button>
+                {(() => {
+                  const gateOk = detail.thesis_type === "final"
+                    ? detail.pg25a?.status === "approved" && detail.viva?.status === "approved"
+                    : detail.pg25?.status === "approved";
+                  const gateMessage = detail.thesis_type === "final"
+                    ? "Form PG-25(A) and your Viva Voce Certificate must both be fully approved before you can submit."
+                    : "Your Thesis Seminar Certificate (PG 25) must be fully approved before you can submit.";
+                  return (
+                    <button onClick={() => { if (confirm(`Submit this ${detail.thesis_type === "final" ? "Final" : "Initial"} Thesis for approval? You will not be able to edit it until it is reverted.`)) submit.mutate(); }}
+                      disabled={submit.isPending || !gateOk}
+                      title={!gateOk ? gateMessage : undefined}
+                      className="px-4 py-2 bg-green-600 text-white rounded-xl text-sm font-semibold hover:bg-green-700 disabled:opacity-50">
+                      {submit.isPending ? "Submitting…" : `Submit ${detail.thesis_type === "final" ? "Final" : "Initial"} Thesis`}
+                    </button>
+                  );
+                })()}
               </div>
             )}
           </div>

@@ -34,6 +34,7 @@ from app.core.security import create_access_token
 from app.db.base import AsyncSessionLocal
 from app.main import app
 from app.models.audit import AuditLog
+from app.models.enrollment import CourseRegistration
 from app.models.external_examiner import (
     ExternalExaminer, ExternalExaminerApprovalCycle, ExternalExaminerAssignment,
     ExternalExaminerProposal, ExternalExaminerSelection, ExternalExaminerSelectionResult,
@@ -41,6 +42,7 @@ from app.models.external_examiner import (
 from app.models.ppw import Ppw
 from app.models.research import AdvisoryCommittee, CommitteeMember
 from app.models.thesis import (
+    FinalCertificate, FinalCertificateSignature,
     Thesis, ThesisApprovalCycle, ThesisApprovalStage, ThesisDocument,
     ThesisExternalEvaluation, ThesisSeminarCertificate, ThesisSeminarCertificateSignature, ThesisSignature,
 )
@@ -57,7 +59,8 @@ FAILED: list[tuple[str, str]] = []
 U: dict[str, uuid.UUID] = {}           # user key -> id
 TOK: dict[str, str] = {}               # token key -> access token
 S: dict = {}                           # scratch
-TH: dict[str, str] = {}                # student key -> thesis id
+TH: dict[str, str] = {}                # student key -> Initial thesis id
+FINAL_TH: dict[str, str] = {}          # student key -> Final thesis id
 COMMITTEE: dict[str, uuid.UUID] = {}   # student key -> AdvisoryCommittee id
 MEMBER: dict[str, uuid.UUID] = {}      # "student:facultykey" -> CommitteeMember id
 EX: dict[str, uuid.UUID] = {}          # examiner key -> ExternalExaminer id
@@ -274,9 +277,9 @@ async def _submit(student_key: str, expect=200) -> httpx.Response:
 # MA Submit there is nothing left for the Advisory Committee to do and PG25 goes straight to
 # `hod_pending`. `_MA_KEY`/`_PG25_HOD` cover the students whose Major Advisor/department HOD
 # are NOT "ma1"/"hod1".
-_PG25_COMMITTEE_SIGNERS = {"s_lock": ["mem_lock"]}
+_PG25_COMMITTEE_SIGNERS = {"s_lock": ["mem_lock"], "s_final2": ["mem_lock"]}
 _PG25_HOD = {"s_deptb": "hod2"}
-_MA_KEY = {"s_deptb": "ma_d2", "s_lock": "ma_lock"}
+_MA_KEY = {"s_deptb": "ma_d2", "s_lock": "ma_lock", "s_final2": "ma_lock"}
 
 
 def _ma_key_for(student_key: str) -> str:
@@ -322,6 +325,73 @@ async def _approve_ma(student_key: str) -> None:
     ma_key = _ma_key_for(student_key)
     await _generate_cert_i(student_key, ma_key)
     await _approve(TH[student_key], TOK[ma_key])
+
+
+_FINAL_HOD = {"s_final": "hod1", "s_final2": "hod1"}
+_FINAL_LIBRARIAN = {"s_final": "librarian1", "s_final2": "librarian1"}
+_FINAL_EXAMINER = {"s_final": "final", "s_final2": "final"}
+
+
+async def _complete_initial_thesis(student_key: str) -> None:
+    """Drives `student_key`'s Initial Thesis all the way to `approved` (Section 2 of the
+    confirmed Final Thesis rules: Final Thesis creation is only reachable once Initial Thesis
+    reaches its required approved state) — reusing every existing helper exactly as the
+    Initial Thesis suite already does, end to end: PG25 -> submit -> MA (+Certificate I) -> HOD
+    -> Librarian -> Incharge -> DPGS (send for evaluation) -> examiner report -> DPGS final."""
+    ma_key = _ma_key_for(student_key)
+    hod_key = _FINAL_HOD.get(student_key, "hod1")
+    librarian_key = _FINAL_LIBRARIAN.get(student_key, "librarian1")
+    examiner_key = _FINAL_EXAMINER.get(student_key, "shared")
+    if student_key not in TH:
+        await _create_thesis(student_key)
+    status = (await _row(TH[student_key])).status
+    if status == "approved":
+        return
+    if f"{examiner_key}:{student_key}" not in ASSIGN:
+        await _mk_assignment(examiner_key, student_key)
+    if status in ("draft", "reverted"):
+        await _make_submittable(student_key)
+        await _complete_pg25(student_key)
+        await _submit(student_key)
+        status = "major_advisor_pending"
+    if status == "major_advisor_pending":
+        await _approve_ma(student_key)
+        status = "hod_pending"
+    if status == "hod_pending":
+        await _approve(TH[student_key], TOK[hod_key])
+        status = "librarian_pending"
+    if status == "librarian_pending":
+        await _set_library_data(TH[student_key], TOK[librarian_key])
+        await _approve(TH[student_key], TOK[librarian_key])
+        status = "incharge_pending"
+    if status == "incharge_pending":
+        await _approve(TH[student_key], TOK["incharge"])
+        status = "dpgs_pending"
+    if status == "dpgs_pending":
+        await _approve(TH[student_key], TOK["dpgs"])
+        status = "external_examiner_pending"
+    if status == "external_examiner_pending":
+        evals = await _evaluations(TH[student_key])
+        ev = next(e for e in evals if e.assignment_id == ASSIGN[f"{examiner_key}:{student_key}"])
+        r = await _call("POST", f"/thesis/{TH[student_key]}/evaluations/{ev.id}/report", TOK[f"ex_{examiner_key}"],
+                         files={"file": ("report.docx", _docx(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")})
+        assert r.status_code == 201, r.text
+        status = "dpgs_final_pending"
+    if status == "dpgs_final_pending":
+        await _approve(TH[student_key], TOK["dpgs"])
+    assert (await _row(TH[student_key])).status == "approved"
+
+
+async def _create_final_thesis(student_key: str) -> None:
+    r = await _call("POST", "/thesis", TOK[student_key], json={})
+    assert r.status_code == 201, r.text
+    assert r.json()["thesis_type"] == "final", r.text
+    FINAL_TH[student_key] = r.json()["id"]
+    THESIS_IDS.append(uuid.UUID(FINAL_TH[student_key]))
+
+
+async def _final_committee_signers(student_key: str) -> list[str]:
+    return _PG25_COMMITTEE_SIGNERS.get(student_key, [])
 
 
 async def _approve(sid, token, expect=200) -> httpx.Response:
@@ -422,6 +492,12 @@ async def _setup() -> None:
     await _mk_user("s_deptb", UserRole.STUDENT, d2, program=pg, college=college, roll=f"ZZTH-deptb-{_TAG}")
     await _mk_user("s_nopp", UserRole.STUDENT, d1, program=pg, college=college, roll=f"ZZTH-nopp-{_TAG}")
     await _mk_user("s_blank", UserRole.STUDENT, d1, program=pg, college=college, roll=f"ZZTH-blank-{_TAG}")
+    # Final Thesis test subjects (this revision): s_final (solo-Major-Advisor committee, dept
+    # d1) is driven all the way to an APPROVED Initial Thesis so Final Thesis creation is
+    # actually reachable; s_final2 (multi-member committee, reusing ma_lock/mem_lock) is the
+    # PG-25(A)/Viva multi-signer committee-approval test subject.
+    await _mk_user("s_final", UserRole.STUDENT, d1, program=pg, college=college, roll=f"ZZTH-final-{_TAG}")
+    await _mk_user("s_final2", UserRole.STUDENT, d1, program=pg, college=college, roll=f"ZZTH-final2-{_TAG}")
 
     for k in ("s1", "s2", "s_val", "s_lib1", "s_lib2", "s_revert", "s_zero", "s_examx"):
         await _mk_committee(k, "ma1")
@@ -430,9 +506,11 @@ async def _setup() -> None:
     await _mk_committee("s_lock", "ma_lock", extra=[("mem_lock", "member_major")])
     await _mk_committee("s_noma", "ma1", ma_accepted=None)
     await _mk_committee("s_blank", "ma1")
+    await _mk_committee("s_final", "ma1")
+    await _mk_committee("s_final2", "ma_lock", extra=[("mem_lock", "member_major")])
     # s_nopp: no PPW, no committee needed for the creation test
 
-    for k in ("s1", "s2", "s_val", "s_noma", "s_lib1", "s_lib2", "s_revert", "s_lock", "s_zero", "s_examx", "s_phd", "s_deptb"):
+    for k in ("s1", "s2", "s_val", "s_noma", "s_lib1", "s_lib2", "s_revert", "s_lock", "s_zero", "s_examx", "s_phd", "s_deptb", "s_final", "s_final2"):
         await _mk_ppw(k, f"ZZTEST Research Title for {k}")
     await _mk_ppw("s_blank", "   ")   # blank/whitespace-only research_title -> creation must be rejected
 
@@ -440,7 +518,7 @@ async def _setup() -> None:
     faculty_and_students = (
         "ma1", "ma2", "ma_d2", "ma_lock", "mem_lock", "hod1", "hod2", "librarian1", "librarian2", "incharge", "dpgs",
         "s1", "s2", "s_val", "s_noma", "s_lib1", "s_lib2", "s_revert", "s_lock", "s_zero", "s_examx", "s_phd",
-        "s_deptb", "s_nopp", "s_blank",
+        "s_deptb", "s_nopp", "s_blank", "s_final", "s_final2",
     )
     for k in faculty_and_students:
         TOK[k] = await _session(U[k])
@@ -449,7 +527,9 @@ async def _setup() -> None:
     await _mk_examiner("shared")   # will be assigned to BOTH s1 AND s_examx (cross-student authorization test)
     await _mk_examiner("phd_a")
     await _mk_examiner("phd_b")
+    await _mk_examiner("final")    # dedicated to s_final/s_final2's Initial Thesis approval
     TOK["ex_shared"] = await _session(U["ex_shared"])
+    TOK["ex_final"] = await _session(U["ex_final"])
     TOK["ex_phd_a"] = await _session(U["ex_phd_a"])
     TOK["ex_phd_b"] = await _session(U["ex_phd_b"])
 
@@ -460,6 +540,10 @@ async def _teardown() -> None:
         tids = (await db.execute(select(Thesis.id).where(Thesis.student_id.in_(uids)))).scalars().all()
 
         await db.execute(delete(AuditLog).where(AuditLog.user_id.in_(uids)))
+        # Viva Semester-filter verification (this audit) creates a real ams_course_registrations
+        # row against a zztest student and a REAL (pre-existing, untouched) Semester/Calendar —
+        # never the other way around; only the registration row itself is temporary.
+        await db.execute(delete(CourseRegistration).where(CourseRegistration.student_id.in_(uids)))
         await db.execute(delete(Thesis).where(Thesis.id.in_(tids or [uuid.uuid4()])))  # cascades documents/cycles/stages/signatures/evaluations
 
         examiner_ids = (await db.execute(select(ExternalExaminer.id).where(ExternalExaminer.email.like(f"{_PFX}%")))).scalars().all()
@@ -1251,6 +1335,383 @@ async def t_certificate_i_authorization_and_regeneration():
     assert len(cycle_ids) == len(rows), "each Certificate I version must be tied to its OWN (different) approval cycle, never reused"
 
 
+# ── FINAL THESIS (this revision) ────────────────────────────────────────────────────────────
+
+async def t_final_thesis_classification():
+    """Section 2/40/41 of the confirmed rules: first creation -> initial; a client-supplied
+    `thesis_type` is rejected outright (schema `extra=forbid`); a second attempt while Initial
+    is still incomplete -> rejected; second creation once Initial is `approved` -> a genuinely
+    SEPARATE `final` row; a third attempt is always rejected."""
+    r = await _call("POST", "/thesis", TOK["s_final"], json={"thesis_type": "final"})
+    assert r.status_code == 422, r.text
+
+    r = await _create_thesis("s_final")
+    assert r.json()["thesis_type"] == "initial", r.text
+    assert (await _call("POST", "/thesis", TOK["s_final"], json={})).status_code == 409
+
+    await _complete_initial_thesis("s_final")  # skips the create step (already in TH)
+
+    # still exactly one Thesis row per (student, type) — Final not creatable until now
+    await _create_final_thesis("s_final")
+    initial_detail = await _detail(TH["s_final"], TOK["s_final"])
+    final_detail = await _detail(FINAL_TH["s_final"], TOK["s_final"])
+    assert final_detail["thesis_type"] == "final" and final_detail["status"] == "draft"
+    assert final_detail["id"] != initial_detail["id"], "Final Thesis must be a SEPARATE row, never the same id"
+    assert final_detail["title"] == initial_detail["title"], "Final Thesis title should default to the Initial Thesis's own title"
+    # Initial Thesis's own documents/plagiarism data must not leak into the new Final row
+    assert final_detail["documents"]["thesis_file"] is None
+    assert final_detail["plagiarism_student_percent"] is None
+    assert "seminar_certificate_pg25" not in final_detail["documents"], "Initial-only document types must not appear in Final Thesis's document set"
+    assert "certificate_i_pg27" not in final_detail["documents"]
+    assert set(final_detail["documents"].keys()) == {"thesis_file", "plagiarism_student_report", "plagiarism_library_report", "pg05a", "pg05b", "pg25a_certificate", "viva_voce_certificate"}
+
+    # a third creation attempt is always rejected
+    assert (await _call("POST", "/thesis", TOK["s_final"], json={})).status_code == 409
+    # cross-student: s2 cannot see s_final's Final Thesis by id
+    assert (await _call("GET", f"/thesis/{FINAL_TH['s_final']}", TOK["s2"])).status_code == 404
+
+
+async def t_final_thesis_second_creation_blocked_before_approval():
+    """A dedicated student whose Initial Thesis is submitted but NOT yet approved — the second
+    `POST /thesis` must be rejected at every intermediate state, not merely while still a draft."""
+    await _create_thesis("s_final2")
+    await _make_submittable("s_final2")
+    await _complete_pg25("s_final2")
+    await _submit("s_final2")
+    assert (await _row(TH["s_final2"])).status == "major_advisor_pending"
+    r = await _call("POST", "/thesis", TOK["s_final2"], json={})
+    assert r.status_code == 409 and "approved" in r.json()["detail"].lower(), r.text
+
+
+async def t_pg05_documents():
+    """Section 5: PG-05(A)/(B) are simple student-uploaded PDFs, own Final Thesis only, no
+    approval workflow, PDF-only validation reusing the existing PDF infrastructure."""
+    fid = FINAL_TH["s_final"]
+    tok = TOK["s_final"]
+    good_pdf = _pdf()
+    for doc_type in ("pg05a", "pg05b"):
+        assert (await _upload_doc(fid, doc_type, tok, data=good_pdf, filename="x.docx", ct="application/vnd.openxmlformats-officedocument.wordprocessingml.document")).status_code == 400
+        assert (await _upload_doc(fid, doc_type, tok, data=b"not a pdf", filename="x.pdf", ct="application/pdf")).status_code == 400
+        r = await _upload_doc(fid, doc_type, tok, data=good_pdf, filename="x.pdf", ct="application/pdf")
+        assert r.status_code == 201, (doc_type, r.text)
+    # cannot upload PG-05(A)/(B) to the INITIAL thesis row (wrong document set for that type)
+    assert (await _upload_doc(TH["s_final"], "pg05a", tok, data=good_pdf, filename="x.pdf", ct="application/pdf")).status_code == 404
+    # another student cannot upload/read
+    assert (await _upload_doc(fid, "pg05a", TOK["s2"], data=good_pdf, filename="x.pdf", ct="application/pdf")).status_code == 404
+    doc_id = (await _detail(fid, tok))["documents"]["pg05a"]["id"]
+    assert (await _call("GET", f"/thesis/{fid}/documents/{doc_id}/download", TOK["s2"])).status_code == 404
+    assert (await _call("GET", f"/thesis/{fid}/documents/{doc_id}/download", tok)).status_code == 200
+
+
+async def t_pg25a_lifecycle_and_idor():
+    """Section 6-11: student generates+auto-signs PG-25(A), submits to the real Major Advisor,
+    who approves -> real Advisory Committee (s_final has none besides the MA, so this skips
+    straight to HOD) -> HOD -> Incharge -> DPGS -> approved. Also: IDOR, revert-then-regenerate,
+    stale-version rejection, and that Incharge never appears as a named signatory on the PDF."""
+    fid = FINAL_TH["s_final"]
+    tok = TOK["s_final"]
+
+    # cannot submit/regenerate before generating
+    assert (await _call("POST", f"/thesis/{fid}/pg25a/submit", tok)).status_code == 400
+    assert (await _call("POST", f"/thesis/{fid}/pg25a/regenerate", tok)).status_code == 400
+    # another student cannot generate for s_final's Final Thesis
+    assert (await _call("POST", f"/thesis/{fid}/pg25a/generate", TOK["s2"])).status_code == 404
+
+    r = await _call("POST", f"/thesis/{fid}/pg25a/generate", tok)
+    assert r.status_code == 201, r.text
+    cert_id = r.json()["certificate_id"]
+    d = await _detail(fid, tok)
+    assert d["pg25a"]["status"] == "generated" and d["pg25a"]["student_signed_at"] is not None
+    assert d["documents"]["pg25a_certificate"] is None, "not yet approved -> not a visible Student Document"
+    # duplicate generate rejected
+    assert (await _call("POST", f"/thesis/{fid}/pg25a/generate", tok)).status_code == 409
+
+    assert (await _call("POST", f"/thesis/{fid}/pg25a/submit", tok)).status_code == 200
+    d = await _detail(fid, tok)
+    assert d["pg25a"]["status"] == "ma_pending"
+
+    # unrelated faculty cannot approve as MA; the real MA can
+    assert (await _call("POST", f"/thesis/finalcert/{cert_id}/ma-approve", TOK["ma2"])).status_code == 404
+    r = await _call("POST", f"/thesis/finalcert/{cert_id}/ma-approve", TOK["ma1"])
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "hod_pending", "s_final's committee has no OTHER accepted members -> straight to HOD"
+
+    # wrong-department HOD blocked; Incharge/DPGS cannot act out of order
+    assert (await _call("POST", f"/thesis/finalcert/{cert_id}/hod-approve", TOK["hod2"])).status_code == 404
+    assert (await _call("POST", f"/thesis/finalcert/{cert_id}/incharge-approve", TOK["incharge"])).status_code == 400
+    assert (await _call("POST", f"/thesis/finalcert/{cert_id}/dpgs-approve", TOK["dpgs"])).status_code == 400
+
+    # HOD reverts (real effect) -> student must regenerate
+    r = await _call("POST", f"/thesis/finalcert/{cert_id}/revert", TOK["hod1"], json={"remark": "ZZTEST fix the discipline line"})
+    assert r.status_code == 200 and r.json()["status"] == "reverted", r.text
+    assert (await _call("POST", f"/thesis/finalcert/{cert_id}/hod-approve", TOK["hod1"])).status_code == 400
+    # a stale (reverted) certificate cannot be approved by anyone, at any stage
+    assert (await _call("POST", f"/thesis/finalcert/{cert_id}/ma-approve", TOK["ma1"])).status_code == 400
+
+    # wrong student cannot regenerate; the real student can
+    assert (await _call("POST", f"/thesis/{fid}/pg25a/regenerate", TOK["s2"])).status_code == 404
+    r = await _call("POST", f"/thesis/{fid}/pg25a/regenerate", tok)
+    assert r.status_code == 201, r.text
+    cert_id_v2 = r.json()["certificate_id"]
+    assert cert_id_v2 != cert_id
+    d = await _detail(fid, tok)
+    assert d["pg25a"]["version_number"] == 2 and d["pg25a"]["attempt_number"] == 1
+    old = await _call("GET", f"/thesis/finalcert/{cert_id}", tok)
+    assert old.status_code == 200 and old.json()["status"] == "reverted", "old version preserved as history"
+
+    await _call("POST", f"/thesis/{fid}/pg25a/submit", tok)
+    await _call("POST", f"/thesis/finalcert/{cert_id_v2}/ma-approve", TOK["ma1"])
+    assert (await _call("POST", f"/thesis/finalcert/{cert_id_v2}/hod-approve", TOK["hod2"])).status_code == 404
+    assert (await _call("POST", f"/thesis/finalcert/{cert_id_v2}/hod-approve", TOK["hod1"])).status_code == 200
+    d = await _detail(fid, tok)
+    assert d["pg25a"]["status"] == "incharge_pending"
+    # Incharge/DPGS: bare role check, no department scoping (single-holder roles)
+    assert (await _call("POST", f"/thesis/finalcert/{cert_id_v2}/incharge-approve", TOK["ma1"])).status_code == 403
+    r = await _call("POST", f"/thesis/finalcert/{cert_id_v2}/incharge-approve", TOK["incharge"])
+    assert r.status_code == 200 and r.json()["status"] == "dpgs_pending", r.text
+    r = await _call("POST", f"/thesis/finalcert/{cert_id_v2}/dpgs-approve", TOK["dpgs"])
+    assert r.status_code == 200 and r.json()["status"] == "approved", r.text
+
+    d = await _detail(fid, tok)
+    assert d["pg25a"]["status"] == "approved" and d["documents"]["pg25a_certificate"] is not None
+    doc_id = d["documents"]["pg25a_certificate"]["id"]
+    dl = await _call("GET", f"/thesis/{fid}/documents/{doc_id}/download", tok)
+    assert dl.status_code == 200 and dl.headers["content-type"] == "application/pdf"
+    body_text = _extract_pdf_text(dl.content)
+    assert "assam agricultural university" not in body_text.lower()
+    assert "assam veterinary" in body_text.lower()
+    assert "incharge" not in body_text.lower(), "Incharge Academic Cell must NEVER be a named signatory on PG-25(A)"
+
+    # once approved, no new attempt/regeneration is possible
+    assert (await _call("POST", f"/thesis/{fid}/pg25a/generate", tok)).status_code == 409
+    assert (await _call("POST", f"/thesis/{fid}/pg25a/regenerate", tok)).status_code == 400
+
+
+async def t_pg25a_committee_multi_signer():
+    """s_final2's committee has TWO accepted members besides needing the MA step (ma_lock +
+    mem_lock) — exercises the real committee-approval phase that s_final's solo committee
+    cannot (mirrors the Initial-Thesis PG25 multi-signer test)."""
+    await _complete_initial_thesis("s_final2")
+    await _create_final_thesis("s_final2")
+    fid = FINAL_TH["s_final2"]
+    tok = TOK["s_final2"]
+
+    r = await _call("POST", f"/thesis/{fid}/pg25a/generate", tok)
+    assert r.status_code == 201, r.text
+    cert_id = r.json()["certificate_id"]
+    await _call("POST", f"/thesis/{fid}/pg25a/submit", tok)
+    r = await _call("POST", f"/thesis/finalcert/{cert_id}/ma-approve", TOK["ma_lock"])
+    assert r.status_code == 200 and r.json()["status"] == "committee_pending", r.text
+
+    # unrelated faculty cannot sign; the real committee member can
+    assert (await _call("POST", f"/thesis/finalcert/{cert_id}/sign", TOK["ma2"])).status_code == 404
+    pending = (await _call("GET", "/thesis/finalcert/mine/pending?kind=pg25a", TOK["mem_lock"])).json()
+    assert any(r["certificate_id"] == cert_id for r in pending)
+    r = await _call("POST", f"/thesis/finalcert/{cert_id}/sign", TOK["mem_lock"])
+    assert r.status_code == 200 and r.json()["status"] == "hod_pending", r.text
+    assert (await _call("POST", f"/thesis/finalcert/{cert_id}/sign", TOK["mem_lock"])).status_code == 400
+
+    await _call("POST", f"/thesis/finalcert/{cert_id}/hod-approve", TOK["hod1"])
+    await _call("POST", f"/thesis/finalcert/{cert_id}/incharge-approve", TOK["incharge"])
+    r = await _call("POST", f"/thesis/finalcert/{cert_id}/dpgs-approve", TOK["dpgs"])
+    assert r.status_code == 200 and r.json()["status"] == "approved", r.text
+    home = (await _call("GET", "/thesis/finalcert/mine/home?kind=pg25a", TOK["mem_lock"])).json()
+    assert any(r["certificate_id"] == cert_id for r in home)
+
+
+async def t_viva_lifecycle_and_idor():
+    """Section 13-19: MA-driven generation (Satisfactory), Unsatisfactory as a real terminal
+    action supporting repeated attempts, Submit/sign, committee/HOD/Incharge/DPGS approval,
+    revert/regenerate, Faculty Pending view, and IDOR — independent of PG-25(A) (s_final's own
+    PG-25(A) may already be approved by an earlier test; Viva has no dependency on it)."""
+    fid = FINAL_TH["s_final"]
+    tok = TOK["s_final"]
+
+    # MA's advisee list includes s_final's Final Thesis
+    ma_rows = (await _call("GET", "/thesis/viva/ma", TOK["ma1"])).json()
+    row = next(r for r in ma_rows if r["thesis_id"] == fid)
+    assert row["can_satisfactory"] and row["can_unsatisfactory"]
+
+    # wrong MA cannot act
+    assert (await _call("POST", f"/thesis/{fid}/viva/satisfactory", TOK["ma2"])).status_code == 404
+    assert (await _call("POST", f"/thesis/{fid}/viva/unsatisfactory", TOK["ma2"])).status_code == 404
+
+    # attempt 1: Unsatisfactory -> terminal, no certificate, no chain
+    r = await _call("POST", f"/thesis/{fid}/viva/unsatisfactory", TOK["ma1"])
+    assert r.status_code == 201, r.text
+    d = await _detail(fid, tok)
+    assert d["viva"]["status"] == "unsatisfactory" and d["viva"]["attempt_number"] == 1
+    assert d["documents"]["viva_voce_certificate"] is None
+    assert (await _call("POST", f"/thesis/{fid}/viva/submit", TOK["ma1"])).status_code == 400
+
+    # attempt 2: Satisfactory succeeds — attempt 1 was terminal, so a fresh attempt is allowed
+    r = await _call("POST", f"/thesis/{fid}/viva/satisfactory", TOK["ma1"])
+    assert r.status_code == 201, r.text
+    cert_id = r.json()["certificate_id"]
+    d = await _detail(fid, tok)
+    assert d["viva"]["attempt_number"] == 2 and d["viva"]["status"] == "generated"
+    # duplicate Satisfactory/Unsatisfactory rejected while one is already in flight
+    assert (await _call("POST", f"/thesis/{fid}/viva/satisfactory", TOK["ma1"])).status_code == 409
+    assert (await _call("POST", f"/thesis/{fid}/viva/unsatisfactory", TOK["ma1"])).status_code == 409
+
+    # MA submits -> straight to hod_pending (s_final's committee has no other accepted members)
+    r = await _call("POST", f"/thesis/{fid}/viva/submit", TOK["ma1"])
+    assert r.status_code == 200 and r.json()["status"] == "hod_pending", r.text
+
+    # HOD reverts (real effect) -> MA must regenerate
+    r = await _call("POST", f"/thesis/finalcert/{cert_id}/revert", TOK["hod1"], json={"remark": "ZZTEST redo the viva date"})
+    assert r.status_code == 200 and r.json()["status"] == "reverted", r.text
+    assert (await _call("POST", f"/thesis/{fid}/viva/regenerate", TOK["ma2"])).status_code == 404
+    r = await _call("POST", f"/thesis/{fid}/viva/regenerate", TOK["ma1"])
+    assert r.status_code == 201, r.text
+    cert_id_v2 = r.json()["certificate_id"]
+    assert cert_id_v2 != cert_id
+    d = await _detail(fid, tok)
+    assert d["viva"]["attempt_number"] == 2 and d["viva"]["version_number"] == 2
+    old = await _call("GET", f"/thesis/finalcert/{cert_id}", TOK["ma1"])
+    assert old.status_code == 200 and old.json()["status"] == "reverted"
+
+    await _call("POST", f"/thesis/{fid}/viva/submit", TOK["ma1"])
+    assert (await _call("POST", f"/thesis/finalcert/{cert_id_v2}/hod-approve", TOK["hod2"])).status_code == 404
+    assert (await _call("POST", f"/thesis/finalcert/{cert_id_v2}/hod-approve", TOK["hod1"])).status_code == 200
+    assert (await _call("POST", f"/thesis/finalcert/{cert_id_v2}/incharge-approve", TOK["incharge"])).status_code == 200
+    r = await _call("POST", f"/thesis/finalcert/{cert_id_v2}/dpgs-approve", TOK["dpgs"])
+    assert r.status_code == 200 and r.json()["status"] == "approved", r.text
+
+    d = await _detail(fid, tok)
+    assert d["viva"]["status"] == "approved" and d["documents"]["viva_voce_certificate"] is not None
+    doc_id = d["documents"]["viva_voce_certificate"]["id"]
+    dl = await _call("GET", f"/thesis/{fid}/documents/{doc_id}/download", tok)
+    assert dl.status_code == 200 and dl.headers["content-type"] == "application/pdf"
+    body_text = _extract_pdf_text(dl.content)
+    assert "assam agricultural university" not in body_text.lower()
+    assert "assam veterinary" in body_text.lower()
+    assert "incharge" not in body_text.lower(), "Incharge Academic Cell must NEVER be a named signatory on the Viva certificate"
+    # student isolation
+    assert (await _call("GET", f"/thesis/finalcert/{cert_id_v2}", TOK["s2"])).status_code == 404
+    assert (await _call("POST", f"/thesis/finalcert/{cert_id_v2}/sign", TOK["s2"])).status_code in (403, 404)
+
+
+async def t_viva_committee_pending_view_and_multi_signer():
+    """Section 18: Faculty Pending view scoped to REAL committee membership only, using
+    s_final2's multi-member committee (ma_lock + mem_lock)."""
+    fid = FINAL_TH["s_final2"]
+    r = await _call("POST", f"/thesis/{fid}/viva/satisfactory", TOK["ma_lock"])
+    assert r.status_code == 201, r.text
+    cert_id = r.json()["certificate_id"]
+    r = await _call("POST", f"/thesis/{fid}/viva/submit", TOK["ma_lock"])
+    assert r.status_code == 200 and r.json()["status"] == "committee_pending", r.text
+
+    # unrelated faculty does not see/approve
+    unrelated_pending = (await _call("GET", "/thesis/finalcert/mine/pending?kind=viva", TOK["ma2"])).json()
+    assert not any(r["certificate_id"] == cert_id for r in unrelated_pending)
+    assert (await _call("POST", f"/thesis/finalcert/{cert_id}/sign", TOK["ma2"])).status_code == 404
+
+    pending = (await _call("GET", "/thesis/finalcert/mine/pending?kind=viva", TOK["mem_lock"])).json()
+    row = next(r for r in pending if r["certificate_id"] == cert_id)
+    assert row["status"] == "committee_pending" and row["student_roll"]
+    r = await _call("POST", f"/thesis/finalcert/{cert_id}/sign", TOK["mem_lock"])
+    assert r.status_code == 200 and r.json()["status"] == "hod_pending", r.text
+
+    await _call("POST", f"/thesis/finalcert/{cert_id}/hod-approve", TOK["hod1"])
+    await _call("POST", f"/thesis/finalcert/{cert_id}/incharge-approve", TOK["incharge"])
+    r = await _call("POST", f"/thesis/finalcert/{cert_id}/dpgs-approve", TOK["dpgs"])
+    assert r.status_code == 200 and r.json()["status"] == "approved", r.text
+    home = (await _call("GET", "/thesis/finalcert/mine/home?kind=viva", TOK["mem_lock"])).json()
+    assert any(r["certificate_id"] == cert_id for r in home)
+
+
+async def t_viva_ma_academic_year_semester_filter():
+    """Audit correction: an earlier pass claimed no per-student Semester field exists anywhere
+    in AMS. `CourseRegistration(student_id, semester_id, calendar_id)` is a real, authoritative,
+    unique-per-(student, semester) record — the same source Progress Report itself already
+    relies on. Verifies the filter genuinely discriminates using two REAL, pre-existing
+    Semester rows (never fabricated academic structure) and a single temporary registration row
+    against a zztest student, cleaned up in `_teardown`."""
+    async with AsyncSessionLocal() as db:
+        from app.models.academic import Semester
+        semesters = (await db.execute(select(Semester.id, Semester.calendar_id).limit(2))).all()
+        if len(semesters) < 2:
+            record("VIVA SEMESTER FILTER: skipped — fewer than 2 real Semester rows exist in this environment", True)
+            return
+        (sem_a, cal_a), (sem_b, _) = semesters
+        db.add(CourseRegistration(student_id=U["s_final"], semester_id=sem_a, calendar_id=cal_a, stage="teacher_pending"))
+        await db.commit()
+
+    # no filter -> s_final still appears (backward compatible)
+    rows = (await _call("GET", "/thesis/viva/ma", TOK["ma1"])).json()
+    assert any(r["thesis_id"] == FINAL_TH["s_final"] for r in rows)
+
+    # matching Academic Year + Semester -> included
+    rows = (await _call("GET", f"/thesis/viva/ma?academic_year_id={cal_a}&semester_id={sem_a}", TOK["ma1"])).json()
+    assert any(r["thesis_id"] == FINAL_TH["s_final"] for r in rows), "student IS registered in this semester — must appear"
+
+    # a DIFFERENT real semester -> excluded (the student has no registration there)
+    rows = (await _call("GET", f"/thesis/viva/ma?semester_id={sem_b}", TOK["ma1"])).json()
+    assert not any(r["thesis_id"] == FINAL_TH["s_final"] for r in rows), "student is NOT registered in this semester — must be excluded"
+
+    # a client-supplied academic_year_id/semester_id that isn't even a real UUID relationship
+    # for this student cannot be used to fabricate inclusion — a random, unrelated real semester
+    # id (sem_b) already proved exclusion above; a syntactically-invalid id is simply rejected
+    r = await _call("GET", "/thesis/viva/ma?semester_id=not-a-uuid", TOK["ma1"])
+    assert r.status_code == 422, r.text
+
+
+async def t_final_thesis_submission_gate_and_main_chain():
+    """Section 20/21/46: every Final Thesis prerequisite rejected one at a time, then a
+    complete submission proceeds through MA -> HOD -> Librarian -> Incharge -> DPGS with NO
+    External Examiner and NO Certificate I, reaching `approved`."""
+    fid = FINAL_TH["s_final"]
+    tok = TOK["s_final"]
+    # at this point (after t_pg25a_lifecycle_and_idor + t_viva_lifecycle_and_idor) PG-25(A) and
+    # Viva are both already approved for s_final's Final Thesis; PG-05(A)/(B) were uploaded in
+    # t_pg05_documents. Only the shared thesis_file/plagiarism/abstract fields remain.
+    r = await _submit_final(fid, tok, expect=400)
+    assert "Thesis File" in r.json()["detail"], r.text
+    assert (await _upload_doc(fid, "thesis_file", tok)).status_code == 201
+    r = await _submit_final(fid, tok, expect=400)
+    assert "plagiarism percentage" in r.json()["detail"], r.text
+    await _call("PATCH", f"/thesis/{fid}", tok, json={"plagiarism_student_percent": 4.0, "plagiarism_software_name": "ZZTEST Turnitin"})
+    r = await _submit_final(fid, tok, expect=400)
+    assert "plagiarism report" in r.json()["detail"], r.text
+    assert (await _upload_doc(fid, "plagiarism_student_report", tok)).status_code == 201
+    r = await _submit_final(fid, tok, expect=400)
+    assert "Abstract" in r.json()["detail"], r.text
+    await _call("PATCH", f"/thesis/{fid}", tok, json={"abstract": "ZZTEST final abstract."})
+
+    r = await _submit_final(fid, tok, expect=200)
+    assert r.json()["status"] == "major_advisor_pending"
+    cyc = (await _cycles(fid))[-1]
+    stages = await _stages(cyc.id)
+    assert [s.stage_type for s in stages] == ["major_advisor", "hod", "librarian", "incharge_academic_cell", "dpgs"], "Final Thesis chain must have NO dpgs_final / External Examiner stage"
+
+    # Certificate I is NOT required for Final Thesis's Major Advisor stage
+    await _approve(fid, TOK["ma1"])
+    assert (await _row(fid)).status == "hod_pending"
+    await _approve(fid, TOK["hod1"])
+    assert (await _row(fid)).status == "librarian_pending"
+    # Librarian cannot complete without the plagiarism report/percentage, exactly like Initial
+    r = await _approve(fid, TOK["librarian1"], expect=400)
+    assert "plagiarism" in r.json()["detail"].lower(), r.text
+    await _set_library_data(fid, TOK["librarian1"])
+    await _approve(fid, TOK["librarian1"])
+    assert (await _row(fid)).status == "incharge_pending"
+    await _approve(fid, TOK["incharge"])
+    assert (await _row(fid)).status == "dpgs_pending"
+    r = await _approve(fid, TOK["dpgs"])
+    assert (await _row(fid)).status == "approved", "DPGS is the LAST stage for Final Thesis — no External Examiner, no dpgs_final"
+
+    # no Certificate I document was ever created for this Final Thesis
+    d = await _detail(fid, tok)
+    assert "certificate_i_pg27" not in d["documents"]
+
+
+async def _submit_final(thesis_id: str, token: str, expect=200):
+    r = await _call("POST", f"/thesis/{thesis_id}/submit", token)
+    assert r.status_code == expect, (r.status_code, r.text)
+    return r
+
+
 async def main() -> None:
     try:
         await _setup()
@@ -1277,6 +1738,15 @@ async def main() -> None:
             "PG25 (multi-signer committee): real committee sign/IDOR/Home-Pending scoping, department-isolated HOD final approval": t_pg25_committee_multi_signer_and_department_isolation,
             "COMMITTEE LOCK: reassign/add/remove blocked (409, 'Initial Thesis') while active; unauthorized still 403 first; released after revert/approval": t_major_advisor_committee_lock,
             "CERTIFICATE I: only the real Major Advisor generates, MA approval blocked until generated, no AAU branding, regenerated (never reused) across revert/resubmission cycles": t_certificate_i_authorization_and_regeneration,
+            "FINAL THESIS CLASSIFICATION: first=initial, blocked before Initial approval, second-after-approval=final (separate row, fresh data), third=rejected": t_final_thesis_classification,
+            "FINAL THESIS: second creation blocked at every intermediate Initial status, not just draft": t_final_thesis_second_creation_blocked_before_approval,
+            "PG-05(A)/(B): PDF-only, own Final Thesis only, cross-student blocked, wrong thesis-type rejected": t_pg05_documents,
+            "PG-25(A): student generate+auto-sign, submit, MA->HOD->Incharge->DPGS, revert/regenerate, stale version blocked, IDOR, Incharge never a named signatory": t_pg25a_lifecycle_and_idor,
+            "PG-25(A) multi-signer committee: real committee approval/IDOR, department-isolated HOD": t_pg25a_committee_multi_signer,
+            "VIVA: MA-only Satisfactory/Unsatisfactory (real, terminal), Submit, committee->HOD->Incharge->DPGS, revert/regenerate, IDOR, Incharge never a named signatory": t_viva_lifecycle_and_idor,
+            "VIVA multi-signer committee: Faculty Pending view scoped to real membership only": t_viva_committee_pending_view_and_multi_signer,
+            "VIVA MA ACADEMIC YEAR/SEMESTER FILTER: genuinely derived from real CourseRegistration data, not fabricated": t_viva_ma_academic_year_semester_filter,
+            "FINAL THESIS SUBMISSION GATE + MAIN CHAIN: every prerequisite checked individually; MA->HOD->Librarian->Incharge->DPGS with NO External Examiner and NO Certificate I": t_final_thesis_submission_gate_and_main_chain,
         }.items():
             await _run(name, fn)
     finally:
@@ -1293,6 +1763,9 @@ async def main() -> None:
                 "evaluations": (await db.execute(select(func.count()).select_from(ThesisExternalEvaluation))).scalar_one(),
                 "seminar_certificates": (await db.execute(select(func.count()).select_from(ThesisSeminarCertificate))).scalar_one(),
                 "seminar_certificate_signatures": (await db.execute(select(func.count()).select_from(ThesisSeminarCertificateSignature))).scalar_one(),
+                "final_certificates": (await db.execute(select(func.count()).select_from(FinalCertificate))).scalar_one(),
+                "final_certificate_signatures": (await db.execute(select(func.count()).select_from(FinalCertificateSignature))).scalar_one(),
+                "course_registrations": (await db.execute(select(func.count()).select_from(CourseRegistration).where(CourseRegistration.student_id.in_(uids)))).scalar_one(),
                 "examiners": (await db.execute(select(func.count()).select_from(ExternalExaminer).where(ExternalExaminer.email.like(f"{_PFX}%")))).scalar_one(),
                 "assignments": (await db.execute(select(func.count()).select_from(ExternalExaminerAssignment))).scalar_one(),
                 "committees": (await db.execute(select(func.count()).select_from(AdvisoryCommittee).where(AdvisoryCommittee.research_title == "ZZTEST thesis committee"))).scalar_one(),
