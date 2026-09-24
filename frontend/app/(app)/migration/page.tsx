@@ -1,7 +1,7 @@
 "use client";
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/services/api";
+import { api, blobErrorMessage, viewFileInNewTab } from "@/services/api";
 import { toast } from "sonner";
 import { GitBranch, Loader2, Plus, Upload, Eye, X } from "lucide-react";
 import {
@@ -85,7 +85,13 @@ export default function MigrationManagementPage() {
   });
 
   function close() { setOpenId(null); setForm(EMPTY_FORM); setHydratedFor(null); }
-  function downloadReceipt() { window.open(`${api.defaults.baseURL}/migration/${openId}/receipt`, "_blank"); }
+  async function downloadReceipt() {
+    try {
+      await viewFileInNewTab(`/migration/${openId}/receipt`);
+    } catch (e) {
+      toast.error(await blobErrorMessage(e, "Could not open the receipt."));
+    }
+  }
 
   const canSubmit = !!detail?.can_edit &&
     Object.values(form).every((v) => v.trim()) && !!detail?.receipt;

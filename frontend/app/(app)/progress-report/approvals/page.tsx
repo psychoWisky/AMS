@@ -1,7 +1,7 @@
 "use client";
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/services/api";
+import { api, blobErrorMessage, viewFileInNewTab } from "@/services/api";
 import { toast } from "sonner";
 import { useRole } from "@/stores/auth.store";
 import { ClipboardCheck, Loader2, CheckCircle2, RotateCcw, X, Upload, FileText } from "lucide-react";
@@ -86,7 +86,13 @@ export default function ProgressReportApprovalsPage() {
     onError: (e) => toast.error(apiErrorMessage(e, "Only PDF files are accepted.")),
   });
 
-  function downloadProceedings() { window.open(`${api.defaults.baseURL}/progress-reports/${selectedId}/proceedings`, "_blank"); }
+  async function downloadProceedings() {
+    try {
+      await viewFileInNewTab(`/progress-reports/${selectedId}/proceedings`);
+    } catch (e) {
+      toast.error(await blobErrorMessage(e, "Could not open the proceedings."));
+    }
+  }
 
   const stage = detail?.my_pending_stage ?? null;
   const isMajorAdvisor = role === "faculty" && stage?.stage_type === "major_advisor";

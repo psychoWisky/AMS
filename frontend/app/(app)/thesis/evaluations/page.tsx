@@ -1,6 +1,6 @@
 "use client";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/services/api";
+import { api, blobErrorMessage, viewFileInNewTab } from "@/services/api";
 import { toast } from "sonner";
 import { ClipboardCheck, Loader2, Upload, FileText } from "lucide-react";
 import { apiErrorMessage, formatDateTime, type ThesisDetail } from "@/components/ui/thesis-parts";
@@ -37,9 +37,9 @@ export default function ThesisEvaluationsPage() {
       const { data } = await api.get<ThesisDetail>(`/thesis/${thesisId}`);
       const doc = data.documents.thesis_file;
       if (!doc) { toast.error("No thesis file is available."); return; }
-      window.open(`${api.defaults.baseURL}/thesis/${thesisId}/documents/${doc.id}/download`, "_blank");
+      await viewFileInNewTab(`/thesis/${thesisId}/documents/${doc.id}/download`);
     } catch (e) {
-      toast.error(apiErrorMessage(e, "Could not open the thesis file."));
+      toast.error(await blobErrorMessage(e, "Could not open the thesis file."));
     }
   }
 

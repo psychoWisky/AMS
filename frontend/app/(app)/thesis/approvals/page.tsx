@@ -1,7 +1,7 @@
 "use client";
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/services/api";
+import { api, blobErrorMessage, viewFileInNewTab } from "@/services/api";
 import { toast } from "sonner";
 import { useRole } from "@/stores/auth.store";
 import { ClipboardCheck, Loader2, CheckCircle2, RotateCcw, X, Upload } from "lucide-react";
@@ -88,8 +88,12 @@ export default function ThesisApprovalsPage() {
   const isMajorAdvisorStage = stage?.stage_type === "major_advisor";
   const certificateIReady = !!detail?.documents.certificate_i_pg27;
 
-  function download(documentId: string) {
-    window.open(`${api.defaults.baseURL}/thesis/${selectedId}/documents/${documentId}/download`, "_blank");
+  async function download(documentId: string) {
+    try {
+      await viewFileInNewTab(`/thesis/${selectedId}/documents/${documentId}/download`);
+    } catch (e) {
+      toast.error(await blobErrorMessage(e, "Could not open the document."));
+    }
   }
 
   return (

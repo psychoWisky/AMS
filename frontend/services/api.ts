@@ -61,3 +61,39 @@ api.interceptors.response.use(
     return Promise.reject(err);
   }
 );
+
+// Every AMS document/PDF endpoint (Thesis, Migration, Progress Report, ...) requires the same
+// Bearer-token authentication as every other API call — there is no cookie-based auth anywhere
+// in this app. A plain `window.open(apiUrl, "_blank")` opens a brand-new, unauthenticated
+// browser navigation that never passes through this file's request interceptor, so the backend
+// correctly (and necessarily) rejects it with 401 "Not authenticated". This helper is the fix:
+// fetch the file through the authenticated `api` client as a Blob, then open THAT object URL
+// (which carries no auth requirement of its own — the browser already has the bytes) in a new
+// tab, preserving the existing "opens in a new tab to view/print" UX exactly. Reuse this for
+// every View/Print action instead of building a raw URL — never re-introduce the broken pattern.
+export async function viewFileInNewTab(path: string, params?: Record<string, string>): Promise<void> {
+  const res = await api.get(path, { params, responseType: "blob" });
+  const url = window.URL.createObjectURL(res.data);
+  window.open(url, "_blank");
+  // Revoked well after the new tab has had time to load the blob — revoking immediately can
+  // race the new tab's own fetch of the object URL in some browsers.
+  setTimeout(() => window.URL.revokeObjectURL(url), 60_000);
+}
+
+// `responseType: "blob"` means an error response body (e.g. the JSON {"detail": "..."} from a
+// 403/404) arrives as a Blob too, not parsed JSON — this decodes it back to the same shape
+// `apiErrorMessage` already expects, so every blob-fetching action gets the real backend message
+// instead of a generic fallback.
+export async function blobErrorMessage(e: unknown, fallback: string): Promise<string> {
+  const data = (e as { response?: { data?: unknown } })?.response?.data;
+  if (data instanceof Blob) {
+    try {
+      const parsed = JSON.parse(await data.text());
+      if (typeof parsed?.detail === "string") return parsed.detail;
+    } catch { /* not JSON — keep the fallback */ }
+  }
+  const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail) && detail[0]?.msg) return String(detail[0].msg);
+  return fallback;
+}

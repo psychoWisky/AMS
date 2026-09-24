@@ -1,7 +1,7 @@
 "use client";
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/services/api";
+import { api, blobErrorMessage, viewFileInNewTab } from "@/services/api";
 import { toast } from "sonner";
 import { ClipboardCheck, Loader2, CheckCircle2, XCircle, X } from "lucide-react";
 import {
@@ -51,7 +51,13 @@ export default function MigrationApprovalsPage() {
     onError: (e) => toast.error(apiErrorMessage(e, "Rejection failed.")),
   });
 
-  function downloadReceipt() { window.open(`${api.defaults.baseURL}/migration/${selectedId}/receipt`, "_blank"); }
+  async function downloadReceipt() {
+    try {
+      await viewFileInNewTab(`/migration/${selectedId}/receipt`);
+    } catch (e) {
+      toast.error(await blobErrorMessage(e, "Could not open the receipt."));
+    }
+  }
 
   return (
     <div className="p-6 w-full space-y-6">

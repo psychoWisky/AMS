@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { X, Loader2, Download, RotateCcw } from "lucide-react";
-import { api } from "@/services/api";
+import { api, blobErrorMessage } from "@/services/api";
 
 // Shared building blocks for the Synopsis pages (student page + approver inbox). Everything shown here is
 // returned by the backend; nothing is derived or trusted client-side — the UI is never the security boundary.
@@ -46,17 +46,6 @@ export function apiErrorMessage(e: unknown, fallback: string): string {
   if (typeof detail === "string") return detail;
   if (Array.isArray(detail) && detail[0]?.msg) return String(detail[0].msg);
   return fallback;
-}
-
-async function blobErrorMessage(e: unknown, fallback: string): Promise<string> {
-  const data = (e as { response?: { data?: unknown } })?.response?.data;
-  if (data instanceof Blob) {
-    try {
-      const parsed = JSON.parse(await data.text());
-      if (typeof parsed?.detail === "string") return parsed.detail;
-    } catch { /* not JSON — keep the fallback */ }
-  }
-  return apiErrorMessage(e, fallback);
 }
 
 export async function downloadPdf(path: string, filename: string, params?: Record<string, string>): Promise<void> {

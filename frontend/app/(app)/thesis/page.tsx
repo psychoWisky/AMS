@@ -1,7 +1,7 @@
 "use client";
 import { useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/services/api";
+import { api, blobErrorMessage, viewFileInNewTab } from "@/services/api";
 import { toast } from "sonner";
 import { FileText, Loader2, Plus, Upload, Eye, X } from "lucide-react";
 import {
@@ -132,8 +132,12 @@ export default function ThesisManagementPage() {
   function close() {
     setOpenId(null); setPercent(""); setSoftware(""); setAbstractText(""); setHydratedFor(null);
   }
-  function download(documentId: string) {
-    window.open(`${api.defaults.baseURL}/thesis/${openId}/documents/${documentId}/download`, "_blank");
+  async function download(documentId: string) {
+    try {
+      await viewFileInNewTab(`/thesis/${openId}/documents/${documentId}/download`);
+    } catch (e) {
+      toast.error(await blobErrorMessage(e, "Could not open the document."));
+    }
   }
   function pickFile(type: string) {
     fileInputs.current[type]?.click();
