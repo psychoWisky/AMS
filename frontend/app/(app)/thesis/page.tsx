@@ -6,7 +6,7 @@ import { toast } from "sonner";
 import { FileText, Loader2, Plus, Upload, Eye, X } from "lucide-react";
 import {
   ExternalReportTable, RevertNotice, SignatureTable, StageTimeline, StudentInfoCard, ThesisStatusBadge,
-  STUDENT_DOCUMENT_LABELS, PRINTABLE_DOCUMENT_TYPES, apiErrorMessage, type ThesisDetail,
+  STUDENT_DOCUMENT_LABELS, PRINTABLE_DOCUMENT_TYPES, SYSTEM_GENERATED_DOCUMENT_TYPES, apiErrorMessage, type ThesisDetail,
 } from "@/components/ui/thesis-parts";
 
 // The student's own Thesis Management page. There is at most ONE Initial Thesis per student
@@ -92,7 +92,13 @@ export default function ThesisManagementPage() {
       return api.post(`/thesis/${openId}/documents/${type}`, fd, { headers: { "Content-Type": "multipart/form-data" } });
     },
     onSuccess: () => { toast.success("Document uploaded."); refetch(); },
-    onError: (e) => toast.error(apiErrorMessage(e, "Only .docx files are accepted.")),
+    onError: (e) => toast.error(apiErrorMessage(e, "The file could not be validated.")),
+  });
+
+  const generateDeclaration = useMutation({
+    mutationFn: () => api.post(`/thesis/${openId}/declaration/generate`),
+    onSuccess: () => { toast.success("Student Declaration generated."); refetch(); },
+    onError: (e) => toast.error(apiErrorMessage(e, "Could not generate the Student Declaration.")),
   });
 
   const submit = useMutation({
@@ -267,21 +273,38 @@ export default function ThesisManagementPage() {
             {/* 2. Student Documents */}
             <section className="space-y-3">
               <h3 className="text-lg font-bold text-gray-900">2. Student Documents</h3>
+              {detail.pg25 && detail.pg25.status !== "approved" && (
+                <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 text-xs text-amber-800">
+                  Thesis Seminar Certificate (PG 25): {detail.pg25.signatures_completed}/{detail.pg25.signatures_required} Advisory Committee signature(s) collected.
+                  It will appear here once fully approved, and is required before you can submit your Initial Thesis.
+                </div>
+              )}
               <div className="bg-white rounded-2xl border border-gray-200 divide-y divide-gray-100">
                 {STUDENT_DOC_TYPES.filter((t) => t !== "thesis_file" && t !== "plagiarism_student_report").map((type) => {
                   const doc = detail.documents[type];
                   const printable = PRINTABLE_DOCUMENT_TYPES.has(type);
+                  const systemGenerated = SYSTEM_GENERATED_DOCUMENT_TYPES.has(type);
+                  const isDeclaration = type === "declaration_annexure1";
+                  const accept = type === "thesis_file" ? ".docx" : ".pdf";
                   return (
                     <div key={type} className="flex items-center justify-between px-5 py-3">
                       <div>
                         <p className="text-sm font-semibold text-gray-800">{STUDENT_DOCUMENT_LABELS[type]}</p>
-                        {doc ? <p className="text-xs text-gray-500">{doc.original_filename}</p> : <p className="text-xs text-gray-400">Not uploaded</p>}
+                        {doc ? <p className="text-xs text-gray-500">{doc.original_filename}</p> : (
+                          <p className="text-xs text-gray-400">{systemGenerated ? "Not yet available" : "Not uploaded"}</p>
+                        )}
                       </div>
                       <div className="flex gap-2">
                         {doc && <button onClick={() => download(doc.id)} className="px-3 py-1.5 border border-gray-200 rounded-lg text-xs font-semibold hover:bg-gray-50">{printable ? "View / Print" : "View"}</button>}
-                        {detail.can_edit && (
+                        {detail.can_edit && isDeclaration && (
+                          <button onClick={() => generateDeclaration.mutate()} disabled={generateDeclaration.isPending}
+                            className="flex items-center gap-1 px-3 py-1.5 bg-gray-700 text-white rounded-lg text-xs font-semibold hover:bg-gray-800 disabled:opacity-50">
+                            {generateDeclaration.isPending ? "Generating…" : "Generate"}
+                          </button>
+                        )}
+                        {detail.can_edit && !systemGenerated && (
                           <>
-                            <input ref={(el) => { fileInputs.current[type] = el; }} type="file" accept=".docx" hidden
+                            <input ref={(el) => { fileInputs.current[type] = el; }} type="file" accept={accept} hidden
                               onChange={(e) => e.target.files?.[0] && uploadDoc.mutate({ type, file: e.target.files[0] })} />
                             <button onClick={() => pickFile(type)} className="flex items-center gap-1 px-3 py-1.5 bg-[#0D6E6E] text-white rounded-lg text-xs font-semibold hover:bg-[#178F8F]"><Upload size={12} /> Upload</button>
                           </>
@@ -316,7 +339,8 @@ export default function ThesisManagementPage() {
                   {saveDetails.isPending ? "Saving…" : "Save Changes"}
                 </button>
                 <button onClick={() => { if (confirm("Submit this Initial Thesis for approval? You will not be able to edit it until it is reverted.")) submit.mutate(); }}
-                  disabled={submit.isPending}
+                  disabled={submit.isPending || detail.pg25?.status !== "approved"}
+                  title={detail.pg25?.status !== "approved" ? "Your Thesis Seminar Certificate (PG 25) must be fully approved before you can submit." : undefined}
                   className="px-4 py-2 bg-green-600 text-white rounded-xl text-sm font-semibold hover:bg-green-700 disabled:opacity-50">
                   {submit.isPending ? "Submitting…" : "Submit Thesis"}
                 </button>

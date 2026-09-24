@@ -17,12 +17,17 @@ export interface RevertInfo { reverted_by: string | null; role: string | null; d
 export interface ExternalReportRow {
   id: string; name: string; status: string; report_available: boolean; submitted_at: string | null; dpgs_approved_at: string | null;
 }
+export interface Pg25Summary {
+  id: string; status: string; seminar_at: string | null; seminar_at_ist: string | null;
+  approved_at: string | null; signatures_completed: number; signatures_required: number;
+}
 export interface ThesisDetail {
   id: string; thesis_type: string; status: string; status_label: string; title: string | null;
   student: { name: string; roll_no: string | null; degree_name: string | null; department_name: string | null; college_name: string | null };
   plagiarism_student_percent: number | null; plagiarism_software_name: string | null; plagiarism_library_percent: number | null;
   abstract: string | null;
   documents: Record<string, ThesisDocumentInfo | null>;
+  pg25: Pg25Summary | null;
   is_owner: boolean; can_edit: boolean;
   revert_info: RevertInfo | null;
   my_pending_stage: { stage_type: string; role_label: string; requires_otp: boolean } | null;
@@ -31,6 +36,10 @@ export interface ThesisDetail {
   external_report?: ExternalReportRow[]; external_evaluation_completed?: boolean;
 }
 
+// The final 7 Student Documents (confirmed business decision — Annexure-IV REMOVED, no longer
+// a required Initial Thesis document). PG25 and Certificate I are system-generated only — a
+// student never uploads either; they simply appear here once available (Section 16/23 of the
+// confirmed rules).
 export const STUDENT_DOCUMENT_LABELS: Record<string, string> = {
   thesis_file: "Thesis File",
   plagiarism_student_report: "Plagiarism Report (Student)",
@@ -40,10 +49,12 @@ export const STUDENT_DOCUMENT_LABELS: Record<string, string> = {
   declaration_annexure1: "Student Declaration (Annexure-I)",
   seminar_certificate_pg25: "Thesis Seminar Certificate (Form No. PG 25)",
   certificate_i_pg27: "Certificate I (Form No. PG 27)",
-  annexure_iv: "Annexure-IV",
 };
-// The last four support "print"/view framing in the UI; the first four are plain upload/view.
-export const PRINTABLE_DOCUMENT_TYPES = new Set(["declaration_annexure1", "seminar_certificate_pg25", "certificate_i_pg27", "annexure_iv"]);
+// These support "print"/view framing in the UI (generated business-form documents).
+export const PRINTABLE_DOCUMENT_TYPES = new Set(["declaration_annexure1", "seminar_certificate_pg25", "certificate_i_pg27"]);
+// System-generated only — never a plain student "Upload" button; Declaration additionally
+// gets a "Generate" action (Section 6/7), PG25/Certificate I get no student-facing action at all.
+export const SYSTEM_GENERATED_DOCUMENT_TYPES = new Set(["seminar_certificate_pg25", "certificate_i_pg27"]);
 
 export function formatDateTime(iso: string | null | undefined): string {
   if (!iso) return "—";

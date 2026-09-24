@@ -75,14 +75,34 @@ THESIS_STAGE_STATUSES = ("pending", "approved", "reverted", "cancelled")
 THESIS_DOCUMENT_TYPES = (
     "thesis_file", "plagiarism_student_report", "plagiarism_library_report",
     "payment_receipt", "seminar_proceedings", "clearance",
-    "declaration_annexure1", "seminar_certificate_pg25", "certificate_i_pg27", "annexure_iv",
+    "declaration_annexure1", "seminar_certificate_pg25", "certificate_i_pg27",
 )
+# "annexure_iv" REMOVED (this revision) — no longer a required Initial Thesis document
+# (confirmed business decision). It is deliberately absent from this tuple so it can never be
+# uploaded/downloaded/listed again; see the accompanying migration for the (empty, verified)
+# data-safety check performed before this change. Never re-add it without a fresh business
+# confirmation.
 # Confidentiality (BUSINESS_LOGIC.md AD — "Plagiarism by Library"): this ONE document type is
 # never visible/downloadable by the student, enforced in the endpoint layer's authorization,
 # never merely by hiding a button. Every other document type is the student's own upload/view.
 CONFIDENTIAL_DOCUMENT_TYPES = {"plagiarism_library_report"}
+# These two are NEVER student-uploaded — they are system-generated (HOD / Major Advisor) and
+# only ever appear in `ams_thesis_documents` via the dedicated generation endpoints below,
+# never via the generic `POST /thesis/{id}/documents/{type}` upload route.
+SYSTEM_GENERATED_DOCUMENT_TYPES = {"seminar_certificate_pg25", "certificate_i_pg27"}
 
 THESIS_EVALUATION_STATUSES = ("pending", "submitted", "approved")
+
+# ── PG25 (Thesis Seminar Certificate, Form No. PG 25) ──────────────────────────────────────
+# A distinct, focused workflow — NOT forced into the linear ThesisApprovalCycle/Stage engine
+# (that engine models the post-submission approval chain; PG25 happens BEFORE submission and
+# has a different shape: one HOD action + N parallel Advisory-Committee signatures, not a
+# sequence of single approvers). Exactly one PG25 record ever exists per Thesis (the seminar
+# happens once); a unique constraint on `thesis_id` is both the schema-level guarantee of that
+# and the idempotency protection against a repeated "Satisfactory" click creating a duplicate
+# workflow.
+THESIS_SEMINAR_CERTIFICATE_STATUSES = ("awaiting_committee", "approved")
+THESIS_SEMINAR_SIGNATURE_STATUSES = ("pending", "signed")
 
 
 def _now() -> datetime:
@@ -141,6 +161,15 @@ class ThesisDocument(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     thesis_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_theses.id", ondelete="CASCADE"), index=True)
     document_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    # Which submission/resubmission cycle this document version belongs to — populated ONLY for
+    # "certificate_i_pg27" (this revision). Certificate I must be regenerated for every fresh
+    # Major-Advisor-stage arrival after a revert+resubmission; scoping each generated version to
+    # its own `ThesisApprovalCycle` is how "does a valid Certificate I already exist for THIS
+    # submission" is answered without inventing a second cycle/version concept (Section 21 of
+    # the confirmed rules). NULL for every other document type (thesis_file, the plagiarism
+    # reports, Payment Receipt/Proceedings/Clearance, the Declaration, and PG25 are none of them
+    # tied to a resubmission cycle — PG25 in particular happens BEFORE any cycle exists at all).
+    cycle_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_thesis_approval_cycles.id", ondelete="SET NULL"), index=True)
     version_number: Mapped[int] = mapped_column(Integer, nullable=False)
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     stored_filename: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -274,6 +303,66 @@ class ThesisExternalEvaluation(Base):
     thesis: Mapped["Thesis"] = relationship("Thesis", back_populates="evaluations")
     assignment: Mapped["ExternalExaminerAssignment"] = relationship("ExternalExaminerAssignment", foreign_keys=[assignment_id])
     approver: Mapped["User | None"] = relationship("User", foreign_keys=[dpgs_approved_by])
+
+
+class ThesisSeminarCertificate(Base):
+    """One PG25 workflow per Thesis (Section 8/9 of the confirmed rules). Created ONLY by the
+    HOD's "Satisfactory" action — there is deliberately no "unsatisfactory"/draft/pending-HOD
+    row: clicking Unsatisfactory has no persisted business effect this phase (Section 14), so
+    nothing is written until Satisfactory actually fires. `seminar_at` is the IST instant the
+    HOD recorded at that moment (stored as a normal tz-aware UTC instant, like every other
+    timestamp in this schema — IST is a presentation concern, not a storage one).
+    `hod_signed_at` records the automatic HOD signature (Section 9 step 6) — always equal to
+    `recorded_at` today, but a separate column because "recorded the outcome" and "signed" are
+    two distinct, separately-named business facts, and a future explicit HOD Sign action
+    (Section 12 — currently a deliberate no-op) would only ever update THIS column, not
+    `recorded_at`. `approved_at` is set once every required Advisory Committee signature is in
+    (`status` flips to "approved") — this is the ONLY moment the certificate becomes visible to
+    the student (Section 16), enforced in the endpoint layer's serializer, never merely by
+    hiding a frontend link."""
+    __tablename__ = "ams_thesis_seminar_certificates"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    thesis_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_theses.id", ondelete="CASCADE"), unique=True)
+    seminar_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="awaiting_committee", nullable=False)
+    recorded_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id", ondelete="SET NULL"))
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    hod_signed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+    thesis: Mapped["Thesis"] = relationship("Thesis", foreign_keys=[thesis_id])
+    recorder: Mapped["User | None"] = relationship("User", foreign_keys=[recorded_by])
+    signatures: Mapped[list["ThesisSeminarCertificateSignature"]] = relationship(
+        "ThesisSeminarCertificateSignature", back_populates="certificate", cascade="all, delete-orphan",
+    )
+
+
+class ThesisSeminarCertificateSignature(Base):
+    """One required Advisory-Committee-member signature on ONE PG25 certificate. The required
+    signer set is snapshotted at HOD-Satisfactory time from the student's REAL, live
+    `AdvisoryCommittee`/`CommitteeMember` rows (Section 10 — never a separate/invented committee
+    concept, never a hard-coded department-wide list): every `CommitteeMember` row for that
+    committee with `accepted is True`, matching exactly the same "real, accepted membership"
+    test the existing Major Advisor submission-gate already uses. `faculty_id` is the durable
+    authorization anchor (always present, even if the underlying `CommitteeMember` row is later
+    deleted — `committee_member_id` is `SET NULL` in that case, kept only for traceability).
+    `role_snapshot` is display-only."""
+    __tablename__ = "ams_thesis_seminar_certificate_signatures"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    certificate_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_thesis_seminar_certificates.id", ondelete="CASCADE"), index=True)
+    committee_member_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_committee_members.id", ondelete="SET NULL"))
+    faculty_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id"), nullable=False)
+    role_snapshot: Mapped[str] = mapped_column(String(30), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
+    signed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (UniqueConstraint("certificate_id", "faculty_id", name="uq_thesis_pg25_signature_faculty"),)
+
+    certificate: Mapped["ThesisSeminarCertificate"] = relationship("ThesisSeminarCertificate", back_populates="signatures")
+    committee_member: Mapped["CommitteeMember | None"] = relationship("CommitteeMember", foreign_keys=[committee_member_id])
+    faculty: Mapped["User"] = relationship("User", foreign_keys=[faculty_id])
 
 
 from app.models.user import User, Department  # noqa: E402,F401

@@ -46,7 +46,9 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from starlette.concurrency import run_in_threadpool
 
+from app.api.v1.endpoints.synopsis import UNIVERSITY_NAME
 from app.core.config import settings
 from app.core.dependencies import get_current_user, require_roles
 from app.core.email import send_email
@@ -56,10 +58,13 @@ from app.models.external_examiner import ExternalExaminer, ExternalExaminerAssig
 from app.models.ppw import Ppw
 from app.models.research import AdvisoryCommittee, CommitteeMember
 from app.models.thesis import (
-    CONFIDENTIAL_DOCUMENT_TYPES, THESIS_DOCUMENT_TYPES,
-    Thesis, ThesisApprovalCycle, ThesisApprovalStage, ThesisDocument, ThesisExternalEvaluation, ThesisSignature,
+    CONFIDENTIAL_DOCUMENT_TYPES, SYSTEM_GENERATED_DOCUMENT_TYPES, THESIS_DOCUMENT_TYPES,
+    Thesis, ThesisApprovalCycle, ThesisApprovalStage, ThesisDocument, ThesisExternalEvaluation,
+    ThesisSeminarCertificate, ThesisSeminarCertificateSignature, ThesisSignature,
 )
 from app.models.user import Department, Program, User, UserRole
+from app.utils.pdf import ChromiumRenderFailed, ChromiumUnavailable, get_logo_data_uri, render_html_documents
+from app.utils.pdf_merge import InvalidPdf, inspect_pdf
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/thesis", tags=["Initial Thesis"])
@@ -101,17 +106,31 @@ _ROLE_DISPLAY = {
     "faculty": "Faculty", "hod": "HOD", "librarian": "Librarian",
     "incharge_academic_cell": "Incharge Academic Cell", "dpgs": "DPGS", "super_admin": "Super Admin",
 }
-# Which document types the STUDENT may upload/replace themselves; the library plagiarism
-# report is entered only by a Librarian (see the dedicated library-plagiarism endpoints).
-_STUDENT_DOCUMENT_TYPES = tuple(t for t in THESIS_DOCUMENT_TYPES if t not in CONFIDENTIAL_DOCUMENT_TYPES)
+# Which document types the STUDENT may upload/replace themselves via the generic upload
+# endpoint; the library plagiarism report is entered only by a Librarian (see the dedicated
+# library-plagiarism endpoints), and PG25/Certificate I are SYSTEM-GENERATED ONLY (Section 4/6
+# of the confirmed rules) — a student can never upload either, even by guessing the URL.
+_STUDENT_DOCUMENT_TYPES = tuple(
+    t for t in THESIS_DOCUMENT_TYPES if t not in CONFIDENTIAL_DOCUMENT_TYPES and t not in SYSTEM_GENERATED_DOCUMENT_TYPES
+)
 # The two document types an assigned External Examiner may read, once the Thesis has been
-# sent for evaluation — never the four purely-administrative student documents.
+# sent for evaluation — never the purely-administrative student documents.
 _EXAMINER_DOCUMENT_TYPES = {"thesis_file", "plagiarism_student_report", "plagiarism_library_report"}
+# Document-format rule (Section 5 of the confirmed rules): thesis_file stays .docx; the
+# remaining student-owned business-form documents are PDF (validated with the same
+# `inspect_pdf`/`InvalidPdf` infrastructure Migration/Progress Report already use — never by
+# filename/extension alone). Every other student document type not listed here (currently only
+# `plagiarism_student_report`) keeps the original, unrelated .docx validation this phase.
+_PDF_DOCUMENT_TYPES = {"payment_receipt", "seminar_proceedings", "clearance", "declaration_annexure1"}
 
 _MAX_BYTES = settings.MAX_FILE_SIZE_MB * 1024 * 1024
 _STORED_NAME_RE = re.compile(r"^[0-9a-f]{32}\.(docx|pdf)$")
 _ALLOWED_DOCX_CONTENT_TYPES = {"", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/octet-stream"}
+_ALLOWED_PDF_CONTENT_TYPES = {"", "application/pdf", "application/x-pdf", "application/octet-stream"}
 _OTP_TTL_MINUTES = 10
+_TEMPLATES_DIR = Path(__file__).resolve().parents[3] / "templates"
+_IST = timezone(timedelta(hours=5, minutes=30))
+_jinja_env = None
 
 
 def _now() -> datetime:
@@ -257,10 +276,136 @@ async def _validate_docx_upload(upload: UploadFile) -> tuple[bytes, str]:
     return data, hashlib.sha256(data).hexdigest()
 
 
+async def _validate_pdf_upload(upload: UploadFile) -> tuple[bytes, str]:
+    """PDF ONLY — the same rigor Migration/Progress Report already established: extension,
+    declared content type, the real `%PDF-` signature, the size limit, and a genuine structural
+    parse via the existing generic `app.utils.pdf_merge.inspect_pdf` (never re-implemented
+    here, never a filename-only check). Returns (bytes, sha256)."""
+    name = (upload.filename or "").strip()
+    if os.path.splitext(name)[1].lower() != ".pdf":
+        raise HTTPException(400, "Only PDF files are accepted.")
+    declared = (upload.content_type or "").split(";")[0].strip().lower()
+    if declared not in _ALLOWED_PDF_CONTENT_TYPES:
+        raise HTTPException(400, "Only PDF files are accepted.")
+    data = await upload.read(_MAX_BYTES + 1)
+    if len(data) > _MAX_BYTES:
+        raise HTTPException(413, f"The file exceeds the {settings.MAX_FILE_SIZE_MB} MB limit.")
+    if not data:
+        raise HTTPException(400, "The uploaded file is empty.")
+    if not data.startswith(b"%PDF-"):
+        raise HTTPException(400, "The file is not a PDF document.")
+    try:
+        inspect_pdf(data)
+    except InvalidPdf as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return data, hashlib.sha256(data).hexdigest()
+
+
+async def _validate_upload_for_type(document_type: str, upload: UploadFile) -> tuple[bytes, str, str]:
+    """Dispatches to the correct validator by document type and returns
+    (bytes, sha256, content_type) so callers never have to re-derive the stored content type."""
+    if document_type in _PDF_DOCUMENT_TYPES:
+        data, digest = await _validate_pdf_upload(upload)
+        return data, digest, "application/pdf"
+    data, digest = await _validate_docx_upload(upload)
+    return data, digest, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+def _stored_ext_for(document_type: str) -> str:
+    return "pdf" if document_type in _PDF_DOCUMENT_TYPES or document_type in SYSTEM_GENERATED_DOCUMENT_TYPES else "docx"
+
+
+# ── Generated-document rendering (Playwright/Chromium — Section 6/15/18 of the confirmed
+# rules; the SAME infrastructure Synopsis already uses, never a new engine/LibreOffice) ──────
+
+def _jinja():
+    global _jinja_env
+    if _jinja_env is None:
+        from jinja2 import Environment, FileSystemLoader, select_autoescape
+        _jinja_env = Environment(loader=FileSystemLoader(str(_TEMPLATES_DIR)), autoescape=select_autoescape(["html"]))
+    return _jinja_env
+
+
+class _DotDict(dict):
+    """Attribute access for the template (`d.university`) over a plain JSON-serializable dict."""
+    def __getattr__(self, name):
+        value = self.get(name)
+        return _DotDict(value) if isinstance(value, dict) else value
+
+
+def _render_html(template_name: str, context: dict) -> str:
+    return _jinja().get_template(template_name).render(d=_DotDict(context), logo_data_uri=get_logo_data_uri())
+
+
+def _render_single_pdf(template_name: str, context: dict) -> bytes:
+    return render_html_documents([_render_html(template_name, context)])[0]
+
+
+async def _render_or_503(template_name: str, context: dict) -> bytes:
+    try:
+        return await run_in_threadpool(_render_single_pdf, template_name, context)
+    except ChromiumUnavailable as exc:
+        logger.error("Thesis document generation unavailable: %s", exc)
+        raise HTTPException(503, "PDF generation service is currently unavailable.")
+    except ChromiumRenderFailed as exc:
+        logger.error("Thesis document render failed: %s", exc)
+        raise HTTPException(422, "Unable to generate the document.")
+
+
+def _ist_str(dt: Optional[datetime]) -> Optional[str]:
+    """IST-presented instant (Section 9: seminar date/time "represented as IST consistently
+    with the application") — stored as a normal tz-aware UTC instant like every other
+    timestamp in this schema; the IST rendering is a presentation-only conversion done here."""
+    if not dt:
+        return None
+    return dt.astimezone(_IST).strftime("%d-%b-%Y %I:%M %p IST")
+
+
+async def _store_generated_pdf(
+    t: Thesis, document_type: str, pdf_bytes: bytes, user_id: UUID, db: AsyncSession, cycle_id: Optional[UUID] = None,
+) -> ThesisDocument:
+    """Stores one generated PDF as a new, immutable `ThesisDocument` version — exactly the same
+    versioning mechanism every uploaded document already uses (Section 24: generated documents
+    must not be silently overwritten). Does NOT commit; the caller commits once, atomically,
+    alongside whatever else it changed."""
+    next_version = max((d.version_number for d in t.documents if d.document_type == document_type), default=0) + 1
+    stored_name = f"{secrets.token_hex(16)}.pdf"
+    _write_stored(t.id, stored_name, pdf_bytes)
+    doc = ThesisDocument(
+        thesis_id=t.id, document_type=document_type, version_number=next_version,
+        original_filename=f"{document_type}.pdf", stored_filename=stored_name, content_type="application/pdf",
+        size_bytes=len(pdf_bytes), sha256=hashlib.sha256(pdf_bytes).hexdigest(), is_confidential=False,
+        uploaded_by=user_id, cycle_id=cycle_id,
+    )
+    db.add(doc)
+    t.documents.append(doc)
+    return doc
+
+
 # ── Authorization ────────────────────────────────────────────────────────────
 
 async def _committee_id(student_id: UUID, db: AsyncSession) -> Optional[UUID]:
     return (await db.execute(select(AdvisoryCommittee.id).where(AdvisoryCommittee.student_id == student_id))).scalar_one_or_none()
+
+
+_CERT_LOAD_OPTIONS = (
+    selectinload(ThesisSeminarCertificate.signatures).selectinload(ThesisSeminarCertificateSignature.faculty),
+    selectinload(ThesisSeminarCertificate.recorder),
+)
+
+
+async def _get_certificate(thesis_id: UUID, db: AsyncSession) -> Optional[ThesisSeminarCertificate]:
+    return (await db.execute(
+        select(ThesisSeminarCertificate).options(*_CERT_LOAD_OPTIONS).where(ThesisSeminarCertificate.thesis_id == thesis_id)
+    )).scalar_one_or_none()
+
+
+async def _get_certificate_by_id(certificate_id: UUID, db: AsyncSession) -> Optional[ThesisSeminarCertificate]:
+    return (await db.execute(
+        select(ThesisSeminarCertificate).options(
+            *_CERT_LOAD_OPTIONS, selectinload(ThesisSeminarCertificate.thesis).selectinload(Thesis.student),
+        ).where(ThesisSeminarCertificate.id == certificate_id)
+    )).scalar_one_or_none()
 
 
 async def _my_examiner_evaluation(t: Thesis, user: User) -> Optional[ThesisExternalEvaluation]:
@@ -291,6 +436,16 @@ async def _authorize_view(t: Thesis, user: User, db: AsyncSession) -> None:
         if await _my_examiner_evaluation(t, user):
             return
         raise _not_found()
+    # PG25 (Sections 8-17) happens BEFORE submission — while `t.status` is still "draft" — so the
+    # HOD who recorded it and the Advisory Committee members who must sign it need to see this
+    # Thesis before the normal post-submission visibility rules (below) would otherwise apply.
+    if role in (UserRole.HOD, UserRole.FACULTY):
+        cert = await _get_certificate(t.id, db)
+        if cert:
+            if role == UserRole.HOD and cert.recorded_by == user.id:
+                return
+            if any(sig.faculty_id == user.id for sig in cert.signatures):
+                return
     if t.status == "draft":
         raise _not_found()
     if role in (UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS, UserRole.LIBRARIAN):
@@ -451,12 +606,25 @@ def _external_report_section(t: Thesis, viewer: User) -> dict:
     return {"external_evaluation_completed": any_approved}
 
 
+def _pg25_summary(cert: Optional[ThesisSeminarCertificate]) -> Optional[dict]:
+    if not cert:
+        return None
+    return {
+        "id": str(cert.id), "status": cert.status,
+        "seminar_at": _iso(cert.seminar_at), "seminar_at_ist": _ist_str(cert.seminar_at),
+        "approved_at": _iso(cert.approved_at),
+        "signatures_completed": sum(1 for s in cert.signatures if s.status == "signed"),
+        "signatures_required": len(cert.signatures),
+    }
+
+
 async def _thesis_dict(t: Thesis, viewer: User, db: AsyncSession) -> dict:
     dept_names = await _department_names(db)
     cycle = _latest_cycle(t)
     my_stage = await _find_my_stage(t, viewer, db) if viewer.active_role in _APPROVER_ROLES else None
     is_examiner = viewer.active_role == UserRole.EXTERNAL_EXAMINER
     my_evaluation = await _my_examiner_evaluation(t, viewer) if is_examiner else None
+    cert = await _get_certificate(t.id, db)
 
     revert_info = None
     if t.status == "reverted" and cycle and cycle.status == "reverted":
@@ -469,7 +637,17 @@ async def _thesis_dict(t: Thesis, viewer: User, db: AsyncSession) -> dict:
         }
 
     doc_types = _EXAMINER_DOCUMENT_TYPES if is_examiner else THESIS_DOCUMENT_TYPES
-    documents = {dt: _document_dict(_latest_document(t, dt)) for dt in doc_types}
+    documents = {}
+    for dt in doc_types:
+        # Section 16 (critical): the student never sees PG25 as an available Student Document
+        # until it is fully approved (HOD-generated AND every required Advisory Committee member
+        # has signed) — enforced HERE, server-side, never by frontend hiding; every other
+        # viewer (HOD/committee/other approvers/Super Admin) sees it as soon as it exists,
+        # since they are the ones actively working on it.
+        if dt == "seminar_certificate_pg25" and viewer.active_role == UserRole.STUDENT and (not cert or cert.status != "approved"):
+            documents[dt] = None
+            continue
+        documents[dt] = _document_dict(_latest_document(t, dt))
 
     body = {
         "id": str(t.id), "thesis_type": t.thesis_type,
@@ -486,6 +664,7 @@ async def _thesis_dict(t: Thesis, viewer: User, db: AsyncSession) -> dict:
         "plagiarism_library_percent": t.plagiarism_library_percent,
         "abstract": t.abstract if not is_examiner else None,
         "documents": documents,
+        "pg25": _pg25_summary(cert),
         "is_owner": viewer.active_role == UserRole.STUDENT and t.student_id == viewer.id,
         "can_edit": viewer.active_role == UserRole.STUDENT and t.student_id == viewer.id and t.status in _EDITABLE_STATUSES,
         "revert_info": revert_info,
@@ -675,19 +854,53 @@ async def upload_document(
         raise HTTPException(404, "Unknown document type.")
     t = await _get_thesis(thesis_id, db)
     _require_owned_editable_thesis(t, user)
-    data, digest = await _validate_docx_upload(file)
+    data, digest, content_type = await _validate_upload_for_type(document_type, file)
     next_version = max((d.version_number for d in t.documents if d.document_type == document_type), default=0) + 1
-    stored_name = f"{secrets.token_hex(16)}.docx"
+    stored_name = f"{secrets.token_hex(16)}.{_stored_ext_for(document_type)}"
     _write_stored(t.id, stored_name, data)
     doc = ThesisDocument(
         thesis_id=t.id, document_type=document_type, version_number=next_version,
         original_filename=os.path.basename((file.filename or document_type).replace("\\", "/"))[:255] or document_type,
-        stored_filename=stored_name, content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        stored_filename=stored_name, content_type=content_type,
         size_bytes=len(data), sha256=digest, is_confidential=document_type in CONFIDENTIAL_DOCUMENT_TYPES, uploaded_by=user.id,
     )
     db.add(doc)
     await db.commit()
     return {"message": "Document uploaded.", "document_id": str(doc.id), "version": next_version}
+
+
+@router.post("/{thesis_id}/declaration/generate", status_code=201)
+async def generate_declaration(
+    thesis_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.STUDENT)),
+):
+    """The Student Declaration (Annexure-I), system-generated from live AMS data (Section 6 of
+    the confirmed rules). Generate and Upload (the endpoint above, `document_type=
+    "declaration_annexure1"`) occupy the SAME logical document slot — whichever happened most
+    recently is simply the latest version, exactly like any other document type; nothing
+    special is invented for this pair beyond that."""
+    t = await _get_thesis(thesis_id, db)
+    _require_owned_editable_thesis(t, user)
+    committee = (await db.execute(
+        select(AdvisoryCommittee).options(selectinload(AdvisoryCommittee.members).selectinload(CommitteeMember.faculty))
+        .where(AdvisoryCommittee.student_id == user.id)
+    )).scalar_one_or_none()
+    major = next((m for m in committee.members if m.role == "major_advisor" and m.accepted is True), None) if committee else None
+    now = _now()
+    context = {
+        "university": UNIVERSITY_NAME, "college_name": t.student.college.name if t.student.college else None,
+        "student_name": t.student.full_name, "degree_name": t.student.program.name if t.student.program else None,
+        "student_roll": t.student.student_roll, "student_email": t.student.email, "student_mobile": t.student.mobile,
+        "advisor_name": _person_name(major.faculty) if major else None,
+        "advisor_designation": major.faculty.designation if (major and major.faculty) else None,
+        "advisor_email": major.faculty.email if (major and major.faculty) else None,
+        "advisor_mobile": major.faculty.mobile if (major and major.faculty) else None,
+        "title": t.title_snapshot, "plagiarism_software_name": t.plagiarism_software_name,
+        "generated_at": now.strftime("%d-%b-%Y %H:%M:%S"),
+    }
+    pdf_bytes = await _render_or_503("declaration_annexure1.html", context)
+    doc = await _store_generated_pdf(t, "declaration_annexure1", pdf_bytes, user.id, db)
+    await db.commit()
+    return {"message": "Student Declaration generated.", "document_id": str(doc.id), "version": doc.version_number}
 
 
 @router.get("/{thesis_id}/documents/{document_id}/download")
@@ -708,6 +921,13 @@ async def download_document(
         raise HTTPException(404, "Document not found.")
     if user.active_role == UserRole.EXTERNAL_EXAMINER and doc.document_type not in _EXAMINER_DOCUMENT_TYPES:
         raise HTTPException(404, "Document not found.")
+    if user.active_role == UserRole.STUDENT and doc.document_type == "seminar_certificate_pg25":
+        # Re-verified here too, never trusted merely because it was absent from the `documents`
+        # dict — a student who somehow learns a real document_id must still be blocked (Section
+        # 16/26: "backend authorization must enforce this").
+        cert = await _get_certificate(t.id, db)
+        if not cert or cert.status != "approved":
+            raise HTTPException(404, "Document not found.")
     data = _read_stored(t.id, doc.stored_filename)
     return Response(
         content=data, media_type=doc.content_type or "application/octet-stream",
@@ -771,6 +991,9 @@ async def submit_thesis(thesis_id: UUID, db: AsyncSession = Depends(get_db), use
         raise _not_found()
     if t.status not in _EDITABLE_STATUSES:
         raise HTTPException(400, "This Initial Thesis is already under approval or approved.")
+    cert = await _get_certificate(t.id, db)
+    if not cert or cert.status != "approved":
+        raise HTTPException(400, "Your Thesis Seminar Certificate (PG 25) must be fully approved — recorded by your HOD and signed by every required Advisory Committee member — before you can submit your Initial Thesis.")
     if not _latest_document(t, "thesis_file"):
         raise HTTPException(400, "Upload your Thesis File (.docx) before submitting.")
     if t.plagiarism_student_percent is None:
@@ -881,6 +1104,284 @@ def _record_action(stage: ThesisApprovalStage, user: User, status: str, now: dat
         stage.remark = remark
 
 
+@router.post("/{thesis_id}/certificate-i/generate", status_code=201)
+async def generate_certificate_i(
+    thesis_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.FACULTY, UserRole.HOD)),
+):
+    """Certificate I (Form No. PG 27) — Section 18-23 of the confirmed rules. Authorization is
+    NOT "any Major Advisor" and NOT "supply a thesis_id" — it is exactly the same live,
+    server-resolved check every other Major-Advisor action in this module already uses
+    (`_require_my_stage`, stage_type == "major_advisor"): the caller must currently hold the
+    ACTIVE cycle's pending Major Advisor stage for THIS student. Scoped to `cycle_id` so a
+    Certificate I generated for an earlier, since-reverted submission can never satisfy a later
+    resubmission's requirement (Section 21) — generating again for a fresh cycle is always
+    allowed and always creates a NEW document version tied to the NEW cycle, never mistaken for
+    the old one."""
+    t = await _get_thesis(thesis_id, db)
+    stage = await _require_my_stage(t, user, db)
+    if stage.stage_type != "major_advisor":
+        raise HTTPException(400, "Certificate I can only be generated while this Initial Thesis is at the Major Advisor stage.")
+    cycle = _active_cycle(t)
+    if any(d.document_type == "certificate_i_pg27" and d.cycle_id == cycle.id for d in t.documents):
+        raise HTTPException(409, "Certificate I has already been generated for this submission.")
+    now = _now()
+    context = {
+        "university": UNIVERSITY_NAME, "college_name": t.student.college.name if t.student.college else None,
+        "student_name": t.student.full_name, "student_roll": t.student.student_roll,
+        "degree_name": t.student.program.name if t.student.program else None,
+        "department_name": t.student.department.name if t.student.department else None,
+        "title": t.title_snapshot,
+        "advisor_name": _person_name(user), "advisor_designation": user.designation,
+        "generated_at": now.strftime("%d-%b-%Y %H:%M:%S"),
+    }
+    pdf_bytes = await _render_or_503("certificate_i.html", context)
+    doc = await _store_generated_pdf(t, "certificate_i_pg27", pdf_bytes, user.id, db, cycle_id=cycle.id)
+    await db.commit()
+    return {"message": "Certificate I generated and signed by the Major Advisor.", "document_id": str(doc.id), "version": doc.version_number}
+
+
+# ── PG25 (Thesis Seminar Certificate) — Sections 8-17 of the confirmed rules ──────────────────
+
+def _pg25_row(t: Thesis, cert: Optional[ThesisSeminarCertificate], sl_no: int) -> dict:
+    return {
+        "sl_no": sl_no, "thesis_id": str(t.id),
+        "student_roll": t.student.student_roll, "student_name": t.student.full_name,
+        "seminar_at": _iso(cert.seminar_at) if cert else None, "seminar_at_ist": _ist_str(cert.seminar_at) if cert else None,
+        "status": cert.status if cert else "not_recorded",
+        "status_label": {"not_recorded": "Not Recorded", "awaiting_committee": "Awaiting Committee Signatures", "approved": "Approved"}[cert.status if cert else "not_recorded"],
+        "hod_signed": bool(cert), "can_act": cert is None,
+    }
+
+
+@router.get("/pg25/hod")
+async def list_pg25_hod(db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.HOD))):
+    """Section 9's HOD screen: every "initial" Thesis belonging to a student in the HOD's OWN
+    active department (never a client-supplied department id) — regardless of whether PG25 has
+    been recorded yet, so the HOD can see who still needs a seminar outcome. The requested
+    "Academic Year" filter is real (`User.academic_year_id`, the only genuine per-student
+    academic-year field in this schema); a per-student "Semester" is NOT recorded anywhere in
+    AMS today (Semester belongs to `CourseOffering`, not to a student directly), so it is
+    deliberately not offered as a server-side filter here rather than faking one — see the
+    implementation report."""
+    if not user.active_department_id:
+        return []
+    theses = (await db.execute(
+        select(Thesis).options(*_LOAD_OPTIONS).join(User, User.id == Thesis.student_id)
+        .where(User.department_id == user.active_department_id, Thesis.thesis_type == "initial")
+    )).unique().scalars().all()
+    rows = []
+    for i, t in enumerate(theses, start=1):
+        cert = await _get_certificate(t.id, db)
+        rows.append(_pg25_row(t, cert, i))
+    return rows
+
+
+@router.post("/{thesis_id}/pg25/satisfactory", status_code=201)
+async def pg25_satisfactory(
+    thesis_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.HOD)),
+):
+    """Section 9's Satisfactory action, in full: verify own-department HOD -> record outcome ->
+    stamp seminar date/time -> generate the PG25 PDF -> auto-sign HOD's portion -> resolve the
+    student's REAL Advisory Committee -> create one required signature row per accepted member
+    -> commit atomically. The unique `thesis_id` constraint on `ams_thesis_seminar_certificates`
+    is the idempotency guarantee against a duplicate/accidental repeat click (Section 9's "must
+    be idempotent")."""
+    t = await _get_thesis(thesis_id, db)
+    dept_id = await resolve_student_department_id(t.student_id, db)
+    if not dept_id or not user.active_department_id or dept_id != user.active_department_id:
+        raise _not_found()
+    if t.thesis_type != "initial":
+        raise _not_found()
+    existing = (await db.execute(select(ThesisSeminarCertificate.id).where(ThesisSeminarCertificate.thesis_id == t.id))).scalar_one_or_none()
+    if existing:
+        raise HTTPException(409, "The Thesis Seminar Certificate has already been recorded for this student.")
+    committee = (await db.execute(
+        select(AdvisoryCommittee).options(selectinload(AdvisoryCommittee.members).selectinload(CommitteeMember.faculty))
+        .where(AdvisoryCommittee.student_id == t.student_id)
+    )).scalar_one_or_none()
+    required = [m for m in (committee.members if committee else []) if m.accepted is True]
+    if not required:
+        raise HTTPException(400, "This student has no accepted Advisory Committee members yet; the Thesis Seminar Certificate cannot be generated.")
+    now = _now()
+    cert = ThesisSeminarCertificate(thesis_id=t.id, seminar_at=now, status="awaiting_committee", recorded_by=user.id, recorded_at=now, hod_signed_at=now)
+    db.add(cert)
+    await db.flush()
+    for m in required:
+        db.add(ThesisSeminarCertificateSignature(certificate_id=cert.id, committee_member_id=m.id, faculty_id=m.faculty_id, role_snapshot=m.role, status="pending"))
+    await db.flush()
+    await db.refresh(cert, attribute_names=["signatures", "recorder"])
+    pdf_bytes = await _render_or_503("pg25_certificate.html", await _pg25_pdf_context(t, cert, db))
+    await _store_generated_pdf(t, "seminar_certificate_pg25", pdf_bytes, user.id, db)
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(409, "The Thesis Seminar Certificate has already been recorded for this student.")
+    return {"message": "Seminar recorded as satisfactory. The Thesis Seminar Certificate (PG 25) has been generated and routed to the Advisory Committee.", "certificate_id": str(cert.id)}
+
+
+@router.post("/{thesis_id}/pg25/unsatisfactory")
+async def pg25_unsatisfactory(thesis_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.HOD))):
+    """Deliberately a NO-OP (Section 14 of the confirmed rules): AVFU asked for this button, but
+    its business effect has not been defined yet, and none is invented here. Authorization is
+    still fully enforced (own-department HOD only, resolved server-side) precisely so this
+    endpoint can never be used to probe for the existence of another department's Thesis — but
+    no database write of any kind occurs."""
+    t = await _get_thesis(thesis_id, db)
+    dept_id = await resolve_student_department_id(t.student_id, db)
+    if not dept_id or not user.active_department_id or dept_id != user.active_department_id:
+        raise _not_found()
+    return {"message": "Recorded. No further business behavior is defined for Unsatisfactory yet — this is intentionally deferred pending AVFU's decision."}
+
+
+@router.post("/{thesis_id}/pg25/hod-sign")
+async def pg25_hod_sign(thesis_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.HOD))):
+    """Deliberately a NO-OP (Section 12): the HOD's signature is already recorded automatically
+    by the Satisfactory action (`hod_signed_at`); this explicit button exists because AVFU asked
+    for it to remain, but performs no further write this phase."""
+    t = await _get_thesis(thesis_id, db)
+    dept_id = await resolve_student_department_id(t.student_id, db)
+    if not dept_id or not user.active_department_id or dept_id != user.active_department_id:
+        raise _not_found()
+    return {"message": "No additional action is defined for this button yet — the HOD signature was already recorded automatically when the seminar was marked Satisfactory."}
+
+
+def _my_pg25_signature(cert: ThesisSeminarCertificate, user: User) -> Optional[ThesisSeminarCertificateSignature]:
+    return next((s for s in cert.signatures if s.faculty_id == user.id), None)
+
+
+@router.get("/pg25/mine/home")
+async def pg25_home(db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.FACULTY, UserRole.HOD))):
+    """Section 11's Home tab: fully-APPROVED certificates the caller is an actual required
+    signer on — resolved entirely from the real `ThesisSeminarCertificateSignature.faculty_id`,
+    never from a client-supplied id."""
+    certs = (await db.execute(
+        select(ThesisSeminarCertificate).options(
+            selectinload(ThesisSeminarCertificate.signatures), selectinload(ThesisSeminarCertificate.thesis).selectinload(Thesis.student),
+        ).join(ThesisSeminarCertificateSignature, ThesisSeminarCertificateSignature.certificate_id == ThesisSeminarCertificate.id)
+        .where(ThesisSeminarCertificateSignature.faculty_id == user.id, ThesisSeminarCertificate.status == "approved")
+    )).unique().scalars().all()
+    return [{
+        "sl_no": i, "certificate_id": str(c.id), "thesis_id": str(c.thesis_id),
+        "student_name": c.thesis.student.full_name, "student_roll": c.thesis.student.student_roll,
+        "status": c.status, "status_label": "Approved",
+    } for i, c in enumerate(certs, start=1)]
+
+
+@router.get("/pg25/mine/pending")
+async def pg25_pending(db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.FACULTY, UserRole.HOD))):
+    """Section 11's Pending tab: certificates awaiting the caller's OWN required signature."""
+    sigs = (await db.execute(
+        select(ThesisSeminarCertificateSignature).options(
+            selectinload(ThesisSeminarCertificateSignature.certificate).selectinload(ThesisSeminarCertificate.thesis).selectinload(Thesis.student),
+        ).where(ThesisSeminarCertificateSignature.faculty_id == user.id, ThesisSeminarCertificateSignature.status == "pending")
+    )).unique().scalars().all()
+    rows = []
+    for i, sig in enumerate(sigs, start=1):
+        c = sig.certificate
+        rows.append({
+            "sl_no": i, "certificate_id": str(c.id), "thesis_id": str(c.thesis_id),
+            "student_roll": c.thesis.student.student_roll, "student_name": c.thesis.student.full_name,
+            "seminar_at": _iso(c.seminar_at), "seminar_at_ist": _ist_str(c.seminar_at),
+            "status": c.status, "status_label": "Awaiting Committee Signatures",
+        })
+    return rows
+
+
+@router.post("/pg25/{certificate_id}/sign")
+async def pg25_committee_sign(certificate_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.FACULTY, UserRole.HOD))):
+    """Section 10/11: only the authenticated committee member's OWN required signature may ever
+    be performed by this call — resolved from the real `faculty_id` on their OWN signature row,
+    never from any id supplied in the request. A caller with no matching row (not a member of
+    THIS student's committee, or already signed) gets a 404, never a 403 that would confirm the
+    certificate exists."""
+    cert = await _get_certificate_by_id(certificate_id, db)
+    if not cert:
+        raise HTTPException(404, "Certificate not found.")
+    sig = _my_pg25_signature(cert, user)
+    if not sig:
+        raise HTTPException(404, "Certificate not found.")
+    if sig.status == "signed":
+        raise HTTPException(400, "You have already signed this certificate.")
+    sig.status = "signed"
+    sig.signed_at = _now()
+    await db.flush()
+    await db.refresh(cert, attribute_names=["signatures"])
+    if all(s.status == "signed" for s in cert.signatures):
+        cert.status = "approved"
+        cert.approved_at = _now()
+    t = await _get_thesis(cert.thesis_id, db)
+    pdf_bytes = await _render_or_503("pg25_certificate.html", await _pg25_pdf_context(t, cert, db))
+    await _store_generated_pdf(t, "seminar_certificate_pg25", pdf_bytes, user.id, db)
+    await db.commit()
+    return {"message": "Signed.", "status": cert.status}
+
+
+@router.post("/pg25/{certificate_id}/revert")
+async def pg25_committee_revert(certificate_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.FACULTY, UserRole.HOD))):
+    """Deliberately a NO-OP (Section 13): the Revert button stays visible because AVFU asked for
+    it, but no destination stage, no thesis-approval-cycle change, and no PG25 state reset is
+    invented here. Authorization is still fully enforced — only an actual required signer on
+    THIS certificate may call this at all — so it cannot be used to probe for another student's
+    certificate; no database write occurs."""
+    cert = await _get_certificate_by_id(certificate_id, db)
+    if not cert or not _my_pg25_signature(cert, user):
+        raise HTTPException(404, "Certificate not found.")
+    return {"message": "Recorded. No business effect is defined for Revert yet — this is intentionally deferred pending AVFU's decision."}
+
+
+@router.get("/pg25/{certificate_id}")
+async def get_pg25_detail(
+    certificate_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.HOD, UserRole.FACULTY, UserRole.SUPER_ADMIN)),
+):
+    """Detail view behind a Faculty/HOD "View" action — authorization is the SAME real-
+    relationship check as everywhere else in this sub-module (own-department HOD who recorded
+    it, or an actual required committee signer), never a bare role check."""
+    cert = await _get_certificate_by_id(certificate_id, db)
+    if not cert:
+        raise HTTPException(404, "Certificate not found.")
+    authorized = user.active_role == UserRole.SUPER_ADMIN or _my_pg25_signature(cert, user) is not None
+    if not authorized and user.active_role == UserRole.HOD:
+        dept_id = await resolve_student_department_id(cert.thesis.student_id, db)
+        authorized = bool(dept_id and user.active_department_id and dept_id == user.active_department_id)
+    if not authorized:
+        raise HTTPException(404, "Certificate not found.")
+    dept_names = await _department_names(db)
+    return {
+        "id": str(cert.id), "thesis_id": str(cert.thesis_id), "status": cert.status,
+        "student_name": cert.thesis.student.full_name, "student_roll": cert.thesis.student.student_roll,
+        "seminar_at": _iso(cert.seminar_at), "seminar_at_ist": _ist_str(cert.seminar_at),
+        "approved_at": _iso(cert.approved_at),
+        "signatures": [{
+            "role_label": s.role_snapshot, "name": _person_name(s.faculty), "status": s.status,
+            "signed_at": _iso(s.signed_at), "is_me": s.faculty_id == user.id,
+        } for s in cert.signatures],
+    }
+
+
+async def _pg25_pdf_context(t: Thesis, cert: ThesisSeminarCertificate, db: AsyncSession) -> dict:
+    program = t.student.program
+    dept_names = await _department_names(db)
+    committee_rows = []
+    for s in cert.signatures:
+        faculty = (await db.execute(select(User).where(User.id == s.faculty_id))).scalar_one_or_none()
+        committee_rows.append({
+            "role_label": s.role_snapshot, "name": _person_name(faculty) or "—",
+            "designation": faculty.designation if faculty else None, "status": s.status,
+        })
+    return {
+        "university": UNIVERSITY_NAME, "college_name": t.student.college.name if t.student.college else None,
+        "student_name": t.student.full_name, "student_roll": t.student.student_roll,
+        "degree_name": t.student.program.name if t.student.program else None,
+        "degree_level": program.level if program else None,
+        "department_name": t.student.department.name if t.student.department else None,
+        "seminar_at": _ist_str(cert.seminar_at),
+        "hod_name": _person_name(cert.recorder),
+        "committee_rows": committee_rows, "status": cert.status,
+        "generated_at": _now().strftime("%d-%b-%Y %H:%M:%S"),
+    }
+
+
 @router.post("/{thesis_id}/approval/approve")
 async def approve_stage(
     thesis_id: UUID, body: ApproveIn, request: Request, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(*_APPROVER_ROLES)),
@@ -894,6 +1395,9 @@ async def approve_stage(
 
     if stage.stage_type == "librarian" and (t.plagiarism_library_percent is None or not any(d.document_type == "plagiarism_library_report" for d in t.documents)):
         raise HTTPException(400, "Enter the Library plagiarism percentage and upload the Library plagiarism report before approving.")
+
+    if stage.stage_type == "major_advisor" and not any(d.document_type == "certificate_i_pg27" and d.cycle_id == cycle.id for d in t.documents):
+        raise HTTPException(400, "Generate Certificate I (Form No. PG 27) for this submission before approving.")
 
     if stage.stage_type in _SIGNATORY_STAGES:
         await _consume_otp(stage, user, body.otp or "", request, db)

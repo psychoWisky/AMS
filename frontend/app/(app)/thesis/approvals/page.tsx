@@ -63,6 +63,11 @@ export default function ThesisApprovalsPage() {
     onSuccess: () => { toast.success("Reverted to the student."); done(); setSelectedId(null); },
     onError: (e) => toast.error(apiErrorMessage(e, "Revert failed.")),
   });
+  const generateCertificateI = useMutation({
+    mutationFn: () => api.post(`/thesis/${selectedId}/certificate-i/generate`),
+    onSuccess: () => { toast.success("Certificate I generated and signed."); qc.invalidateQueries({ queryKey: ["ams-thesis-detail-approver", selectedId] }); },
+    onError: (e) => toast.error(apiErrorMessage(e, "Could not generate Certificate I.")),
+  });
   const setLibraryPlagiarism = useMutation({
     mutationFn: () => api.patch(`/thesis/${selectedId}/library-plagiarism`, { plagiarism_library_percent: Number(libPercent) }),
     onSuccess: () => { toast.success("Library plagiarism percentage saved."); qc.invalidateQueries({ queryKey: ["ams-thesis-detail-approver", selectedId] }); },
@@ -80,6 +85,8 @@ export default function ThesisApprovalsPage() {
 
   const stage = detail?.my_pending_stage ?? null;
   const isLibrarian = role === "librarian" && stage?.stage_type === "librarian";
+  const isMajorAdvisorStage = stage?.stage_type === "major_advisor";
+  const certificateIReady = !!detail?.documents.certificate_i_pg27;
 
   function download(documentId: string) {
     window.open(`${api.defaults.baseURL}/thesis/${selectedId}/documents/${documentId}/download`, "_blank");
@@ -184,6 +191,26 @@ export default function ThesisApprovalsPage() {
             {detail.signature_table && <SignatureTable rows={detail.signature_table} />}
             {detail.stages && <StageTimeline stages={detail.stages} />}
             {detail.external_report && <ExternalReportTable rows={detail.external_report} />}
+
+            {isMajorAdvisorStage && (
+              <div className="bg-white rounded-2xl border border-gray-200 p-5 space-y-2">
+                <p className="text-sm font-semibold text-gray-700">Certificate I (Form No. PG 27)</p>
+                <p className="text-xs text-gray-500">
+                  {certificateIReady ? "Generated and signed. You may proceed to approve this Initial Thesis." : "You must generate Certificate I for this submission before approving."}
+                </p>
+                <div className="flex items-center gap-2">
+                  {detail.documents.certificate_i_pg27 && (
+                    <button onClick={() => download(detail.documents.certificate_i_pg27!.id)} className="px-3 py-1.5 border border-gray-200 rounded-lg text-xs font-semibold hover:bg-gray-50">View Certificate I</button>
+                  )}
+                  {!certificateIReady && (
+                    <button onClick={() => generateCertificateI.mutate()} disabled={generateCertificateI.isPending}
+                      className="px-3 py-1.5 bg-gray-700 text-white rounded-lg text-xs font-semibold hover:bg-gray-800 disabled:opacity-50">
+                      {generateCertificateI.isPending ? "Generating…" : "Generate Certificate I"}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
 
             {stage ? (
               <div className="border-t border-gray-100 pt-4">

@@ -42,7 +42,7 @@ from app.models.ppw import Ppw
 from app.models.research import AdvisoryCommittee, CommitteeMember
 from app.models.thesis import (
     Thesis, ThesisApprovalCycle, ThesisApprovalStage, ThesisDocument,
-    ThesisExternalEvaluation, ThesisSignature,
+    ThesisExternalEvaluation, ThesisSeminarCertificate, ThesisSeminarCertificateSignature, ThesisSignature,
 )
 from app.models.user import College, Department, Program, RefreshToken, User, UserRole, UserRoleAssignment
 
@@ -267,6 +267,52 @@ async def _submit(student_key: str, expect=200) -> httpx.Response:
     return r
 
 
+# PG25 / Certificate I plumbing (this revision). One committee-signer list per student key,
+# derived directly from the `_mk_committee(...)` calls in `_setup()` below; `_MA_KEY` covers the
+# two students whose Major Advisor is NOT "ma1".
+_PG25_SIGNERS = {
+    "s1": ["ma1"], "s2": ["ma1"], "s_val": ["ma1"], "s_lib1": ["ma1"], "s_lib2": ["ma1"],
+    "s_revert": ["ma1"], "s_zero": ["ma1"], "s_examx": ["ma1"], "s_phd": ["ma1"],
+    "s_deptb": ["ma_d2"], "s_lock": ["ma_lock", "mem_lock"],
+}
+_PG25_HOD = {"s_deptb": "hod2"}
+_MA_KEY = {"s_deptb": "ma_d2", "s_lock": "ma_lock"}
+
+
+def _ma_key_for(student_key: str) -> str:
+    return _MA_KEY.get(student_key, "ma1")
+
+
+async def _complete_pg25(student_key: str) -> str:
+    """Drives PG25 to fully "approved" for `student_key`'s Thesis: HOD Satisfactory, then every
+    real, accepted Advisory Committee member signs. Returns the certificate id."""
+    sid = TH[student_key]
+    hod_key = _PG25_HOD.get(student_key, "hod1")
+    r = await _call("POST", f"/thesis/{sid}/pg25/satisfactory", TOK[hod_key])
+    assert r.status_code == 201, r.text
+    cert_id = r.json()["certificate_id"]
+    for fac_key in _PG25_SIGNERS[student_key]:
+        r2 = await _call("POST", f"/thesis/pg25/{cert_id}/sign", TOK[fac_key])
+        assert r2.status_code == 200, r2.text
+    return cert_id
+
+
+async def _generate_cert_i(student_key: str, ma_key: str | None = None) -> httpx.Response:
+    sid = TH[student_key]
+    r = await _call("POST", f"/thesis/{sid}/certificate-i/generate", TOK[ma_key or _ma_key_for(student_key)])
+    assert r.status_code == 201, r.text
+    return r
+
+
+async def _approve_ma(student_key: str) -> None:
+    """Generates Certificate I (now mandatory, Section 20) then approves the Major Advisor
+    stage — the drop-in replacement for a bare `_approve(sid, TOK[ma_key])` everywhere the
+    Major Advisor stage is approved in this file."""
+    ma_key = _ma_key_for(student_key)
+    await _generate_cert_i(student_key, ma_key)
+    await _approve(TH[student_key], TOK[ma_key])
+
+
 async def _approve(sid, token, expect=200) -> httpx.Response:
     """Handles both signatory stages (OTP required) and the Incharge stage
     (workflow-only, GET otp returns 400) uniformly."""
@@ -310,6 +356,8 @@ async def _advance_to(student_key: str, target_status: str, *, librarian_key="li
             continue
         if phase == "librarian_pending":
             await _set_library_data(sid, stage_tok[phase])
+        if phase == "major_advisor_pending":
+            await _generate_cert_i(student_key)
         await _approve(sid, stage_tok[phase])
 
 
@@ -514,11 +562,31 @@ async def t_student_isolation():
     assert (await _call("GET", f"/thesis/{sid_a}/documents/{doc_id}/download", tok_b)).status_code == 404
 
 
+def _extract_pdf_text(data: bytes) -> str:
+    """A generated PDF's text lives in compressed content streams — a raw byte/latin-1 substring
+    search over the file will almost never find it. Use pypdf's real text extraction instead."""
+    from pypdf import PdfReader
+    reader = PdfReader(io.BytesIO(data))
+    return "\n".join(p.extract_text() or "" for p in reader.pages)
+
+
+def _pdf(body: bytes = b"dummy") -> bytes:
+    # A minimal, genuinely-parseable one-page PDF (pypdf's `inspect_pdf` requires a real,
+    # structurally-valid document — a bare "%PDF-" prefix is deliberately rejected elsewhere in
+    # this test, so the "good" fixture here must actually parse).
+    from pypdf import PdfWriter
+    buf = io.BytesIO()
+    w = PdfWriter()
+    w.add_blank_page(width=595, height=842)
+    w.write(buf)
+    return buf.getvalue()
+
+
 async def t_upload_validation():
     sid = TH["s1"]
     tok = TOK["s1"]
     good_docx = _docx()
-    for doc_type in ("thesis_file", "plagiarism_student_report", "seminar_proceedings"):
+    for doc_type in ("thesis_file", "plagiarism_student_report"):
         assert (await _upload_doc(sid, doc_type, tok, data=b"%PDF-1.4\n" + b"0" * 100, filename="x.pdf", ct="application/pdf")).status_code == 400
         assert (await _upload_doc(sid, doc_type, tok, data=b"plain text", filename="x.txt", ct="text/plain")).status_code == 400
         assert (await _upload_doc(sid, doc_type, tok, data=b"MZ" + b"\x00" * 200, filename="x.docx", ct="application/vnd.openxmlformats-officedocument.wordprocessingml.document")).status_code == 400, "renamed .exe"
@@ -527,6 +595,22 @@ async def t_upload_validation():
         assert (await _upload_doc(sid, doc_type, tok, data=good_docx, filename="x.docx", ct="text/plain")).status_code == 400, "wrong declared content-type"
         r = await _upload_doc(sid, doc_type, tok, data=good_docx)
         assert r.status_code == 201, (doc_type, r.text)
+    # PDF-format documents (Section 5, this revision): Payment Receipt, Proceedings of the
+    # Thesis Seminar, Clearance, and the Student Declaration (Annexure-I upload path).
+    good_pdf = _pdf()
+    for doc_type in ("payment_receipt", "seminar_proceedings", "clearance", "declaration_annexure1"):
+        assert (await _upload_doc(sid, doc_type, tok, data=good_docx, filename="x.docx", ct="application/vnd.openxmlformats-officedocument.wordprocessingml.document")).status_code == 400, "docx rejected for a PDF-only type"
+        assert (await _upload_doc(sid, doc_type, tok, data=b"plain text", filename="x.pdf", ct="application/pdf")).status_code == 400, "renamed .txt"
+        assert (await _upload_doc(sid, doc_type, tok, data=b"", filename="x.pdf", ct="application/pdf")).status_code == 400, "empty file"
+        assert (await _upload_doc(sid, doc_type, tok, data=b"%PDF-1.4\n" + b"not a real pdf structure" * 5, filename="x.pdf", ct="application/pdf")).status_code == 400, "corrupt/unparseable pdf"
+        assert (await _upload_doc(sid, doc_type, tok, data=good_pdf, filename="x.pdf", ct="text/plain")).status_code == 400, "wrong declared content-type"
+        r = await _upload_doc(sid, doc_type, tok, data=good_pdf, filename="x.pdf", ct="application/pdf")
+        assert r.status_code == 201, (doc_type, r.text)
+    # Annexure-IV no longer exists as a document type at all — the generic upload endpoint
+    # rejects it exactly like any other unknown type (Section 4/29: "attempts to use it are
+    # rejected"), and PG25/Certificate I are system-generated only, never student-uploadable.
+    for removed_or_generated in ("annexure_iv", "seminar_certificate_pg25", "certificate_i_pg27"):
+        assert (await _upload_doc(sid, removed_or_generated, tok, data=good_pdf, filename="x.pdf", ct="application/pdf")).status_code == 404
     # library plagiarism report (as Librarian) — same validation. s_val was already
     # fully submitted (major_advisor_pending) by t_submission_validation; advance it
     # two stages so a Librarian is actually able to act.
@@ -542,7 +626,7 @@ async def _advance_ma_hod(student_key: str) -> None:
     """Assumes the thesis is already submitted (major_advisor_pending) and drives
     it through the Major Advisor + HOD approvals to reach librarian_pending."""
     sid = TH[student_key]
-    await _approve(sid, TOK["ma1"])
+    await _approve_ma(student_key)
     await _approve(sid, TOK["hod1"])
     assert (await _row(sid)).status == "librarian_pending"
 
@@ -551,6 +635,12 @@ async def t_submission_validation():
     await _create_thesis("s_val")
     sid = TH["s_val"]
     tok = TOK["s_val"]
+    # PG25 must be fully approved before ANY other submission validation is even reachable
+    # (Section 17 — the first-checked gate); completed once, up front, so the rest of this
+    # test's per-field assertions below remain meaningful.
+    r = await _submit("s_val", expect=400)
+    assert "PG 25" in r.json()["detail"], r.text
+    await _complete_pg25("s_val")
     # no thesis_file
     r = await _submit("s_val", expect=400)
     assert "Thesis File" in r.json()["detail"], r.text
@@ -571,11 +661,17 @@ async def t_submission_validation():
     r = await _submit("s_val", expect=400)
     assert "Abstract" in r.json()["detail"], r.text
     assert (await _call("PATCH", f"/thesis/{sid}", tok, json={"abstract": "ZZTEST abstract."})).status_code == 200
-    # no accepted Major Advisor
+    # no accepted Major Advisor -> the Advisory Committee has no accepted member -> PG25 itself
+    # (the new, now-first submission gate, Section 17) can never be completed for this student,
+    # which supersedes the old direct "no accepted Major Advisor" submission-time message as
+    # the actual blocking reason; the underlying business rule (an unaccepted Major Advisor
+    # blocks progress) is still exercised, just surfaced at the PG25 step instead.
     await _create_thesis("s_noma")
     await _make_submittable("s_noma")
+    r = await _call("POST", f"/thesis/{TH['s_noma']}/pg25/satisfactory", TOK["hod1"])
+    assert r.status_code == 400 and "Advisory Committee" in r.json()["detail"], r.text
     r = await _submit("s_noma", expect=400)
-    assert "Major Advisor" in r.json()["detail"], r.text
+    assert "PG 25" in r.json()["detail"], r.text
     # a fully complete submission succeeds and seeds exactly 6 stages, in order
     r = await _submit("s_val", expect=200)
     assert r.json()["status"] == "major_advisor_pending"
@@ -595,10 +691,11 @@ async def t_full_approval_chain():
     await _mk_assignment("shared", "s1")
     if (await _row(sid)).status == "draft":
         await _make_submittable("s1")
+        await _complete_pg25("s1")
         await _submit("s1")
     # major advisor
     assert (await _row(sid)).status == "major_advisor_pending"
-    await _approve(sid, TOK["ma1"])
+    await _approve_ma("s1")
     assert (await _row(sid)).status == "hod_pending"
     # hod (same department)
     await _approve(sid, TOK["hod1"])
@@ -639,6 +736,7 @@ async def t_full_approval_chain():
 async def t_dpgs_zero_assignments_rejected():
     await _create_thesis("s_zero")
     await _make_submittable("s_zero")
+    await _complete_pg25("s_zero")
     await _submit("s_zero")
     await _advance_to("s_zero", "dpgs_pending")
     r = await _approve(TH["s_zero"], TOK["dpgs"], expect=400)
@@ -651,6 +749,7 @@ async def t_multi_examiner_phd():
     await _mk_assignment("phd_a", "s_phd")
     await _mk_assignment("phd_b", "s_phd")
     await _make_submittable("s_phd")
+    await _complete_pg25("s_phd")
     await _submit("s_phd")
     await _advance_to("s_phd", "dpgs_pending")
     await _approve(TH["s_phd"], TOK["dpgs"])
@@ -692,7 +791,9 @@ async def t_revert_matrix():
         ("dpgs_pending", "dpgs", "dpgs", ["ma1", "hod1", "librarian1", "incharge"]),
     ]
     for n, (phase, reverter_key, stage_type, before) in enumerate(plan, start=1):
-        await _create_thesis("s_revert") if n == 1 else None
+        if n == 1:
+            await _create_thesis("s_revert")
+            await _complete_pg25("s_revert")   # PG25 happens ONCE, independent of resubmission cycles
         await _make_submittable("s_revert")
         await _submit("s_revert")
         sid = TH["s_revert"]
@@ -701,6 +802,8 @@ async def t_revert_matrix():
         for who in before:
             if who == "librarian1":
                 await _set_library_data(sid, TOK["librarian1"])
+            if who == "ma1":
+                await _generate_cert_i("s_revert", "ma1")
             await _approve(sid, TOK[who])
         assert (await _row(sid)).status == phase
         # a remark is required
@@ -747,8 +850,9 @@ async def t_librarian_mechanics():
     await _create_thesis("s_lib2")
     for k in ("s_lib1", "s_lib2"):
         await _make_submittable(k)
+        await _complete_pg25(k)
         await _submit(k)
-        await _approve(TH[k], TOK["ma1"])
+        await _approve_ma(k)
         await _approve(TH[k], TOK["hod1"])
         assert (await _row(TH[k])).status == "librarian_pending"
     await _set_library_data(TH["s_lib1"], TOK["librarian1"])
@@ -798,7 +902,8 @@ async def t_confidentiality_external_report():
     await _create_thesis("s_examx")
     await _mk_assignment("shared", "s_examx")
     await _make_submittable("s_examx")
-    assert (await _upload_doc(TH["s_examx"], "seminar_proceedings", TOK["s_examx"])).status_code == 201
+    assert (await _upload_doc(TH["s_examx"], "seminar_proceedings", TOK["s_examx"], data=_pdf(), filename="p.pdf", ct="application/pdf")).status_code == 201
+    await _complete_pg25("s_examx")
     await _submit("s_examx")
     await _advance_to("s_examx", "dpgs_pending")
     await _approve(TH["s_examx"], TOK["dpgs"])
@@ -856,8 +961,9 @@ async def t_examiner_access_and_cross_student_authorization():
 async def t_department_isolation():
     await _create_thesis("s_deptb")
     await _make_submittable("s_deptb")
+    await _complete_pg25("s_deptb")
     await _submit("s_deptb")
-    await _approve(TH["s_deptb"], TOK["ma_d2"])
+    await _approve_ma("s_deptb")
     sid = TH["s_deptb"]
     assert (await _row(sid)).status == "hod_pending"
     # HOD-A (D1) cannot act on / see a D2 student's thesis
@@ -898,6 +1004,7 @@ async def t_major_advisor_committee_lock():
     committee_id = COMMITTEE["s_lock"]
     await _create_thesis("s_lock")
     await _make_submittable("s_lock")
+    await _complete_pg25("s_lock")
     await _submit("s_lock")
     sid = TH["s_lock"]
     lock_msg_fragment = "Initial Thesis"
@@ -915,7 +1022,7 @@ async def t_major_advisor_committee_lock():
     assert r.status_code == 409 and lock_msg_fragment in r.json()["detail"], r.text
 
     # release the lock via revert -> lock is gone
-    await _approve(sid, TOK["ma_lock"])
+    await _approve_ma("s_lock")
     await _revert(sid, TOK["hod1"], "ZZTEST release the MA lock")
     assert (await _cycles(sid))[-1].status == "reverted"
     r = await _call("DELETE", f"/research/committees/{committee_id}/members/{MEMBER['s_lock:mem_lock']}", S["SA"])
@@ -925,6 +1032,133 @@ async def t_major_advisor_committee_lock():
     sid_done = TH["s_zero"]
     assert (await _row(sid_done)).status == "approved"
     assert (await _cycles(sid_done))[-1].status != "active"
+
+
+async def t_declaration_generate_and_upload():
+    """Section 6/7, 29: Generate produces a real PDF with dynamic student/advisor data and no
+    AAU branding; Generate and Upload occupy the SAME `declaration_annexure1` slot (versions of
+    one document, not two separate concepts)."""
+    sid = TH["s2"]
+    tok = TOK["s2"]
+    r = await _call("POST", f"/thesis/{sid}/declaration/generate", tok)
+    assert r.status_code == 201, r.text
+    v1 = r.json()["version"]
+    doc_id = (await _detail(sid, tok))["documents"]["declaration_annexure1"]["id"]
+    dl = await _call("GET", f"/thesis/{sid}/documents/{doc_id}/download", tok)
+    assert dl.status_code == 200 and dl.headers["content-type"] == "application/pdf"
+    body_text = _extract_pdf_text(dl.content)
+    assert "ZZTEST" in body_text.upper() and "S2" in body_text.upper(), "generated PDF should embed the real student name, not a hard-coded example"
+    assert "assam agricultural university" not in body_text.lower(), "no AAU branding may leak into a generated AVFU document"
+    assert "assam veterinary" in body_text.lower(), "AVFU's own established university name must appear"
+    # Upload occupies the SAME logical slot as a new version
+    r2 = await _upload_doc(sid, "declaration_annexure1", tok, data=_pdf(), filename="mine.pdf", ct="application/pdf")
+    assert r2.status_code == 201 and r2.json()["version"] == v1 + 1, "Upload must version the SAME declaration_annexure1 slot Generate uses"
+    # non-owner cannot generate on another student's thesis
+    assert (await _call("POST", f"/thesis/{TH['s1']}/declaration/generate", TOK["s2"])).status_code == 404
+
+
+async def t_pg25_authorization_and_idor():
+    """Section 25/26/29: HOD scoping, committee-membership scoping, double-signing, and IDOR
+    against a real PG25 certificate belonging to a DIFFERENT student (s2, untouched by any
+    other test's submission flow)."""
+    sid = TH["s2"]
+    # wrong-department HOD cannot record the outcome for a d1 student
+    r = await _call("POST", f"/thesis/{sid}/pg25/satisfactory", TOK["hod2"])
+    assert r.status_code == 404, r.text
+    # own-department HOD succeeds
+    r = await _call("POST", f"/thesis/{sid}/pg25/satisfactory", TOK["hod1"])
+    assert r.status_code == 201, r.text
+    cert_id = r.json()["certificate_id"]
+    # a duplicate Satisfactory click is rejected (idempotency, Section 9)
+    assert (await _call("POST", f"/thesis/{sid}/pg25/satisfactory", TOK["hod1"])).status_code == 409
+    # a faculty member NOT on s2's committee cannot sign, cannot view, cannot revert
+    assert (await _call("POST", f"/thesis/pg25/{cert_id}/sign", TOK["ma2"])).status_code == 404
+    assert (await _call("GET", f"/thesis/pg25/{cert_id}", TOK["ma2"])).status_code == 404
+    assert (await _call("POST", f"/thesis/pg25/{cert_id}/revert", TOK["ma2"])).status_code == 404
+    # PG25 not yet visible to the student as an approved document; downloading it directly 404s
+    d = await _detail(sid, TOK["s2"])
+    assert d["documents"]["seminar_certificate_pg25"] is None and d["pg25"]["status"] == "awaiting_committee"
+    # the still-pending PG25 PDF cannot be fetched by the student directly, even knowing its real id
+    real_committee_doc_owner_view = await _call("GET", f"/thesis/{sid}", TOK["hod1"])
+    assert real_committee_doc_owner_view.status_code == 200
+    pg25_doc_id = real_committee_doc_owner_view.json()["documents"]["seminar_certificate_pg25"]["id"]
+    assert (await _call("GET", f"/thesis/{sid}/documents/{pg25_doc_id}/download", TOK["s2"])).status_code == 404
+    # the real committee member (ma1) signs their own required signature -> approved
+    assert (await _call("POST", f"/thesis/pg25/{cert_id}/sign", TOK["ma1"])).status_code == 200
+    r = await _call("POST", f"/thesis/pg25/{cert_id}/sign", TOK["ma1"])
+    assert r.status_code == 400, "already signed"
+    d = await _detail(sid, TOK["s2"])
+    assert d["pg25"]["status"] == "approved" and d["documents"]["seminar_certificate_pg25"] is not None
+    assert (await _call("GET", f"/thesis/{sid}/documents/{pg25_doc_id}/download", TOK["s2"])).status_code == 200
+    # HOD list: s2 now shows "approved"; the HOD Sign / Unsatisfactory / committee Revert buttons
+    # are all reachable (authorized) but are confirmed no-ops (Section 12/13/14)
+    hod_rows = (await _call("GET", "/thesis/pg25/hod", TOK["hod1"])).json()
+    row = next(r for r in hod_rows if r["thesis_id"] == sid)
+    assert row["status"] == "approved" and row["can_act"] is False
+    r = await _call("POST", f"/thesis/{sid}/pg25/hod-sign", TOK["hod1"])
+    assert r.status_code == 200 and "no additional action" in r.json()["message"].lower()
+    r = await _call("POST", f"/thesis/{sid}/pg25/unsatisfactory", TOK["hod1"])
+    assert r.status_code == 200 and "no further business behavior" in r.json()["message"].lower()
+    r = await _call("POST", f"/thesis/pg25/{cert_id}/revert", TOK["ma1"])
+    assert r.status_code == 200 and "no business effect" in r.json()["message"].lower()
+    d_after = await _detail(sid, TOK["s2"])
+    assert d_after["pg25"]["status"] == "approved", "the no-op buttons must not have changed PG25 state"
+    # Home / Pending for ma1
+    home = (await _call("GET", "/thesis/pg25/mine/home", TOK["ma1"])).json()
+    assert any(r["thesis_id"] == sid for r in home)
+    pending = (await _call("GET", "/thesis/pg25/mine/pending", TOK["ma1"])).json()
+    assert not any(r["thesis_id"] == sid for r in pending), "already signed -> no longer in Pending"
+
+
+async def t_certificate_i_authorization_and_regeneration():
+    """Section 19/20/21/25/29: only the real Major Advisor may generate; wrong stage/wrong
+    person rejected; approval blocked until generated; and — using s_revert's already-exercised
+    revert/resubmit history from `t_revert_matrix` — an OBSOLETE Certificate I from an earlier,
+    reverted cycle does NOT satisfy the newest cycle's requirement."""
+    # s2: PG25 was already approved by t_pg25_authorization_and_idor; complete the remaining
+    # submission preconditions and submit to reach major_advisor_pending.
+    sid = TH["s2"]
+    await _make_submittable("s2")
+    await _submit("s2")
+    assert (await _row(sid)).status == "major_advisor_pending"
+    # wrong person (not this student's Major Advisor) cannot generate
+    assert (await _call("POST", f"/thesis/{sid}/certificate-i/generate", TOK["ma2"])).status_code == 403
+    # approval is blocked before Certificate I exists for this cycle
+    r = await _approve(sid, TOK["ma1"], expect=400)
+    assert "Certificate I" in r.json()["detail"], r.text
+    # the real Major Advisor generates -> a real PDF, auto-signed, with dynamic (not hard-coded) data
+    r = await _call("POST", f"/thesis/{sid}/certificate-i/generate", TOK["ma1"])
+    assert r.status_code == 201, r.text
+    doc_id = r.json()["document_id"]
+    dl = await _call("GET", f"/thesis/{sid}/documents/{doc_id}/download", TOK["s2"])
+    assert dl.status_code == 200 and dl.headers["content-type"] == "application/pdf"
+    body_text = _extract_pdf_text(dl.content)
+    assert "assam agricultural university" not in body_text.lower()
+    assert "assam veterinary" in body_text.lower()
+    # generating again for the SAME (still-active) cycle is rejected (no duplicate versions
+    # without cause)
+    assert (await _call("POST", f"/thesis/{sid}/certificate-i/generate", TOK["ma1"])).status_code == 409
+    # now approval succeeds
+    await _approve(sid, TOK["ma1"])
+    assert (await _row(sid)).status == "hod_pending"
+
+    # Regeneration-after-revert regression (Section 21), using s_revert's real history: every
+    # `before=["ma1"]` iteration of `t_revert_matrix` called `_generate_cert_i("s_revert", ...)`
+    # again on a freshly-active cycle after the previous one was reverted. If an obsolete
+    # Certificate I had incorrectly satisfied the new cycle, that call would have hit the
+    # generate endpoint's OWN "already generated" 409 rather than succeeding — which it did not
+    # (that test already passed) — and independently: there must be MORE than one
+    # certificate_i_pg27 version on s_revert's thesis, each tied to a DIFFERENT cycle_id.
+    sid_r = TH["s_revert"]
+    async with AsyncSessionLocal() as db:
+        rows = (await db.execute(
+            select(ThesisDocument.version_number, ThesisDocument.cycle_id)
+            .where(ThesisDocument.thesis_id == uuid.UUID(sid_r), ThesisDocument.document_type == "certificate_i_pg27")
+            .order_by(ThesisDocument.version_number)
+        )).all()
+    assert len(rows) >= 2, "s_revert's revert/resubmit history must have produced more than one Certificate I version"
+    cycle_ids = {r[1] for r in rows}
+    assert len(cycle_ids) == len(rows), "each Certificate I version must be tied to its OWN (different) approval cycle, never reused"
 
 
 async def main() -> None:
@@ -949,6 +1183,9 @@ async def main() -> None:
             "DEPARTMENT ISOLATION: HOD-A cannot act on/see a Dept-B student; unrelated Major Advisor cannot act": t_department_isolation,
             "IDOR/TAMPERING: foreign document/thesis ids -> 404; query params inert; extra body fields -> 422 (extra=forbid)": t_idor_and_tampering,
             "COMMITTEE LOCK: reassign/add/remove blocked (409, 'Initial Thesis') while active; unauthorized still 403 first; released after revert/approval": t_major_advisor_committee_lock,
+            "DECLARATION: Generate produces a real, dynamic, AVFU-branded PDF with no AAU text; Upload versions the SAME slot; non-owner blocked": t_declaration_generate_and_upload,
+            "PG25: own-dept HOD only, idempotent Satisfactory, committee-only sign, IDOR-blocked pending download, no-op Sign/Unsatisfactory/Revert, Home/Pending scoping": t_pg25_authorization_and_idor,
+            "CERTIFICATE I: only the real Major Advisor generates, MA approval blocked until generated, no AAU branding, regenerated (never reused) across revert/resubmission cycles": t_certificate_i_authorization_and_regeneration,
         }.items():
             await _run(name, fn)
     finally:
@@ -963,6 +1200,8 @@ async def main() -> None:
                 "stages": (await db.execute(select(func.count()).select_from(ThesisApprovalStage))).scalar_one(),
                 "signatures": (await db.execute(select(func.count()).select_from(ThesisSignature))).scalar_one(),
                 "evaluations": (await db.execute(select(func.count()).select_from(ThesisExternalEvaluation))).scalar_one(),
+                "seminar_certificates": (await db.execute(select(func.count()).select_from(ThesisSeminarCertificate))).scalar_one(),
+                "seminar_certificate_signatures": (await db.execute(select(func.count()).select_from(ThesisSeminarCertificateSignature))).scalar_one(),
                 "examiners": (await db.execute(select(func.count()).select_from(ExternalExaminer).where(ExternalExaminer.email.like(f"{_PFX}%")))).scalar_one(),
                 "assignments": (await db.execute(select(func.count()).select_from(ExternalExaminerAssignment))).scalar_one(),
                 "committees": (await db.execute(select(func.count()).select_from(AdvisoryCommittee).where(AdvisoryCommittee.research_title == "ZZTEST thesis committee"))).scalar_one(),

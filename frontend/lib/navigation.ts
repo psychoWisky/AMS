@@ -93,6 +93,11 @@ export const NAV: NavItem[] = [
   // (Major Advisor/HOD/Librarian/Incharge Academic Cell/DPGS). Final Thesis is out of scope.
   { label: "Thesis Management", icon: FileText,        href: "/thesis",        roles: ["student"] },
   { label: "Thesis Approvals",  icon: ClipboardCheck,  href: "/thesis/approvals", roles: ["hod","faculty","librarian","incharge_academic_cell","dpgs"] },
+  // Thesis Seminar Certificate (PG 25) — a distinct, pre-submission workflow (Sections 8-17 of
+  // the confirmed rules), not part of the post-submission approval chain above. HOD records the
+  // seminar outcome for their own department; Faculty sign as Advisory Committee members. HOD
+  // can also be an Advisory Committee member on OTHER students' theses, hence both roles here.
+  { label: "Thesis Seminar Certificate (PG 25)", icon: ClipboardList, href: "/thesis/pg25", roles: ["hod","faculty"] },
   { label: "My Evaluations",   icon: ClipboardCheck,  href: "/thesis/evaluations", roles: ["external_examiner"] },
   // Student Migration — the student's own page (create/track their applications; at most one
   // active at a time, backend-enforced) and the single Registrar's approval inbox. No other
