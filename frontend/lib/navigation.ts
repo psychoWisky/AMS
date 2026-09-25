@@ -6,7 +6,7 @@ import {
 
 export const DASHBOARD_ROUTE = "/dashboard";
 
-export interface NavItem { label: string; icon: LucideIcon; href: string; roles: string[]; }
+export interface NavItem { label: string; icon: LucideIcon; href: string; roles: string[]; hidden?: boolean; }
 
 // Single source of truth for which ACTIVE role may open which page: the
 // sidebar renders its links from this list and the (app) layout's route guard
@@ -57,13 +57,22 @@ export const NAV: NavItem[] = [
   { label: "Course Request",  icon: ClipboardList,   href: "/course-request", roles: ["super_admin","hod","faculty","incharge_academic_cell","dpgs"] },
   { label: "Academic Progress",icon: GraduationCap,  href: "/academic-progress", roles: ["super_admin","hod","faculty","student","incharge_academic_cell","dpgs"] },
   { label: "Grading",         icon: BarChart3,       href: "/grading",      roles: ["super_admin","hod","faculty"] },
-  { label: "Admit Card",      icon: FileText,        href: "/admit-card",   roles: ["super_admin","hod","student"] },
+  // Admission/Admit Card hiding task (this revision) — AVFU does not currently
+  // need these modules exposed in AMS. `hidden: true` removes the entry from
+  // the sidebar (see sidebar.tsx's `visible` filter) ONLY — the entry stays in
+  // NAV so `canAccessRoute` keeps enforcing the exact same role gate as before
+  // for anyone who navigates to the URL directly (no authorization change).
+  // The page implementation, backend router, models, and data are all
+  // untouched; this is a UI-visibility change only, reversible by deleting
+  // this `hidden: true` line.
+  { label: "Admit Card",      icon: FileText,        href: "/admit-card",   roles: ["super_admin","hod","student"], hidden: true },
   // Advisory Committee naming task (this revision) — visible label only;
   // the route (/research), page component, and API endpoints are unchanged.
   // Incharge Academic Cell / DPGS task — both approve committees after HOD
   // (Section 23/25/26), global (no department restriction).
   { label: "Advisory Committee", icon: FlaskConical,  href: "/research",     roles: ["super_admin","hod","faculty","student","incharge_academic_cell","dpgs"] },
-  { label: "Admissions",      icon: ClipboardCheck,  href: "/admissions",   roles: ["super_admin"] },
+  // See "Admit Card" comment above — same hiding task, same mechanism.
+  { label: "Admissions",      icon: ClipboardCheck,  href: "/admissions",   roles: ["super_admin"], hidden: true },
   { label: "Orientation",     icon: ClipboardCheck,  href: "/orientation",  roles: ["super_admin"] },
   { label: "Student Management",icon: IdCard,        href: "/student-management", roles: ["student"] },
   // Bulk Faculty/User Excel Upload task (this revision) — a bulk-created

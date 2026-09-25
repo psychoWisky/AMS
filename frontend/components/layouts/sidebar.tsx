@@ -35,7 +35,10 @@ export function AMSSidebar({ collapsed, onToggle }: { collapsed: boolean; onTogg
   // grants access on its own (Section 40).
   const [switching, setSwitching] = useState(false);
 
-  const visible = NAV.filter((n) => n.roles.length === 0 || !role || n.roles.includes(role));
+  // `hidden: true` (Admission/Admit Card hiding task) removes an entry from the
+  // sidebar only — canAccessRoute() still consults the full NAV list, so direct
+  // URL access keeps exactly the same role gate it had before this flag existed.
+  const visible = NAV.filter((n) => !n.hidden && (n.roles.length === 0 || !role || n.roles.includes(role)));
 
   // Multi-role/multi-department task — the label a user actually needs to
   // tell "HOD — Agriculture" apart from "HOD — Veterinary"; department-less
