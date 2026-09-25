@@ -61,8 +61,50 @@ async def _authorize_offering_grading(offering_id: UUID, user: User, db: AsyncSe
         )
         if assigned.scalar_one_or_none():
             return
+        # Research Course task: a Research Course offering never has an
+        # OfferingFaculty row (see courses.py's create_offering) — a faculty
+        # member who is the per-student instructor for at least one student
+        # here may still access the sheet at this OFFERING-wide level (create/
+        # view/submit — the same sheet-wide powers any single assigned
+        # faculty member already has today for a normal course). This does
+        # NOT grant them authority to grade another student's entry — that is
+        # separately enforced per-entry in `save_grades`.
+        research_link = await db.execute(
+            select(StudentEnrollment.id).where(
+                StudentEnrollment.offering_id == offering_id, StudentEnrollment.instructor_id == user.id,
+            ).limit(1)
+        )
+        if research_link.scalar_one_or_none():
+            return
         raise HTTPException(403, "You can only access gradesheets for courses you are assigned to teach.")
     raise HTTPException(403, "Insufficient permissions.")
+
+
+async def _authorize_grade_entry(offering: CourseOffering, student_id: UUID, user: User, db: AsyncSession) -> None:
+    """Research Course task — per-ENTRY authorization for `save_grades`,
+    layered on top of `_authorize_offering_grading` (which only confirms the
+    caller may touch the sheet AT ALL). For a non-Research-Course offering,
+    any faculty member already authorized on the whole offering may grade any
+    entry in it — unchanged existing behavior. For a Research Course
+    offering, a FACULTY caller must additionally be THIS student's own
+    `StudentEnrollment.instructor_id` — Faculty A (Major Advisor of Student X)
+    must never be able to grade Student Y's entry merely because both share
+    the same offering. HOD/SUPER_ADMIN are unrestricted here too, exactly as
+    they already are at the offering level (no per-student narrowing for
+    them, unchanged from existing behavior)."""
+    if user.active_role != UserRole.FACULTY:
+        return
+    if not offering.course or offering.course.category != "research":
+        return
+    linked = await db.execute(
+        select(StudentEnrollment.id).where(
+            StudentEnrollment.offering_id == offering.id,
+            StudentEnrollment.student_id == student_id,
+            StudentEnrollment.instructor_id == user.id,
+        ).limit(1)
+    )
+    if not linked.scalar_one_or_none():
+        raise HTTPException(403, "You can only enter grades for students you are the Research Course instructor for.")
 
 
 async def _authorize_student_academic_view(student_id: UUID, user: User, db: AsyncSession) -> None:
@@ -254,6 +296,13 @@ async def save_grades(
     if sheet.is_locked: raise HTTPException(400, "Grade sheet is locked.")
     if sheet.status not in ("draft", "submitted"):
         raise HTTPException(400, "Grades can only be edited in draft/submitted state.")
+
+    # Research Course task — every entry re-checked BEFORE any mutation, so a
+    # request touching one unauthorized student's entry never partially saves
+    # the rest of the batch first.
+    if sheet.offering:
+        for item in body.entries:
+            await _authorize_grade_entry(sheet.offering, item.student_id, user, db)
 
     for item in body.entries:
         entry_result = await db.execute(

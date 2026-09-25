@@ -83,6 +83,7 @@ from app.models.enrollment import StudentEnrollment, CourseRegistration, Withdra
 from app.models.course import Course, CourseOffering, OfferingFaculty
 from app.models.academic import AcademicCalendar, Semester
 from app.models.research import AdvisoryCommittee, CommitteeMember
+from app.core.major_advisor import resolve_accepted_major_advisor
 # Programme<->Department many-to-many redesign — single shared student-scope
 # resolvers (app/core/student_scope.py), re-exported under this file's
 # existing private names so every call site below is unchanged.
@@ -156,11 +157,19 @@ async def _get_major_advisor_id(student_id: UUID, db: AsyncSession) -> Optional[
     return result.scalar_one_or_none()
 
 
-async def _authorize_offering_management(offering_id: UUID, user: User, db: AsyncSession) -> CourseOffering:
+async def _authorize_offering_management(
+    offering_id: UUID, user: User, db: AsyncSession, *, student_id: Optional[UUID] = None,
+) -> CourseOffering:
     """Faculty/HOD/admin authorization for managing enrollments of a given offering.
     SUPER_ADMIN: unrestricted.
     HOD: department-wide (current_user.department_id == offering.department_id), no OfferingFaculty needed.
-    FACULTY: only if an OfferingFaculty row exists for (offering_id, user.id)."""
+    FACULTY: an OfferingFaculty row exists for (offering_id, user.id) — OR, when acting on a
+    SPECIFIC student's own enrollment (`student_id` passed by the caller), that student's
+    Research Course enrollment has this faculty member as its `instructor_id` (the per-student
+    Major Advisor assignment — see app/core/major_advisor.py). This fallback deliberately never
+    grants offering-wide access: a Research Course instructor for Student X gains no authority
+    over Student Y's enrollment merely because both are in the same offering — the caller must
+    supply the exact student being acted on."""
     offering = await db.get(CourseOffering, offering_id)
     if not offering:
         raise HTTPException(404, "Offering not found.")
@@ -176,6 +185,14 @@ async def _authorize_offering_management(offering_id: UUID, user: User, db: Asyn
         ))
         if result.scalar_one_or_none():
             return offering
+        if student_id is not None:
+            research_link = await db.execute(select(StudentEnrollment.id).where(
+                StudentEnrollment.offering_id == offering_id,
+                StudentEnrollment.student_id == student_id,
+                StudentEnrollment.instructor_id == user.id,
+            ))
+            if research_link.scalar_one_or_none():
+                return offering
         raise HTTPException(403, "You are not assigned to this offering.")
     raise HTTPException(403, "Insufficient permissions.")
 
@@ -416,6 +433,14 @@ def _enroll_dict(e: StudentEnrollment, registration: Optional[CourseRegistration
         # (see `_semester_scoped_enrollments` and `offering_enrollments`'s
         # query below), so this never introduces a lazy-load.
         "instructors": [fa.faculty.full_name for fa in e.offering.faculty_assignments if fa.faculty] if e.offering else [],
+        # Research Course task — the per-STUDENT instructor (this student's
+        # accepted Major Advisor, snapshotted at registration time), distinct
+        # from the offering-wide `instructors` list above, which stays empty
+        # for every Research Course offering. Null for every non-Research
+        # Course enrollment. Every caller below now eager-loads
+        # `StudentEnrollment.instructor`.
+        "research_instructor_id": str(e.instructor_id) if e.instructor_id else None,
+        "research_instructor_name": e.instructor.full_name if e.instructor else None,
         # Major/Minor/Supporting discipline task (this revision) —
         # `classification` is the new per-selection field (see
         # StudentEnrollment.classification's docstring); `department_id`
@@ -475,6 +500,7 @@ async def _semester_scoped_enrollments(student_id: UUID, semester_id: UUID, db: 
             # rendering the discipline names (Registration Card/preview).
             selectinload(StudentEnrollment.offering).selectinload(CourseOffering.department),
             selectinload(StudentEnrollment.student),
+            selectinload(StudentEnrollment.instructor),
             selectinload(StudentEnrollment.withdrawal_requests),
         )
         .order_by(StudentEnrollment.enrolled_at)
@@ -598,6 +624,7 @@ _REGISTRATION_LOAD_OPTIONS = (
     selectinload(CourseRegistration.items).selectinload(StudentEnrollment.offering).selectinload(CourseOffering.faculty_assignments).selectinload(OfferingFaculty.faculty),
     selectinload(CourseRegistration.items).selectinload(StudentEnrollment.offering).selectinload(CourseOffering.department),
     selectinload(CourseRegistration.items).selectinload(StudentEnrollment.student),
+    selectinload(CourseRegistration.items).selectinload(StudentEnrollment.instructor),
     selectinload(CourseRegistration.items).selectinload(StudentEnrollment.withdrawal_requests),
 )
 
@@ -650,7 +677,19 @@ async def enroll(
     if existing.scalar_one_or_none():
         raise HTTPException(409, "Already enrolled or request pending.")
 
-    e = StudentEnrollment(student_id=user.id, offering_id=body.offering_id)
+    # Research Course task: this offering's OWN instructor is never touched
+    # here (Rule #4) — for a Research Course, the AUTHENTICATED student's
+    # (never a client-supplied id) accepted Major Advisor is resolved and
+    # snapshotted onto THIS enrollment row only. Resolution raises a clear
+    # 400 if zero or more than one accepted Major Advisor exists — never
+    # silently proceeds with none, never arbitrarily picks one. A client
+    # cannot influence this by supplying an instructor_id: `EnrollRequest`
+    # has no such field.
+    instructor_id = None
+    if course.category == "research":
+        instructor_id = await resolve_accepted_major_advisor(user.id, db)
+
+    e = StudentEnrollment(student_id=user.id, offering_id=body.offering_id, instructor_id=instructor_id)
     db.add(e); await db.commit()
     return {"message": "Enrollment request submitted.", "id": str(e.id)}
 
@@ -715,6 +754,7 @@ async def register_courses(
     # checks — validated before any row is written, mirroring the legacy
     # single-course `enroll()` checks exactly.
     offerings: dict[UUID, CourseOffering] = {}
+    courses: dict[UUID, Course] = {}
     requested_credits = 0
     for oid in body.offering_ids:
         offering = await db.get(CourseOffering, oid)
@@ -738,7 +778,22 @@ async def register_courses(
         if dupe.scalar_one_or_none():
             raise HTTPException(409, f"You are already registered for {course.course_number}.")
         offerings[oid] = offering
+        courses[oid] = course
         requested_credits += course.total_credits
+
+    # Research Course task: resolved ONCE for the whole request (same student,
+    # same instant, same transaction) — never per-offering — and applied only
+    # to the offerings in THIS batch whose course is a Research Course
+    # (`category == "research"`). Raises a clear 400 before any row is
+    # written if the student has zero or more than one accepted Major
+    # Advisor (see app/core/major_advisor.py); never silently proceeds with
+    # a null/arbitrary instructor. This offering's own CourseOffering row is
+    # never mutated — the resolved instructor is only ever written onto this
+    # student's own StudentEnrollment row(s) below.
+    research_offering_ids = {oid for oid, c in courses.items() if c.category == "research"}
+    research_instructor_id: Optional[UUID] = None
+    if research_offering_ids:
+        research_instructor_id = await resolve_accepted_major_advisor(user.id, db)
 
     # Major/Minor/Supporting discipline task (this revision) — validated
     # against PRE-EXISTING selections for this semester (via the same
@@ -815,6 +870,7 @@ async def register_courses(
         classification = body.classifications.get(oid) if body.classifications else None
         db.add(StudentEnrollment(
             student_id=user.id, offering_id=oid, registration_id=registration.id, classification=classification,
+            instructor_id=research_instructor_id if oid in research_offering_ids else None,
         ))
     try:
         await db.commit()
@@ -858,6 +914,7 @@ async def my_enrollments(
             selectinload(StudentEnrollment.offering).selectinload(CourseOffering.faculty_assignments).selectinload(OfferingFaculty.faculty),
             selectinload(StudentEnrollment.offering).selectinload(CourseOffering.department),
             selectinload(StudentEnrollment.registration),
+            selectinload(StudentEnrollment.instructor),
             selectinload(StudentEnrollment.withdrawal_requests),
         )
         .where(StudentEnrollment.student_id == user.id)
@@ -1305,7 +1362,26 @@ async def offering_enrollments(
         UserRole.SUPER_ADMIN, UserRole.HOD, UserRole.FACULTY,
     )),
 ):
-    await _authorize_offering_management(offering_id, user, db)
+    # Research Course task: a FACULTY member with no OfferingFaculty row for
+    # this offering (true for every Research Course offering) may still be
+    # the per-student instructor for SOME students here. Rather than grant
+    # them the whole roster (which would expose other students' rows they
+    # have no relationship to), the roster query itself is additionally
+    # filtered to only their own instructed students in that case — full
+    # offering-wide visibility is unchanged for SUPER_ADMIN/HOD/an actually-
+    # assigned OfferingFaculty member.
+    restrict_to_own_students = False
+    try:
+        await _authorize_offering_management(offering_id, user, db)
+    except HTTPException:
+        if user.active_role != UserRole.FACULTY:
+            raise
+        research_link = await db.execute(select(StudentEnrollment.id).where(
+            StudentEnrollment.offering_id == offering_id, StudentEnrollment.instructor_id == user.id,
+        ).limit(1))
+        if not research_link.scalar_one_or_none():
+            raise
+        restrict_to_own_students = True
     # MissingGreenlet fix (this revision): `_enroll_dict()` below reads
     # `e.withdrawal_requests` for every row — that relationship was never
     # eager-loaded here, so accessing it triggered an implicit lazy load,
@@ -1319,6 +1395,7 @@ async def offering_enrollments(
     # returned data shape or any other behavior.
     q = select(StudentEnrollment).options(
         selectinload(StudentEnrollment.student), selectinload(StudentEnrollment.offering).selectinload(CourseOffering.course),
+        selectinload(StudentEnrollment.instructor),
         selectinload(StudentEnrollment.withdrawal_requests),
         # `_enroll_dict` also now reads `offering.faculty_assignments` (the
         # Registration Card Preview task's new `instructors` field) — eager
@@ -1330,6 +1407,7 @@ async def offering_enrollments(
         selectinload(StudentEnrollment.offering).selectinload(CourseOffering.department),
     ).where(StudentEnrollment.offering_id == offering_id)
     if status: q = q.where(StudentEnrollment.status == status)
+    if restrict_to_own_students: q = q.where(StudentEnrollment.instructor_id == user.id)
     result = await db.execute(q.order_by(StudentEnrollment.enrolled_at))
     return [_enroll_dict(e) for e in result.scalars().all()]
 
@@ -1421,7 +1499,7 @@ async def process_enrollment(
 ):
     e = await db.get(StudentEnrollment, enrollment_id)
     if not e: raise HTTPException(404, "Enrollment not found.")
-    await _authorize_offering_management(e.offering_id, user, db)
+    await _authorize_offering_management(e.offering_id, user, db, student_id=e.student_id)
     try:
         await _apply_enrollment_decision(e, status, remarks, user, db)
     except _EnrollmentDecisionError as exc:
@@ -1443,14 +1521,34 @@ async def bulk_approve(
     cascade. Legacy (non-registration) rows are unaffected. Rows that fail
     per-item validation (e.g. a registration-linked row given an unsupported
     status) are skipped, not batch-aborting — consistent with this endpoint's
-    original best-effort semantics."""
-    await _authorize_offering_management(offering_id, user, db)
+    original best-effort semantics.
+
+    Research Course task: a FACULTY member with no OfferingFaculty row for
+    this offering (true for every Research Course offering — see
+    courses.py's create_offering) may still call this, but each row is then
+    individually re-authorized against `StudentEnrollment.instructor_id`
+    (via `_authorize_offering_management`'s `student_id` fallback) — a row
+    for a student they do not instruct is skipped, never processed, exactly
+    like any other per-item validation failure."""
+    offering_wide_ok = True
+    try:
+        await _authorize_offering_management(offering_id, user, db)
+    except HTTPException:
+        if user.active_role != UserRole.FACULTY:
+            raise
+        offering_wide_ok = False
     updated = 0
     skipped = 0
     for eid in body.enrollment_ids:
         e = await db.get(StudentEnrollment, eid)
         if not e or e.offering_id != offering_id:
             continue
+        if not offering_wide_ok:
+            try:
+                await _authorize_offering_management(offering_id, user, db, student_id=e.student_id)
+            except HTTPException:
+                skipped += 1
+                continue
         try:
             await _apply_enrollment_decision(e, body.status, body.remarks, user, db)
             updated += 1

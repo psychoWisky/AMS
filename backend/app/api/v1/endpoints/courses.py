@@ -41,6 +41,7 @@ from app.core.security import create_bulk_upload_confirmation_token, decode_toke
 from app.core.bulk_upload import parse_bulk_upload_file
 from app.models.user import User, UserRole, UserRoleAssignment, Program, Department
 from app.models.course import Course, CourseOffering, OfferingFaculty, CourseAvailability
+from app.models.enrollment import StudentEnrollment
 # Programme<->Department many-to-many redesign — single shared student-scope
 # resolver (app/core/student_scope.py), re-exported under this file's
 # existing private name so every call site below is unchanged.
@@ -137,11 +138,22 @@ class OfferingIn(BaseModel):
     max_enrollment: int = 60
     section: Optional[str] = None
     practical_group: Optional[str] = None
-    faculty_ids: List[UUID]
-    leader_id: UUID
+    # Research Course task: `faculty_ids` may now be empty and `leader_id` may
+    # now be omitted — but ONLY for a Research Course offering. This schema
+    # has no DB access and cannot itself know the course's category, so the
+    # authoritative "non-Research Course still requires 1-3 faculty and a
+    # Leader" rule is enforced server-side in `create_offering` (after loading
+    # the real `Course.category` from the database), never here and never
+    # bypassable by a client claiming any particular category.
+    faculty_ids: List[UUID] = []
+    leader_id: Optional[UUID] = None
 
     @model_validator(mode="after")
     def validate_faculty(self):
+        if not self.faculty_ids:
+            if self.leader_id is not None:
+                raise ValueError("leader_id must not be set when no faculty are selected.")
+            return self
         if not (_MIN_OFFERING_FACULTY <= len(self.faculty_ids) <= _MAX_OFFERING_FACULTY):
             raise ValueError(f"An offering must have between {_MIN_OFFERING_FACULTY} and {_MAX_OFFERING_FACULTY} assigned faculty.")
         if len(set(self.faculty_ids)) != len(self.faculty_ids):
@@ -396,7 +408,12 @@ async def get_course(course_id: UUID, db: AsyncSession = Depends(get_db), user: 
         assigned = await db.execute(
             select(CourseOffering.id).where(
                 CourseOffering.course_id == c.id,
-                CourseOffering.id.in_(select(OfferingFaculty.offering_id).where(OfferingFaculty.faculty_id == user.id)),
+                CourseOffering.id.in_(
+                    select(OfferingFaculty.offering_id).where(OfferingFaculty.faculty_id == user.id)
+                    # Research Course task — same per-student instructor
+                    # fallback as list_all_offerings/get_offering above.
+                    .union(select(StudentEnrollment.offering_id).where(StudentEnrollment.instructor_id == user.id))
+                ),
             ).limit(1)
         )
         if not assigned.scalar_one_or_none():
@@ -1108,8 +1125,18 @@ async def list_all_offerings(
                 return []
             q = q.where(CourseOffering.department_id == user.active_department_id)
         elif user.active_role == UserRole.FACULTY:
+            # Research Course task — a faculty member also sees an offering
+            # here if they are the per-student Research Course instructor
+            # (StudentEnrollment.instructor_id) for at least one student in
+            # it, even with no OfferingFaculty row at all (Research Course
+            # offerings never have one — see courses.py's create_offering).
+            # This only affects LIST visibility ("does this offering show up
+            # in my Teacher Courses"); it grants no offering-wide authority —
+            # roster/grading actions are separately scoped per student.
             q = q.where(CourseOffering.id.in_(
-                select(OfferingFaculty.offering_id).where(OfferingFaculty.faculty_id == user.id)
+                select(OfferingFaculty.offering_id).where(OfferingFaculty.faculty_id == user.id).union(
+                    select(StudentEnrollment.offering_id).where(StudentEnrollment.instructor_id == user.id)
+                )
             ))
         else:
             return []  # fail closed for roles with no defined "mine" scope
@@ -1126,7 +1153,9 @@ async def list_all_offerings(
             # branch is restricted identically to the mine=true FACULTY branch
             # above, regardless of the `mine` flag's value.
             q = q.where(CourseOffering.id.in_(
-                select(OfferingFaculty.offering_id).where(OfferingFaculty.faculty_id == user.id)
+                select(OfferingFaculty.offering_id).where(OfferingFaculty.faculty_id == user.id).union(
+                    select(StudentEnrollment.offering_id).where(StudentEnrollment.instructor_id == user.id)
+                )
             ))
         elif department_id:
             q = q.where(CourseOffering.department_id == department_id)
@@ -1185,6 +1214,34 @@ async def create_offering(
     user: User = Depends(require_roles(*_MANAGE_ROLES)),
 ):
     _authorize_department_manage(body.department_id, user)
+
+    # Research Course task — the authoritative faculty-requirement rule, keyed
+    # off the REAL `Course.category` loaded from the database (never a
+    # client-supplied category/flag). A Research Course offering must NOT
+    # have a pre-assigned OfferingFaculty instructor at all (Rule #5: never
+    # create two competing instructor authorities — the per-student Major
+    # Advisor assignment, resolved at registration time, is the sole
+    # authority for a Research Course). Every other course category keeps
+    # the pre-existing "1-3 faculty, exactly one Leader" requirement exactly
+    # as it was, enforced here rather than in the (now-relaxed) Pydantic
+    # schema so a client cannot bypass it by omitting faculty_ids.
+    course = await db.get(Course, body.course_id)
+    if not course:
+        raise HTTPException(404, "Course not found.")
+    if course.category == "research":
+        if body.faculty_ids:
+            raise HTTPException(
+                400,
+                "Research Course offerings cannot have a pre-assigned instructor. The instructor "
+                "is determined individually for each student from their Major Advisor at "
+                "registration time.",
+            )
+    else:
+        if not (_MIN_OFFERING_FACULTY <= len(body.faculty_ids) <= _MAX_OFFERING_FACULTY):
+            raise HTTPException(400, f"An offering must have between {_MIN_OFFERING_FACULTY} and {_MAX_OFFERING_FACULTY} assigned faculty.")
+        if body.leader_id is None:
+            raise HTTPException(400, "A Leader must be selected.")
+
     await _assert_faculty_in_department(body.faculty_ids, body.department_id, db)
 
     # Verification finding D fix: the offering-uniqueness constraint and the
@@ -1255,7 +1312,15 @@ async def get_offering(offering_id: UUID, db: AsyncSession = Depends(get_db), us
             ).limit(1)
         )
         if not assigned.scalar_one_or_none():
-            raise HTTPException(403, "You can only view offerings you are assigned to teach.")
+            # Research Course task — same per-student instructor fallback as
+            # list_all_offerings above.
+            research_link = await db.execute(
+                select(StudentEnrollment.id).where(
+                    StudentEnrollment.offering_id == offering_id, StudentEnrollment.instructor_id == user.id,
+                ).limit(1)
+            )
+            if not research_link.scalar_one_or_none():
+                raise HTTPException(403, "You can only view offerings you are assigned to teach.")
     enrolled = sum(1 for e in o.enrollments if e.status == "approved")
     return {
         "id": str(o.id), "calendar_id": str(o.calendar_id),
@@ -1303,6 +1368,13 @@ async def assign_faculty(
     o = await db.get(CourseOffering, offering_id)
     if not o: raise HTTPException(404, "Offering not found.")
     _authorize_department_manage(o.department_id, user)
+    course = await db.get(Course, o.course_id)
+    if course and course.category == "research":
+        raise HTTPException(
+            400,
+            "Research Course offerings do not use a pre-assigned instructor; the instructor is "
+            "determined per student from their Major Advisor at registration time.",
+        )
     await _assert_faculty_in_department([faculty_id], o.department_id, db)
 
     count_result = await db.execute(select(OfferingFaculty).where(OfferingFaculty.offering_id == offering_id))

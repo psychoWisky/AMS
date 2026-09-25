@@ -115,6 +115,17 @@ class StudentEnrollment(Base):
     # `Course.category` (a different, pre-existing, unrelated taxonomy that
     # this task does not touch).
     classification: Mapped[str | None] = mapped_column(String(20))
+    # Research Course task — student-specific instructor, resolved from the
+    # student's accepted Major Advisor and snapshotted at registration time
+    # (see app/core/major_advisor.py). Nullable: NULL for every non-Research-
+    # Course enrollment (instructor comes from CourseOffering.faculty_assignments
+    # exactly as before) and for every enrollment created before this revision.
+    # Deliberately on THIS row (the per-student-per-offering row), never on
+    # CourseOffering — a Research Course offering itself is never mutated by a
+    # student's registration, since different students may resolve to
+    # different Major Advisors here. Not automatically kept in sync with later
+    # Major Advisor/committee changes — see migration 0037's docstring.
+    instructor_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id"))
     enrolled_at: Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     processed_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id"))
     processed_at: Mapped[datetime | None]  = mapped_column(DateTime(timezone=True))
@@ -123,6 +134,7 @@ class StudentEnrollment(Base):
     __table_args__ = (UniqueConstraint("student_id", "offering_id", name="uq_enrollment"),)
 
     student: Mapped["User"]        = relationship("User", foreign_keys=[student_id])
+    instructor: Mapped["User | None"] = relationship("User", foreign_keys=[instructor_id])
     processor: Mapped["User | None"] = relationship("User", foreign_keys=[processed_by])
     offering: Mapped["CourseOffering"] = relationship("CourseOffering", back_populates="enrollments")
     registration: Mapped["CourseRegistration | None"] = relationship("CourseRegistration", back_populates="items")

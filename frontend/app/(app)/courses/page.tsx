@@ -125,6 +125,13 @@ export default function CoursesPage() {
   });
 
   const offeringDepartmentId = isHod ? activeDepartmentId : offeringForm.department_id;
+  // Research Course task — a Research Course offering has no pre-assigned
+  // instructor at all; the backend derives it per student at registration
+  // time from that student's own Major Advisor (never a client-chosen
+  // faculty for the whole offering). `is_research` is the same authoritative
+  // flag already shown in the Course Management table, never a name/code
+  // guess.
+  const isResearchOffering = !!courses.find((c) => c.id === offeringForm.course_id)?.is_research;
   const { data: facultyUsers = [] } = useQuery<FacultyUser[]>({
     // Candidates are exactly the users holding a FACULTY role assignment in the
     // offering's department, filtered by the backend (GET /auth/users?role=faculty
@@ -231,8 +238,8 @@ export default function CoursesPage() {
       department_id: isHod ? activeDepartmentId : offeringForm.department_id,
       max_enrollment: parseInt(offeringForm.max_enrollment),
       section: offeringForm.section || null,
-      faculty_ids: selectedFaculty.map((f) => f.id),
-      leader_id: leaderId,
+      faculty_ids: isResearchOffering ? [] : selectedFaculty.map((f) => f.id),
+      leader_id: isResearchOffering ? null : leaderId,
     }),
     onSuccess: () => {
       toast.success("Offering created.");
@@ -704,7 +711,7 @@ export default function CoursesPage() {
                 <select value={offeringForm.course_id} onChange={(e) => setOfferingForm((f) => ({ ...f, course_id: e.target.value }))}
                   className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
                   <option value="">Select course…</option>
-                  {courses.map((c) => <option key={c.id} value={c.id}>{c.course_number} — {c.title} — {c.program_level}</option>)}
+                  {courses.map((c) => <option key={c.id} value={c.id}>{c.course_number} — {c.title} — {c.program_level}{c.is_research ? " (Research)" : ""}</option>)}
                 </select>
               </div>
               {isHod ? (
@@ -737,7 +744,16 @@ export default function CoursesPage() {
                 </div>
               </div>
 
-              {/* Faculty picker: 1-3, exactly one Leader, search/filter */}
+              {/* Research Course task — no faculty picker at all for a Research
+                  Course offering: the instructor is determined individually
+                  per student (from their own Major Advisor) at registration
+                  time, never pre-assigned to the whole offering. */}
+              {isResearchOffering ? (
+                <div className="rounded-xl bg-[#E6F4F4] border border-[#0D6E6E]/20 px-3 py-2.5 text-sm text-[#0D6E6E]">
+                  This is a Research Course — no instructor is assigned here. Each student&apos;s own
+                  Major Advisor automatically becomes their instructor when they register.
+                </div>
+              ) : (
               <div>
                 <label className="block text-base font-semibold text-gray-700 mb-1">
                   Assign Faculty ({selectedFaculty.length}/{MAX_OFFERING_FACULTY}) — select 1 to {MAX_OFFERING_FACULTY} and mark exactly one Leader *
@@ -783,6 +799,7 @@ export default function CoursesPage() {
                   </div>
                 )}
               </div>
+              )}
             </div>
             <div className="flex gap-3 mt-5">
               <button onClick={closeOfferingModal}
@@ -793,8 +810,10 @@ export default function CoursesPage() {
                     toast.error("Academic year, semester and course are required."); return;
                   }
                   if (!isHod && !offeringForm.department_id) { toast.error("Department is required."); return; }
-                  if (selectedFaculty.length === 0) { toast.error("Select at least 1 faculty member."); return; }
-                  if (!leaderId) { toast.error("Mark exactly one faculty member as Leader."); return; }
+                  if (!isResearchOffering) {
+                    if (selectedFaculty.length === 0) { toast.error("Select at least 1 faculty member."); return; }
+                    if (!leaderId) { toast.error("Mark exactly one faculty member as Leader."); return; }
+                  }
                   createOffering.mutate();
                 }}
                 disabled={createOffering.isPending}
