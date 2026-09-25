@@ -39,7 +39,7 @@ from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 
 from app.db.base import get_db
-from app.core.dependencies import get_current_user, require_roles
+from app.core.dependencies import get_current_user, require_roles, student_user_clause
 from app.models.user import User, UserRole, Department
 from app.models.research import AdvisoryCommittee, CommitteeMember
 from app.models.synopsis import Synopsis, SynopsisApprovalCycle
@@ -326,6 +326,45 @@ _COMMITTEE_LOAD_OPTIONS = (
 
 
 # ── Stage 1: HOD proposes Major Advisor ─────────────────────────────────────────
+
+@router.get("/committees/eligible-students")
+async def list_eligible_students(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HOD)),
+):
+    """Student directory for the Propose Major Advisor modal (`create_committee`
+    below) — the general-purpose `GET /auth/users` directory intentionally
+    excludes every student account (`staff_user_clause()`), and that exclusion
+    is not weakened here or anywhere else; this is a narrow, purpose-built
+    replacement for this one picker, mirroring `list_eligible_faculty`'s same
+    reasoning for the Add Member modal.
+
+    Department scope is ALWAYS server-derived from the caller's own session —
+    never a request parameter (there is deliberately no `department_id` query
+    param on this endpoint at all, so there is nothing for a client to
+    override). HOD sees only students in their own active department
+    (`user.active_department_id`, resolved from their own active
+    `UserRoleAssignment` at login/role-switch — never trusted from the
+    request); Super Admin is unrestricted, consistent with every other
+    department-scoped endpoint in this file.
+
+    Student department membership is read from `User.department_id` — the
+    authoritative field for a STUDENT's own department since the
+    Programme<->Department many-to-many redesign (see
+    `app/core/student_scope.py`) — never `UserRoleAssignment.department_id`,
+    which students do not use, and never the pre-redesign Program-join
+    inference."""
+    q = select(User).where(student_user_clause(), User.is_active == True)
+    if user.active_role == UserRole.HOD:
+        if not user.active_department_id:
+            return []
+        q = q.where(User.department_id == user.active_department_id)
+    result = await db.execute(q.order_by(User.first_name))
+    return [{
+        "id": str(u.id), "full_name": u.full_name,
+        "department_id": str(u.department_id) if u.department_id else None,
+    } for u in result.scalars().all()]
+
 
 @router.post("/committees", status_code=201)
 async def create_committee(

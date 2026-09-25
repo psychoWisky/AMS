@@ -218,6 +218,21 @@ function StaffCommitteeView() {
     enabled: canPropose || canLookupUsers,
   });
 
+  // Fix: GET /auth/users deliberately excludes every student account
+  // (staff_user_clause()) — it was never a valid source for this dropdown.
+  // This dedicated, department-scoped endpoint (HOD -> own department only,
+  // server-derived, never a client-supplied department id; Super Admin ->
+  // unrestricted) is the actual replacement — see research.py's
+  // list_eligible_students.
+  const {
+    data: students = [], isLoading: studentsLoading, isError: studentsError,
+  } = useQuery<UserOpt[]>({
+    queryKey: ["ams-committee-eligible-students"],
+    queryFn: async () => (await api.get("/research/committees/eligible-students")).data,
+    enabled: canPropose,
+    retry: false,
+  });
+
   // Fix: a Major Advisor with role=FACULTY has no access to the general
   // /auth/users directory (admin/HOD-only) and previously saw
   // "Faculty lookup requires admin or HOD access" when trying to add committee
@@ -236,7 +251,6 @@ function StaffCommitteeView() {
     enabled: !!proposeForm.major_advisor_id,
   });
 
-  const students = allUsers.filter((u) => u.role === "student");
   const facultyOptions = allUsers.filter((u) => ["faculty", "hod"].includes(u.role));
   // Add Member modal only: admin/HOD keep using the full directory above;
   // a non-admin accepted Major Advisor uses the committee-scoped list instead.
@@ -384,11 +398,19 @@ function StaffCommitteeView() {
             <div className="space-y-3">
               <div>
                 <label className="block text-base font-semibold text-gray-700 mb-1">Student</label>
-                <select value={proposeForm.student_id} onChange={(e) => setProposeForm((f) => ({ ...f, student_id: e.target.value }))}
-                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
-                  <option value="">Select student…</option>
-                  {students.map((s) => <option key={s.id} value={s.id}>{s.full_name}</option>)}
-                </select>
+                {studentsLoading ? (
+                  <p className="flex items-center gap-2 text-sm text-gray-500 px-1 py-2"><Loader2 size={14} className="animate-spin" /> Loading students…</p>
+                ) : studentsError ? (
+                  <p className="text-sm text-red-600 px-1 py-2">Could not load students. You may not be authorized, or your department is not set — please try again or contact an administrator.</p>
+                ) : students.length === 0 ? (
+                  <p className="text-sm text-gray-500 px-1 py-2">No eligible students found in your department.</p>
+                ) : (
+                  <select value={proposeForm.student_id} onChange={(e) => setProposeForm((f) => ({ ...f, student_id: e.target.value }))}
+                    className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
+                    <option value="">Select student…</option>
+                    {students.map((s) => <option key={s.id} value={s.id}>{s.full_name}</option>)}
+                  </select>
+                )}
               </div>
               <div>
                 <label className="block text-base font-semibold text-gray-700 mb-1">Major Advisor</label>
