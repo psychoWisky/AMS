@@ -48,7 +48,7 @@ async def resolve_accepted_major_advisor(student_id: UUID, db: AsyncSession) -> 
     if len(advisor_ids) == 0:
         raise HTTPException(
             400,
-            "You must have an accepted Major Advisor before registering for a Research Course. "
+            "You must have an accepted Major Advisor before proceeding. "
             "Please contact your department if you believe this is in error.",
         )
     if len(advisor_ids) > 1:
@@ -56,6 +56,6 @@ async def resolve_accepted_major_advisor(student_id: UUID, db: AsyncSession) -> 
             400,
             "Your Advisory Committee has more than one accepted Major Advisor, which is a data "
             "configuration problem. Please contact your department to resolve this before "
-            "registering for a Research Course.",
+            "proceeding.",
         )
     return advisor_ids[0]

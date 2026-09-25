@@ -48,7 +48,7 @@ const STUDENT_TILES: DashboardTile[] = [
   { key: "ppw", title: "PPW", description: "Proposed Programme of Work", icon: FileSpreadsheet, color: "bg-amber-50 text-amber-700", implemented: true, href: "/ppw" },
   { key: "migration", title: "Migration", description: "Student migration request", icon: ArrowRightLeft, color: "bg-red-50 text-red-700", implemented: true, href: "/migration" },
   { key: "publication", title: "Publication", description: "Your research publications", icon: BookMarked, color: "bg-indigo-50 text-indigo-700", implemented: false },
-  { key: "comprehensive-exam", title: "Comprehensive Exam", description: "Comprehensive examination status", icon: CheckSquare, color: "bg-purple-50 text-purple-700", implemented: false },
+  { key: "comprehensive-exam", title: "Comprehensive Exam", description: "Comprehensive examination status", icon: CheckSquare, color: "bg-purple-50 text-purple-700", implemented: true, href: "/comprehensive-exam" },
   { key: "conference", title: "Conference", description: "Conference participation records", icon: Presentation, color: "bg-teal-50 text-teal-700", implemented: false },
   { key: "result-tracking", title: "Result Tracking", description: "Track your semester results", icon: TrendingUp, color: "bg-green-50 text-green-700", implemented: false },
   { key: "synopsis", title: "Synopsis", description: "Research synopsis submission", icon: ScrollText, color: "bg-orange-50 text-orange-700", implemented: true, href: "/synopsis" },

@@ -115,6 +115,10 @@ export const NAV: NavItem[] = [
   // Cell, DPGS). Distinct from "/academic-progress", which is unrelated Credit Details.
   { label: "Progress Report",      icon: ClipboardList, href: "/progress-report",     roles: ["student"] },
   { label: "Progress Report Approvals", icon: ClipboardCheck, href: "/progress-report/approvals", roles: ["hod","faculty","incharge_academic_cell","dpgs"] },
+  // Comprehensive Examination — one page serves the student's own application and every
+  // approver role in the confirmed chain (Major Advisor/HOD/Incharge Academic Cell/DPGS), plus
+  // the Vice Chancellor for the PhD External Panel's final selection stage.
+  { label: "Comprehensive Exam", icon: ClipboardCheck, href: "/comprehensive-exam", roles: ["student","hod","faculty","incharge_academic_cell","dpgs","vice_chancellor"] },
   { label: "Users",           icon: Users,           href: "/users",        roles: ["super_admin"] },
   // Super Admin's global student management (all students, filters, full profile edit).
   // Distinct from "/student-management", which is a student's OWN profile page.
