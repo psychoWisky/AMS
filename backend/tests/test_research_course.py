@@ -46,7 +46,7 @@ from app.main import app
 from app.models.academic import AcademicCalendar, Semester
 from app.models.course import Course, CourseOffering, OfferingFaculty
 from app.models.enrollment import CourseRegistration, StudentEnrollment
-from app.models.grading import ApprovalStage, GradeEntry, GradeSheet
+from app.models.grading import ApprovalStage, GradeEntry, GradeEntryMark, GradeSheet
 from app.models.research import AdvisoryCommittee, CommitteeMember
 from app.models.user import College, Department, Program, RefreshToken, User, UserRole, UserRoleAssignment
 
@@ -442,33 +442,45 @@ async def t_bulk_approve_skips_students_not_instructed():
 
 
 async def t_grading_entry_isolation():
-    r = await _call("POST", "/grading/sheets", TOK["ma_x"], params={"offering_id": str(OFF["research"])})
+    # Gradesheet/Result task: the old free-form Internal/External payload was replaced by
+    # configurable components; the isolation rules under test are unchanged.
+    r = await _call("POST", "/grading/sheets", TOK["ma_x"], json={
+        "offering_id": str(OFF["research"]), "gradesheet_type": "new",
+        "total_theory_marks": 100, "theory_components": [{"code": "end_term", "max_marks": 100}],
+    })
     assert r.status_code == 201, r.text
     sheet_id = r.json()["id"]
 
     # ma_x cannot save Student Y's grade entry merely by sharing the offering.
     r = await _call("PUT", f"/grading/sheets/{sheet_id}/entries", TOK["ma_x"], json={
-        "entries": [{"student_id": str(U["sx"]), "internal_marks": 20, "external_marks": 60},
-                    {"student_id": str(U["sy"]), "internal_marks": 20, "external_marks": 60}],
+        "entries": [{"student_id": str(U["sx"]), "component_marks": {"end_term": 60}},
+                    {"student_id": str(U["sy"]), "component_marks": {"end_term": 60}}],
     })
     assert r.status_code == 403, r.text
 
     # The atomic pre-check means Student X's entry must NOT have been saved either.
     async with AsyncSessionLocal() as db:
         entry_x = (await db.execute(select(GradeEntry).where(GradeEntry.sheet_id == uuid.UUID(sheet_id), GradeEntry.student_id == U["sx"]))).scalar_one()
-    assert entry_x.internal_marks is None, "a rejected batch must not partially save any entry"
+        saved = (await db.execute(select(func.count()).select_from(GradeEntryMark).where(GradeEntryMark.entry_id == entry_x.id))).scalar_one()
+    assert saved == 0, "a rejected batch must not partially save any entry"
 
     # ma_x saving only their own student succeeds.
     r = await _call("PUT", f"/grading/sheets/{sheet_id}/entries", TOK["ma_x"], json={
-        "entries": [{"student_id": str(U["sx"]), "internal_marks": 20, "external_marks": 60}],
+        "entries": [{"student_id": str(U["sx"]), "component_marks": {"end_term": 60}}],
     })
     assert r.status_code == 200, r.text
 
     # ma_y saving their own student succeeds too.
     r = await _call("PUT", f"/grading/sheets/{sheet_id}/entries", TOK["ma_y"], json={
-        "entries": [{"student_id": str(U["sy"]), "internal_marks": 18, "external_marks": 55}],
+        "entries": [{"student_id": str(U["sy"]), "component_marks": {"end_term": 55}}],
     })
     assert r.status_code == 200, r.text
+
+    # An unrelated faculty member cannot even see the sheet.
+    r = await _call("PUT", f"/grading/sheets/{sheet_id}/entries", TOK["fac_unrelated"], json={
+        "entries": [{"student_id": str(U["sx"]), "component_marks": {"end_term": 99}}],
+    })
+    assert r.status_code == 404, r.text
 
 
 async def main() -> None:

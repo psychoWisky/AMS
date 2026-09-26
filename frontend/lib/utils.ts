@@ -51,6 +51,10 @@ export const ROLES = {
   // (there is confirmed to be exactly one Registrar). Scoped only to the Migration
   // module's own endpoints — never added to a generic student-management tuple.
   registrar: "Registrar",
+  // Gradesheet/Result task — single-holder, departmentless. Final approver of every
+  // course-wise Gradesheet (after DPGS) and the only role that compiles/publishes
+  // student-wise semester results (Pass / Pass with Backlogs).
+  controller_of_examination: "Controller of Examination",
 };
 
 export const ADMIN_ROLES = ["super_admin", "hod"];

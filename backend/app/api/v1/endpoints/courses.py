@@ -1299,7 +1299,7 @@ async def get_offering(offering_id: UUID, db: AsyncSession = Depends(get_db), us
         if not scope or o.department_id != scope["department_id"]:
             raise HTTPException(404, "Offering not found.")
     # HOD: own department only. FACULTY: only offerings they are actually
-    # assigned to (mirrors _authorize_offering_grading in grading.py and
+    # assigned to (mirrors _is_offering_instructor in grading.py and
     # _authorize_offering_management in enrollment.py — same principle, this
     # endpoint previously had no such check at all beyond the student branch above).
     elif user.active_role == UserRole.HOD:

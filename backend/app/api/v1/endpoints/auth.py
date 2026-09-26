@@ -54,12 +54,16 @@ _FACULTY_TITLES = ("Dr.", "Mr", "Mrs", "Miss")
 # conflicting assignment still failed (409), but with the generic
 # "conflicts with a single-holder role" message instead of naming the
 # current holder like the other two single-holder roles do.
-_SINGLE_HOLDER_ROLES = (UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS, UserRole.VICE_CHANCELLOR, UserRole.REGISTRAR)
+_SINGLE_HOLDER_ROLES = (
+    UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS, UserRole.VICE_CHANCELLOR, UserRole.REGISTRAR,
+    UserRole.CONTROLLER_OF_EXAMINATION,
+)
 _ROLE_DISPLAY_NAMES = {
     UserRole.INCHARGE_ACADEMIC_CELL: "Incharge Academic Cell",
     UserRole.DPGS: "DPGS",
     UserRole.VICE_CHANCELLOR: "Vice Chancellor",
     UserRole.REGISTRAR: "Registrar",
+    UserRole.CONTROLLER_OF_EXAMINATION: "Controller of Examination",
 }
 
 

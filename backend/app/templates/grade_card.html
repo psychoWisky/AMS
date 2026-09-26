@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Statement of Marks/Grades - {{ student.name }}</title>
+<style>
+  @page { size: A4; margin: 15mm 12mm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Segoe UI", "Noto Sans", Arial, sans-serif; font-size: 10.5pt; color: #1a1a1a; line-height: 1.45; }
+  table { width: 100%; border-collapse: collapse; }
+  tr { break-inside: avoid; }
+  thead { display: table-header-group; }
+  .header-table td { vertical-align: top; border: none; padding: 0; }
+  .logo-cell { width: 70px; }
+  .logo-cell img { width: 60px; height: auto; }
+  .univ-name { text-align: center; font-weight: 700; font-size: 15pt; margin: 0 0 2px 0; }
+  .center { text-align: center; margin: 1px 0; }
+  .title { text-align: center; font-weight: 700; font-size: 13pt; text-decoration: underline; margin: 10px 0 6px 0; }
+  .sub { text-align: center; font-weight: 600; margin: 2px 0; }
+  table.student { margin: 12px 0 10px 0; }
+  table.student td { border: 1px solid #666; padding: 4px 6px; font-size: 10pt; }
+  table.student td.k { width: 22%; font-weight: 600; background: #eef3f3; }
+  table.marks { margin-bottom: 10px; }
+  table.marks th, table.marks td { border: 1px solid #666; padding: 4px 6px; font-size: 9.5pt; text-align: center; }
+  table.marks th { background: #eef3f3; }
+  table.marks td.left { text-align: left; }
+  table.marks tr.total td { font-weight: 700; background: #f7f9f9; }
+  table.summary td { border: 1px solid #666; padding: 5px 8px; font-size: 10.5pt; font-weight: 600; }
+  .dated { margin-top: 26px; font-size: 10pt; }
+  .footer-note { margin-top: 18px; font-size: 8pt; color: #777; text-align: center; }
+</style>
+</head>
+<body>
+
+  <table class="header-table">
+    <tr>
+      <td class="logo-cell">{% if logo_data_uri %}<img src="{{ logo_data_uri }}" alt="AVFU Logo">{% endif %}</td>
+      <td><p class="univ-name">Assam Veterinary and Fishery University</p></td>
+      <td class="logo-cell"></td>
+    </tr>
+  </table>
+
+  <p class="title">Statement of Marks/Grades</p>
+  <p class="sub">{{ student.degree or "—" }}{% if student.college %} ({{ student.college }}){% endif %}</p>
+  <p class="sub">{{ semester or "—" }}{% if student.college %} ({{ student.college }}){% endif %}</p>
+  {% if exam_label %}<p class="sub">{{ exam_label }}</p>{% endif %}
+  <p class="sub">{{ academic_year or "—" }}</p>
+
+  <table class="student">
+    <tr><td class="k">Roll No.</td><td>{{ student.roll_no or "—" }}</td></tr>
+    <tr><td class="k">Name</td><td>{{ student.name or "—" }}</td></tr>
+    <tr><td class="k">College/Department Name</td><td>{{ student.college or "—" }}{% if student.department %} / {{ student.department }}{% endif %}</td></tr>
+  </table>
+
+  <table class="marks">
+    <thead>
+      <tr>
+        <th>Sub Code/Course ID</th><th>Subject/Papers</th><th>Grade</th><th>Grade Points</th><th>Credit</th><th>Credit Points</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in courses %}
+      <tr>
+        <td>{{ c.course_number }}</td>
+        <td class="left">{{ c.course_title }}</td>
+        <td>{{ c.grade_letter }}</td>
+        <td>{{ "%.3f"|format(c.grade_points) }}</td>
+        <td>{{ "%g"|format(c.credits) }}</td>
+        <td>{{ "%.3f"|format(c.credit_points) }}</td>
+      </tr>
+      {% endfor %}
+      <tr class="total">
+        <td colspan="2" class="left">Total</td>
+        <td></td>
+        <td>{{ "%.3f"|format(totals.grade_points) }}</td>
+        <td>{{ "%g"|format(totals.credits) }}</td>
+        <td>{{ "%.3f"|format(totals.credit_points) }}</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <table class="summary">
+    <tr>
+      <td>GPA: {{ gpa or "—" }}</td>
+      <td>Result: {{ result_status_label }}</td>
+      <td>CGPA: {% if cgpa_applicable %}{{ cgpa }}{% else %}—{% endif %}</td>
+    </tr>
+  </table>
+
+  <p class="dated">Dated: {{ dated.strftime("%d/%m/%Y") }}</p>
+  <p class="footer-note">This is a system-generated statement from the AVFU Academic Management System.</p>
+</body>
+</html>

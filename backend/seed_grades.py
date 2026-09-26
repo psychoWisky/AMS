@@ -1,4 +1,10 @@
 """
+LEGACY dev seed — superseded by the Gradesheet/Result workflow (course-wise gradesheets with
+configurable components, multi-instructor approval, CoE compilation). The sheets this script
+writes use the OLD internal/external columns and the old published status; the new Result
+Tracking/Management/Grade Card and GPA/CGPA read only CoE-compiled StudentSemesterResult rows,
+so this data never appears there. Kept only so the historical script is not silently deleted.
+
 Seed dummy grading data:
 - Enroll 4 students in 3 published offerings (2025-26 Sem 1)
 - Approve enrollments

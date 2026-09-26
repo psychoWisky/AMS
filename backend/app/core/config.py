@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     EMAIL_WORKER_BATCH_SIZE: int = 10          # jobs claimed per polling cycle
     EMAIL_WORKER_PROCESSING_TIMEOUT: int = 300  # seconds — PROCESSING lease before a job is recovered as stale
 
+    # Gradesheet 24-hour instructor auto-forward sweeper (`python -m app.core.gradesheet_worker`).
+    # Optional: the rule is ALSO enforced lazily on every gradesheet read/act, so the
+    # worker only makes an overdue sheet reach the HOD inbox without anyone opening it.
+    GRADESHEET_WORKER_POLL_INTERVAL: int = 60  # seconds between sweeps
+
     @property
     def origins(self) -> list[str]:
         return [o.strip() for o in self.ALLOWED_ORIGINS.split(",")]

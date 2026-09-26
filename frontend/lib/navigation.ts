@@ -1,6 +1,6 @@
 import {
   LayoutDashboard, CalendarDays, BookOpen, Users, ClipboardList,
-  BarChart3, FlaskConical, Bell, GraduationCap, FileText, ClipboardCheck, IdCard, UserCog, ShieldCheck, FileSpreadsheet, ScrollText, UserSearch, LayoutGrid, GitBranch,
+  BarChart3, FlaskConical, Bell, GraduationCap, FileText, ClipboardCheck, IdCard, UserCog, ShieldCheck, FileSpreadsheet, ScrollText, UserSearch, LayoutGrid, GitBranch, TrendingUp,
   type LucideIcon,
 } from "lucide-react";
 
@@ -56,7 +56,15 @@ export const NAV: NavItem[] = [
   // HOD/Faculty.
   { label: "Course Request",  icon: ClipboardList,   href: "/course-request", roles: ["super_admin","hod","faculty","incharge_academic_cell","dpgs"] },
   { label: "Academic Progress",icon: GraduationCap,  href: "/academic-progress", roles: ["super_admin","hod","faculty","student","incharge_academic_cell","dpgs"] },
-  { label: "Grading",         icon: BarChart3,       href: "/grading",      roles: ["super_admin","hod","faculty"] },
+  // Gradesheet/Result task — the course-wise Gradesheet: instructors manage their assigned
+  // courses' gradesheets; HOD / Incharge Academic Cell / DPGS / Controller of Examination review,
+  // approve (= sign) or revert them. Super Admin is deliberately NOT a workflow actor here (the
+  // backend allows it read-only by id only). Result Compilation is the CoE's own page; Result
+  // Tracking / Result Management are the student's own pages.
+  { label: "Gradesheet",      icon: BarChart3,       href: "/grading",      roles: ["faculty","hod","incharge_academic_cell","dpgs","controller_of_examination"] },
+  { label: "Result Compilation", icon: ClipboardCheck, href: "/result-compilation", roles: ["controller_of_examination"] },
+  { label: "Result Tracking", icon: TrendingUp,      href: "/result-tracking",   roles: ["student"] },
+  { label: "Result Management", icon: FileText,      href: "/result-management", roles: ["student"] },
   // Admission/Admit Card hiding task (this revision) — AVFU does not currently
   // need these modules exposed in AMS. `hidden: true` removes the entry from
   // the sidebar (see sidebar.tsx's `visible` filter) ONLY — the entry stays in

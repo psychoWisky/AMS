@@ -17,8 +17,10 @@ interface ProgressData {
   courses: ProgressCourse[];
   credit_summary: { total_credit_taken: number };
 }
-interface GpaSemester { semester_id: string; sgpa: number; credits: number }
-interface GpaData { cgpa: number; semesters: GpaSemester[] }
+// Published semester results only (Controller of Examination compiles + publishes them). GPA/CGPA
+// come from the server as 3-decimal truncated strings; CGPA does not exist for the first semester.
+interface GpaSemester { result_id: string; semester_id: string; semester_name: string | null; academic_year: string | null; sgpa: string | null; credits: number; cgpa: string | null; result_status: string }
+interface GpaData { cgpa: string | null; cgpa_applicable: boolean; semesters: GpaSemester[] }
 interface CommitteeMemberOut { id: string; faculty_name: string | null; role: string; accepted: boolean | null }
 interface CommitteeSummary { status_label: string; research_title: string | null; research_area: string | null; members: CommitteeMemberOut[] }
 interface StudentOpt { id: string; full_name: string; role: string; }
@@ -164,10 +166,13 @@ export default function AcademicProgressPage() {
                         <td className="px-4 py-3 text-gray-600">{c.academic_year ?? "—"}</td>
                         <td className="px-4 py-3"><span className={`px-2 py-0.5 rounded-full text-sm font-semibold ${ENROLLMENT_STATUS_COLOR[c.enrollment_status] ?? "bg-gray-100"}`}>{c.enrollment_status}</span></td>
                         <td className="px-4 py-3">
-                          <a href={`/grading?offering=${c.offering_id}`}
-                            className="inline-flex items-center gap-1 text-sm font-semibold text-[#0D6E6E] hover:underline">
-                            <ExternalLink size={12} /> Grade Sheet
-                          </a>
+                          {/* Only an instructor can open a course's gradesheets (Manage Gradesheet). */}
+                          {role === "faculty" ? (
+                            <a href={`/grading?offering=${c.offering_id}`}
+                              className="inline-flex items-center gap-1 text-sm font-semibold text-[#0D6E6E] hover:underline">
+                              <ExternalLink size={12} /> Gradesheet
+                            </a>
+                          ) : <span className="text-gray-400">—</span>}
                         </td>
                       </tr>
                     ))}
@@ -197,22 +202,23 @@ export default function AcademicProgressPage() {
             <div className="bg-white rounded-2xl border border-gray-200 p-5">
               <div className="flex items-center justify-between mb-3">
                 <h2 className="text-base font-bold text-gray-900">Academic Results</h2>
-                <p className="text-sm text-gray-700">CGPA: <span className="font-bold text-[#0D6E6E]">{gpa.cgpa}</span></p>
+                <p className="text-sm text-gray-700">CGPA: <span className="font-bold text-[#0D6E6E]">{gpa.cgpa_applicable ? gpa.cgpa : "—"}</span></p>
               </div>
               {gpa.semesters.length === 0 ? (
                 <p className="text-sm text-gray-600">No published results yet.</p>
               ) : (
                 <table className="w-full text-sm">
                   <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10">
-                    <tr>{["Semester", "SGPA", "Credits"].map((h) => (
+                    <tr>{["Semester", "SGPA", "CGPA", "Credits"].map((h) => (
                       <th key={h} className="text-left px-4 py-2.5 font-semibold text-gray-700">{h}</th>
                     ))}</tr>
                   </thead>
                   <tbody>
                     {gpa.semesters.map((s, i) => (
                       <tr key={s.semester_id} className={i % 2 === 0 ? "bg-white" : "bg-gray-50/50"}>
-                        <td className="px-4 py-2.5">{semesterNameLookup[s.semester_id] ?? s.semester_id}</td>
-                        <td className="px-4 py-2.5 font-mono">{s.sgpa}</td>
+                        <td className="px-4 py-2.5">{s.semester_name ?? semesterNameLookup[s.semester_id] ?? s.semester_id}{s.academic_year ? ` (${s.academic_year})` : ""}</td>
+                        <td className="px-4 py-2.5 font-mono">{s.sgpa ?? "—"}</td>
+                        <td className="px-4 py-2.5 font-mono">{s.cgpa ?? "—"}</td>
                         <td className="px-4 py-2.5">{s.credits}</td>
                       </tr>
                     ))}

@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Gradesheet - {{ course.course_number }}</title>
+<style>
+  @page { size: A4 landscape; margin: 10mm 9mm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Segoe UI", "Noto Sans", Arial, sans-serif; font-size: 9pt; color: #1a1a1a; line-height: 1.35; }
+  table { width: 100%; border-collapse: collapse; }
+  tr { break-inside: avoid; }
+  thead { display: table-header-group; }
+  .header-table td { vertical-align: top; border: none; padding: 0; }
+  .logo-cell { width: 60px; }
+  .logo-cell img { width: 52px; height: auto; }
+  .univ-name { text-align: center; font-weight: 700; font-size: 14pt; margin: 0; }
+  .univ-sub { text-align: center; font-size: 9.5pt; margin: 1px 0; }
+  .doc-title { text-align: center; font-weight: 700; font-size: 12pt; text-decoration: underline; margin: 8px 0 8px 0; }
+  table.info { margin-bottom: 8px; }
+  table.info td, table.info th { border: 1px solid #666; padding: 3px 6px; text-align: left; font-size: 9pt; }
+  table.info th { background: #eef3f3; width: 14%; }
+  table.marks { margin-bottom: 8px; }
+  table.marks th, table.marks td { border: 1px solid #666; padding: 3px 4px; font-size: 8.5pt; text-align: center; }
+  table.marks th { background: #eef3f3; }
+  table.marks td.left, table.marks th.left { text-align: left; }
+  .att-red { background: #f8d7da; color: #842029; font-weight: 700; }
+  .att-yellow { background: #fff3cd; color: #664d03; font-weight: 700; }
+  .att-green { background: #d1e7dd; color: #0f5132; font-weight: 700; }
+  .section-heading { font-weight: 700; margin: 10px 0 4px 0; font-size: 10pt; }
+  table.sign th, table.sign td { border: 1px solid #666; padding: 4px 6px; font-size: 9pt; text-align: left; vertical-align: top; }
+  table.sign th { background: #eef3f3; }
+  .muted { color: #666; }
+  .footer-note { margin-top: 8px; font-size: 7.5pt; color: #777; text-align: center; }
+</style>
+</head>
+<body>
+
+  <table class="header-table">
+    <tr>
+      <td class="logo-cell">{% if logo_data_uri %}<img src="{{ logo_data_uri }}" alt="AVFU Logo">{% endif %}</td>
+      <td>
+        <p class="univ-name">ASSAM VETERINARY AND FISHERY UNIVERSITY</p>
+        <p class="univ-sub">{{ course.college or "—" }}</p>
+      </td>
+      <td class="logo-cell"></td>
+    </tr>
+  </table>
+
+  <p class="doc-title">COURSE GRADESHEET</p>
+
+  <table class="info">
+    <tr>
+      <th>Course Number</th><td>{{ course.course_number }}</td>
+      <th>Course Title</th><td>{{ course.course_title }}</td>
+      <th>Credit</th><td>{{ course.credit }}</td>
+      <th>Credit Type</th><td>{{ course.credit_type }}</td>
+    </tr>
+    <tr>
+      <th>College / Degree</th><td>{{ course.college or "—" }}{% if course.degree %} / {{ course.degree }}{% endif %}</td>
+      <th>Department</th><td>{{ course.department or "—" }}</td>
+      <th>Semester</th><td>{{ course.semester or "—" }}</td>
+      <th>Session</th><td>{{ course.session or "—" }}</td>
+    </tr>
+    <tr>
+      <th>Gradesheet Type</th><td>{{ {"new": "New", "repeat": "Repeat", "revised": "Revised", "make_up": "Make up"}.get(gradesheet_type, gradesheet_type) }}</td>
+      <th>Prepared By</th><td>{{ teacher or "—" }}</td>
+      <th>Total Students</th><td>{{ students.total }} (Male {{ students.male }}, Female {{ students.female }})</td>
+      <th>Status</th><td>{{ status.replace("_", " ")|title }}</td>
+    </tr>
+  </table>
+
+  {% set theory = structure.components|selectattr("component_type", "equalto", "theory")|list %}
+  {% set practical = structure.components|selectattr("component_type", "equalto", "practical")|list %}
+
+  <table class="marks">
+    <thead>
+      <tr>
+        <th rowspan="2">SL NO</th>
+        <th rowspan="2">Roll No</th>
+        <th rowspan="2" class="left">Name</th>
+        {% if theory %}<th colspan="{{ theory|length }}">Theory</th>{% endif %}
+        <th colspan="{{ (1 if theory else 0) + (1 if practical else 0) + 3 }}">Total</th>
+        <th rowspan="2">Attendance %</th>
+        <th rowspan="2" class="left">Remark</th>
+      </tr>
+      <tr>
+        {% for c in theory %}<th>{{ c.name }} ({{ "%g"|format(c.max_marks) }})</th>{% endfor %}
+        {% if theory %}<th>Total Theory ({{ "%g"|format(structure.total_theory_marks) }})</th>{% endif %}
+        {% if practical %}<th>Practical ({{ "%g"|format(structure.total_practical_marks) }})</th>{% endif %}
+        <th>Grand Total ({{ "%g"|format(structure.total_theory_marks + structure.total_practical_marks) }})</th>
+        <th>Marks %</th>
+        <th>Grade</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for e in entries %}
+      <tr>
+        <td>{{ loop.index }}</td>
+        <td>{{ e.student_roll or "—" }}</td>
+        <td class="left">{{ e.student_name or "—" }}</td>
+        {% for c in theory %}<td>{% if e.is_absent %}AB{% elif e.component_marks[c.code] is not none %}{{ "%g"|format(e.component_marks[c.code]) }}{% else %}—{% endif %}</td>{% endfor %}
+        {% if theory %}<td>{% if e.is_absent %}AB{% elif e.theory_total is not none %}{{ "%g"|format(e.theory_total) }}{% else %}—{% endif %}</td>{% endif %}
+        {% if practical %}<td>{% if e.is_absent %}AB{% elif e.component_marks["practical"] is not none %}{{ "%g"|format(e.component_marks["practical"]) }}{% else %}—{% endif %}</td>{% endif %}
+        <td>{% if e.is_absent %}AB{% elif e.grand_total is not none %}{{ "%g"|format(e.grand_total) }}{% else %}—{% endif %}</td>
+        <td>{% if e.is_absent %}—{% elif e.marks_percent is not none %}{{ "%.2f"|format(e.marks_percent) }}{% else %}—{% endif %}</td>
+        <td>{{ e.grade_letter or "—" }}</td>
+        <td class="{% if e.attendance_band %}att-{{ e.attendance_band }}{% endif %}">{% if e.attendance_percent is not none %}{{ "%.2f"|format(e.attendance_percent) }}{% else %}—{% endif %}</td>
+        <td class="left">{{ e.remark or "" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted">Attendance: below 75% red, 75%–85% yellow, above 85% green. AB = absent.</p>
+
+  <p class="section-heading">Signatories</p>
+  {% if signatories %}
+  <table class="sign">
+    <thead><tr><th style="width:26%">Role</th><th style="width:30%">Name</th><th>Signature status</th></tr></thead>
+    <tbody>
+      {% for s in signatories.instructors %}
+      <tr>
+        <td>Course Instructor{% if s.stage_type == "creator" %} (Prepared by){% endif %}</td>
+        <td>{{ s.name or "—" }}</td>
+        <td>{% if s.status == "approved" %}Signed {{ s.signed_at_display }}{% elif s.status == "deemed_approved" %}Not signed — auto-forwarded after 24 hours ({{ s.signed_at_display }}){% elif s.status == "reverted" %}Reverted {{ s.signed_at_display }}{% else %}Pending{% endif %}</td>
+      </tr>
+      {% endfor %}
+      {% for label, s in [("HOD", signatories.hod), ("Incharge Academic Cell", signatories.incharge), ("DPGS", signatories.dpgs), ("Controller of Examination", signatories.coe)] %}
+      <tr>
+        <td>{{ label }}</td>
+        <td>{{ (s.name if s else None) or "—" }}</td>
+        <td>{% if s and s.status == "approved" %}Signed {{ s.signed_at_display }}{% elif s and s.status == "reverted" %}Reverted {{ s.signed_at_display }}{% else %}Pending{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">Not yet submitted for approval — no signatures recorded.</p>
+  {% endif %}
+
+  <p class="footer-note">System-generated on {{ generated_at.strftime("%d/%m/%Y %H:%M") }} UTC. Signature timestamps are in IST.</p>
+</body>
+</html>

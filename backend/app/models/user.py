@@ -76,7 +76,20 @@ class UserRole(str, Enum):
     enum once before, as one of four early-development dummy/testing roles
     removed entirely by `0015_remove_legacy_roles` — that removal is
     unrelated to this role: this is a fresh definition for a now-confirmed,
-    genuine business role, not a revival of the old dummy value."""
+    genuine business role, not a revival of the old dummy value.
+
+    Gradesheet/Result task — one more role:
+
+    `CONTROLLER_OF_EXAMINATION` — a GLOBAL, departmentless, SINGLE-HOLDER role
+    (exactly one Controller of Examination, enforced by the same partial-
+    unique-index mechanism as DPGS/Incharge/VC/Registrar — migration
+    `0040_coe_role`). Final approver of every course-wise Gradesheet (after
+    DPGS) and the only role that compiles/publishes student-wise semester
+    results (see `grading.py`/`results.py`). Assigned manually by a Super
+    Admin; `department_id` must be NULL (outside `_DEPARTMENT_REQUIRED_ROLES`
+    in auth.py, enforced automatically). Deliberately NOT added to any generic
+    student-management/user-listing tuple — its authority is scoped to the
+    Gradesheet/Result modules only."""
     SUPER_ADMIN            = "super_admin"
     VICE_CHANCELLOR        = "vice_chancellor"
     DPGS                   = "dpgs"
@@ -87,6 +100,7 @@ class UserRole(str, Enum):
     STUDENT                = "student"
     EXTERNAL_EXAMINER      = "external_examiner"
     LIBRARIAN              = "librarian"
+    CONTROLLER_OF_EXAMINATION = "controller_of_examination"
 
 
 class Department(Base):
