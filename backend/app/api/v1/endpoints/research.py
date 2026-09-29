@@ -36,10 +36,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from app.db.base import get_db
 from app.core.dependencies import get_current_user, require_roles, student_user_clause
+from app.core.faculty_scope import (
+    faculty_has_department, faculty_has_other_department, faculty_department_ids,
+    faculty_department_names, list_faculty_with_departments,
+)
 from app.models.user import User, UserRole, Department
 from app.models.research import AdvisoryCommittee, CommitteeMember
 from app.models.synopsis import Synopsis, SynopsisApprovalCycle
@@ -64,9 +68,30 @@ _ADMIN_ROLES = (UserRole.SUPER_ADMIN,)
 _GLOBAL_VIEW_ROLES = (UserRole.SUPER_ADMIN, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS)
 
 # The 5 confirmed PG/PhD Research Committee member types (BUSINESS_LOGIC.md M.5,
-# Rule 29). "major_advisor" is set only by create_committee/reassign — never a
-# valid value for the member-add endpoint below.
-_MEMBER_ROLES = ("member_major", "member_minor", "supporting", "member_of_others")
+# Rule 29), PLUS `co_major_advisor` — now confirmed OPTIONAL and selectable
+# (Advisory Committee department-eligibility task, this revision). "major_advisor"
+# itself is set only by create_committee/reassign — never a valid value here.
+_MEMBER_ROLES = ("member_major", "member_minor", "supporting", "member_of_others", "co_major_advisor")
+# Department-eligibility task (this revision) — confirmed rule per role:
+#   member_major: current FACULTY assignment in the STUDENT's OWN department
+#   member_minor: current FACULTY assignment in AT LEAST ONE OTHER department
+#   supporting:   no department restriction at all
+#   member_of_others: external, no department concept (no faculty_id at all)
+# "major_advisor" follows the same rule as member_major (BUSINESS_LOGIC.md D.1
+# step 1: "Major Advisor must belong to the student's department").
+#
+# co_major_advisor: CONFIRMED optional; AVFU has NOT confirmed a cardinality
+# limit or a department rule for it (open question — see BUSINESS_LOGIC.md).
+# Rather than invent either, it is deliberately grouped with `_NO_DEPARTMENT_ROLES`
+# (no department restriction, same as Supporting — the least-invented default,
+# since restricting it would require guessing which restriction) and no
+# cardinality cap is enforced anywhere in this file (same as member_major/
+# member_minor/supporting today, all of which already permit any number). If
+# AVFU later confirms either constraint, add it here and to `add_member` alone.
+_SAME_DEPARTMENT_ROLES = ("major_advisor", "member_major")
+_OTHER_DEPARTMENT_ROLES = ("member_minor",)
+_NO_DEPARTMENT_ROLES = ("supporting", "co_major_advisor")
+_EXTERNAL_ROLES = ("member_of_others",)
 
 _DEFAULT_ADVISOR_CAPACITY = 10
 _BIOSTATISTICS_ADVISOR_CAPACITY = 15  # Rule 30 — department-specific exception
@@ -96,8 +121,31 @@ class CommitteeIn(BaseModel):
     research_area: Optional[str] = None
 
 class MemberIn(BaseModel):
-    faculty_id: UUID
     role: str  # one of _MEMBER_ROLES
+    # Internal member (member_major/member_minor/supporting): faculty_id required,
+    # external fields must be omitted. External member (member_of_others): all
+    # three external fields required, faculty_id must be omitted — mirrors the
+    # DB's `ck_committee_member_internal_xor_external` CHECK constraint exactly,
+    # so a malformed request is rejected with a clear 422 before it ever reaches
+    # the database. See `_validate_member_shape` for the actual role-aware check
+    # (this validator only enforces the unconditional internal/external shape).
+    faculty_id: Optional[UUID] = None
+    external_name: Optional[str] = None
+    external_designation: Optional[str] = None
+    external_institute: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _internal_xor_external(self) -> "MemberIn":
+        external_fields = (self.external_name, self.external_designation, self.external_institute)
+        has_external = any(f is not None and f.strip() for f in external_fields)
+        has_all_external = all(f is not None and f.strip() for f in external_fields)
+        if self.faculty_id is not None and has_external:
+            raise ValueError("Provide either faculty_id (internal member) or external name/designation/institute (external member), never both.")
+        if has_external and not has_all_external:
+            raise ValueError("An external committee member requires name, designation and institute together.")
+        if self.faculty_id is None and not has_all_external:
+            raise ValueError("Provide faculty_id for an internal committee member, or name/designation/institute for an external one.")
+        return self
 
 class MajorAdvisorResponse(BaseModel):
     accepted: bool
@@ -232,11 +280,57 @@ async def _authorize_committee_view(committee: AdvisoryCommittee, user: User, db
     raise HTTPException(403, "Insufficient permissions.")
 
 
-async def _advisor_capacity(faculty_id: UUID, db: AsyncSession) -> int:
+# ── Department eligibility (Advisory Committee roles, NEVER RBAC roles) ─────────
+# Committee-member roles (major_advisor, member_major, member_minor, supporting,
+# member_of_others) are CommitteeMember.role values only — they are never written
+# to UserRole/UserRoleAssignment and never affect a person's system authorization.
+# The only RBAC fact consulted here is whether the candidate CURRENTLY holds a
+# FACULTY UserRoleAssignment in the relevant department(s) — see
+# app.core.faculty_scope, the single source of truth for that question. This is
+# authoritative, server-side validation: the frontend's dropdown filtering is a
+# convenience only and is never trusted on its own.
+
+_ROLE_LABELS = {"major_advisor": "The Major Advisor", "member_major": "Member Major"}
+
+
+async def _validate_faculty_department_eligibility(role: str, faculty_id: UUID, student_department_id: Optional[UUID], db: AsyncSession) -> None:
+    """Raises 400 if `faculty_id` is not eligible for `role` against the
+    student's department, per the confirmed rules:
+      major_advisor / member_major -> must hold FACULTY in the student's OWN department
+      member_minor                 -> must hold FACULTY in at least one OTHER department
+      supporting                   -> no department restriction (any current FACULTY member)
+    A faculty member with FACULTY assignments in BOTH the student's department and
+    another one is correctly eligible for BOTH member_major/major_advisor AND
+    member_minor simultaneously — the two checks are independent, not mutually
+    exclusive (confirmed multi-department example)."""
     faculty = await db.get(User, faculty_id)
-    if faculty and faculty.department_id:
-        dept = await db.get(Department, faculty.department_id)
-        if dept and "biostat" in dept.name.lower():
+    if not faculty or not faculty.is_active or faculty.role not in (UserRole.FACULTY, UserRole.HOD):
+        raise HTTPException(400, "The selected person is not an active AVFU faculty member.")
+
+    if role in _SAME_DEPARTMENT_ROLES:
+        if not await faculty_has_department(faculty_id, student_department_id, db):
+            raise HTTPException(400, f"{_ROLE_LABELS.get(role, role)} must currently hold a FACULTY assignment in the student's own department.")
+    elif role in _OTHER_DEPARTMENT_ROLES:
+        if not await faculty_has_other_department(faculty_id, student_department_id, db):
+            raise HTTPException(400, "Member Minor must currently hold a FACULTY assignment in a department other than the student's own.")
+    elif role in _NO_DEPARTMENT_ROLES:
+        departments = await faculty_department_ids(faculty_id, db)
+        if not departments:
+            raise HTTPException(400, "The selected person does not currently hold a FACULTY assignment in any department.")
+    # _EXTERNAL_ROLES never reach this function — see add_member/create_committee.
+
+
+async def _advisor_capacity(faculty_id: UUID, db: AsyncSession) -> int:
+    """Department-eligibility task — reads the advisor's CURRENT FACULTY
+    department memberships (`faculty_scope`), never the legacy `User.department_id`
+    scalar, consistent with every other faculty-department decision in this file.
+    A multi-department advisor gets the higher (Biostatistics) capacity if EITHER
+    of their departments is a Biostatistics one — capacity is a property of the
+    person's advising workload, not tied to exactly one of their departments."""
+    department_ids = await faculty_department_ids(faculty_id, db)
+    if department_ids:
+        depts = await db.execute(select(Department.name).where(Department.id.in_(department_ids)))
+        if any("biostat" in name.lower() for name in depts.scalars().all()):
             return _BIOSTATISTICS_ADVISOR_CAPACITY
     return _DEFAULT_ADVISOR_CAPACITY
 
@@ -263,12 +357,38 @@ async def _check_advisor_capacity(faculty_id: UUID, db: AsyncSession) -> None:
         raise HTTPException(400, f"This faculty member already advises {current} students, at their capacity of {capacity}.")
 
 
-def _committee_dict(c: AdvisoryCommittee) -> dict:
+async def _committee_dict(c: AdvisoryCommittee, db: AsyncSession) -> dict:
     student = c.student
     program = student.program if student else None
     # Programme<->Department many-to-many redesign — read directly from the
     # student's own department, not via Program.
     department = student.department if student else None
+
+    members = []
+    for m in c.members:
+        is_external = m.faculty_id is None
+        if is_external:
+            members.append({
+                "id": str(m.id), "faculty_id": None, "is_external": True,
+                "faculty_name": m.external_name, "designation": m.external_designation,
+                "institute": m.external_institute, "department_name": None, "department_names": [],
+                "role": m.role, "accepted": m.accepted, "remark": m.remark,
+            })
+        else:
+            # Department-eligibility task — shows EVERY department this member
+            # currently holds FACULTY in (multi-department aware), never just the
+            # single legacy `User.department_id` `m.faculty.department` would give.
+            dept_names = await faculty_department_names(m.faculty_id, db)
+            members.append({
+                "id": str(m.id), "faculty_id": str(m.faculty_id), "is_external": False,
+                "faculty_name": m.faculty.full_name if m.faculty else None,
+                "designation": m.faculty.designation if m.faculty else None,
+                "institute": None,
+                "department_name": dept_names[0] if dept_names else None,
+                "department_names": dept_names,
+                "role": m.role, "accepted": m.accepted, "remark": m.remark,
+            })
+
     return {
         "id": str(c.id),
         "student_id": str(c.student_id),
@@ -285,13 +405,7 @@ def _committee_dict(c: AdvisoryCommittee) -> dict:
         "is_locked": c.is_locked,
         "revert_remark": c.revert_remark,
         "reverted_at": c.reverted_at.isoformat() if c.reverted_at else None,
-        "members": [{
-            "id": str(m.id), "faculty_id": str(m.faculty_id),
-            "faculty_name": m.faculty.full_name if m.faculty else None,
-            "designation": m.faculty.designation if m.faculty else None,
-            "department_name": m.faculty.department.name if m.faculty and m.faculty.department else None,
-            "role": m.role, "accepted": m.accepted, "remark": m.remark,
-        } for m in c.members],
+        "members": members,
     }
 
 
@@ -366,6 +480,33 @@ async def list_eligible_students(
     } for u in result.scalars().all()]
 
 
+@router.get("/committees/eligible-major-advisors")
+async def list_eligible_major_advisors(
+    student_id: UUID, db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HOD)),
+):
+    """Faculty directory for the Major-Advisor picker — needed in TWO places that
+    both happen BEFORE any accepted Major Advisor exists on the committee (so
+    `list_eligible_faculty`/`_authorize_manage_members` below, which requires an
+    already-ACCEPTED Major Advisor or admin, cannot be reused here):
+      1. `create_committee` (Stage 1 propose) — no committee row exists yet at all.
+      2. `reassign_major_advisor` (after a decline/higher-stage revert) — a
+         committee exists, but by definition has no accepted Major Advisor right
+         now, so only its `student_id` is usable, never its `committee_id`.
+    Authorization therefore mirrors `_authorize_propose_major_advisor` exactly
+    (same HOD-own-department-or-admin rule as both callers above), and eligibility
+    reuses the same department-membership source as everywhere else in this file —
+    current FACULTY `UserRoleAssignment`s (`app.core.faculty_scope`), never
+    `User.department_id`. Multi-department faculty are eligible here whenever the
+    student's department is ONE of their current FACULTY departments."""
+    await _authorize_propose_major_advisor(student_id, user, db)
+    student_department_id = await _student_department_id(student_id, db)
+    candidates = await list_faculty_with_departments(db)
+    if not student_department_id:
+        return []
+    return [f for f in candidates if str(student_department_id) in f["department_ids"]]
+
+
 @router.post("/committees", status_code=201)
 async def create_committee(
     body: CommitteeIn, db: AsyncSession = Depends(get_db),
@@ -375,6 +516,8 @@ async def create_committee(
     existing = await db.execute(select(AdvisoryCommittee).where(AdvisoryCommittee.student_id == body.student_id))
     if existing.scalar_one_or_none():
         raise HTTPException(409, "Committee already exists for this student.")
+    student_department_id = await _student_department_id(body.student_id, db)
+    await _validate_faculty_department_eligibility("major_advisor", body.major_advisor_id, student_department_id, db)
     await _check_advisor_capacity(body.major_advisor_id, db)
 
     c = AdvisoryCommittee(
@@ -443,6 +586,8 @@ async def reassign_major_advisor(
     returned_from_higher_revert = c.status == "hod_pending" and c.reverted_at is not None
     if not (declined_flow or returned_from_higher_revert):
         raise HTTPException(400, "This committee is not awaiting Major Advisor reassignment.")
+    student_department_id = await _student_department_id(c.student_id, db)
+    await _validate_faculty_department_eligibility("major_advisor", body.major_advisor_id, student_department_id, db)
     await _check_advisor_capacity(body.major_advisor_id, db)
 
     await db.delete(ma)
@@ -456,26 +601,45 @@ async def reassign_major_advisor(
 
 @router.get("/committees/{committee_id}/eligible-faculty")
 async def list_eligible_faculty(
-    committee_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user),
+    committee_id: UUID, role: Optional[str] = None, department_id: Optional[UUID] = None,
+    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user),
 ):
     """Faculty directory for the Add Member modal, scoped to whoever is
     actually allowed to manage THIS committee's members (admin or this
     committee's own accepted Major Advisor) — reuses `_authorize_manage_members`
     unchanged. Fixes the Major Advisor (role=FACULTY) being unable to see a
     faculty list at all, since the general-purpose `GET /auth/users`
-    directory is intentionally admin/HOD-only and is not being widened here."""
+    directory is intentionally admin/HOD-only and is not being widened here.
+
+    Department-eligibility task (this revision) — now ROLE-AWARE and based on
+    CURRENT FACULTY `UserRoleAssignment` membership (`app.core.faculty_scope`),
+    never `User.department_id`. `role` is optional (an unfiltered list is still
+    returned if omitted, for backward compatibility); when given, only
+    candidates eligible for THAT committee role against this student's
+    department are returned — matching exactly what `add_member` will itself
+    accept, so the dropdown can never offer a choice the backend would reject.
+    `department_id` is an OPTIONAL narrowing filter for the caller's own
+    convenience (e.g. Member Minor picking one particular other department) —
+    it is never trusted as authorization; `add_member` re-validates
+    independently of whatever the client claims here. A multi-department
+    faculty member (e.g. FACULTY @ A + @ B) appears exactly ONCE, with every
+    department they hold FACULTY in listed, per `list_faculty_with_departments`."""
     c = await db.get(AdvisoryCommittee, committee_id)
     if not c: raise HTTPException(404, "Committee not found.")
     await _authorize_manage_members(c, user, db)
-    result = await db.execute(
-        select(User).options(selectinload(User.department))
-        .where(User.role.in_([UserRole.FACULTY, UserRole.HOD]), User.is_active == True)
-        .order_by(User.first_name)
-    )
-    return [{
-        "id": str(u.id), "full_name": u.full_name, "role": u.role.value,
-        "designation": u.designation, "department_id": str(u.department_id) if u.department_id else None,
-    } for u in result.scalars().all()]
+    student_department_id = await _student_department_id(c.student_id, db)
+    candidates = await list_faculty_with_departments(db)
+
+    if role in _SAME_DEPARTMENT_ROLES:
+        candidates = [f for f in candidates if student_department_id and str(student_department_id) in f["department_ids"]]
+    elif role in _OTHER_DEPARTMENT_ROLES:
+        candidates = [f for f in candidates if any(d != str(student_department_id) for d in f["department_ids"])]
+    # role in _NO_DEPARTMENT_ROLES (supporting), or role omitted/unrecognized -> every current-FACULTY candidate, unfiltered.
+
+    if department_id is not None:
+        candidates = [f for f in candidates if str(department_id) in f["department_ids"]]
+
+    return candidates
 
 
 @router.post("/committees/{committee_id}/members", status_code=201)
@@ -498,15 +662,47 @@ async def add_member(
         raise HTTPException(400, f"Role must be one of: {', '.join(_MEMBER_ROLES)}.")
     if c.is_locked: raise HTTPException(400, "Committee is locked.")
 
-    existing = await db.execute(select(CommitteeMember).where(
-        CommitteeMember.committee_id == committee_id, CommitteeMember.faculty_id == body.faculty_id,
-    ))
-    if existing.scalar_one_or_none():
-        raise HTTPException(409, "This faculty member is already on the committee.")
+    # Shape must match the role — the MemberIn validator only enforces "exactly one
+    # of internal/external", not which one a given ROLE requires.
+    is_external = body.faculty_id is None
+    if body.role in _EXTERNAL_ROLES and not is_external:
+        raise HTTPException(400, "Member of Others must be entered as an external person (name/designation/institute), not an internal faculty_id.")
+    if body.role not in _EXTERNAL_ROLES and is_external:
+        raise HTTPException(400, f"{body.role.replace('_', ' ').title()} requires an internal faculty_id.")
 
-    m = CommitteeMember(committee_id=committee_id, faculty_id=body.faculty_id, role=body.role)
+    if is_external:
+        # External members are "involved offline only" — there is no invitation/
+        # accept-decline flow for them, so they are marked accepted immediately and
+        # never block the other members' all-must-accept auto-advance gate (see
+        # accept_membership below and the CommitteeMember model docstring).
+        now = datetime.now(timezone.utc)
+        m = CommitteeMember(
+            committee_id=committee_id, role=body.role,
+            external_name=body.external_name.strip(), external_designation=body.external_designation.strip(),
+            external_institute=body.external_institute.strip(),
+            accepted=True, accepted_at=now,
+        )
+    else:
+        student_department_id = await _student_department_id(c.student_id, db)
+        await _validate_faculty_department_eligibility(body.role, body.faculty_id, student_department_id, db)
+        existing = await db.execute(select(CommitteeMember).where(
+            CommitteeMember.committee_id == committee_id, CommitteeMember.faculty_id == body.faculty_id,
+        ))
+        if existing.scalar_one_or_none():
+            raise HTTPException(409, "This faculty member is already on the committee.")
+        m = CommitteeMember(committee_id=committee_id, faculty_id=body.faculty_id, role=body.role)
+
     db.add(m)
-    c.status = "members_pending"
+    await db.flush()
+    # Mirrors accept_membership's own auto-advance check: if this newly-added
+    # member happens to be the last one still needing a response (e.g. an
+    # external member, always pre-accepted, added after every internal member
+    # already accepted), the committee must not be stranded in members_pending.
+    others = await db.execute(select(CommitteeMember).where(
+        CommitteeMember.committee_id == committee_id, CommitteeMember.role != "major_advisor",
+    ))
+    all_members = others.scalars().all()
+    c.status = "hod_pending" if all_members and all(x.accepted is True for x in all_members) else "members_pending"
     await db.commit()
     return {"message": "Member added."}
 
@@ -706,7 +902,7 @@ async def list_committees(db: AsyncSession = Depends(get_db), user: User = Depen
 
     result = await db.execute(q)
     committees = result.scalars().all()
-    data = [_committee_dict(c) for c in committees]
+    data = [await _committee_dict(c, db) for c in committees]
 
     if user.active_role == UserRole.FACULTY:
         for d, c in zip(data, committees):
@@ -724,8 +920,8 @@ async def get_student_committee(student_id: UUID, db: AsyncSession = Depends(get
     if not c: raise HTTPException(404, "No committee found.")
     await _authorize_committee_view(c, user, db)
 
-    data = _committee_dict(c)
-    stats = await _member_stats([m.faculty_id for m in c.members], db)
+    data = await _committee_dict(c, db)
+    stats = await _member_stats([m.faculty_id for m in c.members if m.faculty_id], db)
     for m_out, m in zip(data["members"], c.members):
         s = stats.get(m.faculty_id, {"major_advisor_count": 0, "member_count": 0})
         m_out["major_advisor_count"] = s["major_advisor_count"]

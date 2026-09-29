@@ -6,11 +6,12 @@ import { useRole, useUser } from "@/stores/auth.store";
 import { toast } from "sonner";
 import { FlaskConical, Plus, Loader2, Eye, X, CheckCircle2, XCircle, UserPlus, Trash2 } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { committeeRoleLabel, COMMITTEE_MEMBER_ROLES } from "@/lib/utils";
+import { committeeRoleLabel, COMMITTEE_MEMBER_ROLES, COMMITTEE_EXTERNAL_ROLES } from "@/lib/utils";
 
 interface CommitteeMemberOut {
-  id: string; faculty_id: string; faculty_name: string | null;
-  designation: string | null; department_name: string | null;
+  id: string; faculty_id: string | null; is_external: boolean; faculty_name: string | null;
+  designation: string | null; institute: string | null;
+  department_name: string | null; department_names: string[];
   role: string; accepted: boolean | null; remark: string | null;
   major_advisor_count?: number; member_count?: number;
 }
@@ -25,7 +26,16 @@ interface CommitteeListItem {
   my_role?: string | null;
 }
 interface CommitteeDetail extends CommitteeListItem { can_manage_members: boolean; can_propose_major_advisor: boolean; }
-interface UserOpt { id: string; full_name: string; role: string; designation: string | null; department_id: string | null; }
+interface UserOpt { id: string; full_name: string; department_id: string | null; }
+// Shape returned by the role/department-aware faculty endpoints
+// (eligible-major-advisors, eligible-faculty) — `app.core.faculty_scope.
+// list_faculty_with_departments` on the backend. One row per faculty member;
+// a multi-department faculty member appears once with every department they
+// currently hold a FACULTY assignment in, never duplicated.
+interface FacultyCandidate {
+  id: string; full_name: string; designation: string | null;
+  department_ids: string[]; department_names: string[];
+}
 interface CapacityInfo { capacity: number; current: number; available: number; }
 interface CreditDetails {
   student: { name: string | null; roll_no: string | null; department_name: string | null; program_name: string | null };
@@ -44,8 +54,6 @@ const STAGE_STYLE: Record<string, string> = {
   dpgs_approved: "bg-green-100 text-green-700",
   reverted: "bg-red-100 text-red-700",
 };
-// Roles allowed to call GET /auth/users (must match auth.py's list_users RBAC).
-const USER_LOOKUP_ROLES = ["super_admin", "hod"];
 
 function StatusBadge({ stage, label }: { stage: string; label: string }) {
   return <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-semibold ${STAGE_STYLE[stage] ?? "bg-gray-100 text-gray-600"}`}>{label}</span>;
@@ -163,9 +171,13 @@ function MembersList({ members }: { members: CommitteeMemberOut[] }) {
       {members.map((m) => (
         <div key={m.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-xl text-sm">
           <div>
-            <p className="font-semibold text-gray-900">{m.faculty_name ?? "—"}</p>
+            <p className="font-semibold text-gray-900">{m.faculty_name ?? "—"}{m.is_external && <span className="ml-1.5 text-xs font-normal text-gray-500">(External)</span>}</p>
             <p className="text-gray-600">{committeeRoleLabel(m.role)}</p>
-            <p className="text-xs text-gray-500 mt-0.5">Major Advisor of {m.major_advisor_count ?? 0} · Member of {m.member_count ?? 0}</p>
+            {m.is_external ? (
+              <p className="text-xs text-gray-500 mt-0.5">{m.designation ?? "—"}{m.institute ? ` · ${m.institute}` : ""}</p>
+            ) : (
+              <p className="text-xs text-gray-500 mt-0.5">Major Advisor of {m.major_advisor_count ?? 0} · Member of {m.member_count ?? 0}</p>
+            )}
           </div>
           <div className="text-right">
             {m.accepted === true && <span className="text-green-600 text-xs font-semibold">Accepted</span>}
@@ -186,7 +198,6 @@ function StaffCommitteeView() {
   const currentUser = useUser();
   const qc = useQueryClient();
   const canPropose = ["super_admin", "hod"].includes(role ?? "");
-  const canLookupUsers = USER_LOOKUP_ROLES.includes(role ?? "");
   // Incharge Academic Cell / DPGS task (this revision) — both approve
   // committees after HOD (Section 25/26), global (no department check).
   const isInchargeLike = ["super_admin", "incharge_academic_cell"].includes(role ?? "");
@@ -196,7 +207,8 @@ function StaffCommitteeView() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showAddMember, setShowAddMember] = useState(false);
   const [proposeForm, setProposeForm] = useState({ student_id: "", major_advisor_id: "", research_title: "", research_area: "" });
-  const [memberForm, setMemberForm] = useState({ faculty_id: "", role: "member_major" });
+  const emptyMemberForm = { role: "member_major", faculty_id: "", department_filter: "", external_name: "", external_designation: "", external_institute: "" };
+  const [memberForm, setMemberForm] = useState(emptyMemberForm);
   const [confirm, setConfirm] = useState<{ action: () => void; title: string; message: string; confirmLabel: string; confirmClassName?: string } | null>(null);
   const [remarkPrompt, setRemarkPrompt] = useState<{ title: string; onSubmit: (remark: string) => void } | null>(null);
   const [remarkText, setRemarkText] = useState("");
@@ -210,12 +222,6 @@ function StaffCommitteeView() {
     queryKey: ["ams-committee-detail", selectedId],
     queryFn: async () => (await api.get(`/research/committees/student/${selectedId}`)).data,
     enabled: !!selectedId,
-  });
-
-  const { data: allUsers = [] } = useQuery<UserOpt[]>({
-    queryKey: ["ams-users"],
-    queryFn: async () => (await api.get("/auth/users")).data,
-    enabled: canPropose || canLookupUsers,
   });
 
   // Fix: GET /auth/users deliberately excludes every student account
@@ -233,16 +239,39 @@ function StaffCommitteeView() {
     retry: false,
   });
 
-  // Fix: a Major Advisor with role=FACULTY has no access to the general
-  // /auth/users directory (admin/HOD-only) and previously saw
-  // "Faculty lookup requires admin or HOD access" when trying to add committee
-  // members despite being allowed to manage them. This committee-scoped
-  // endpoint is authorized the same way add_member itself is (accepted Major
-  // Advisor of THIS committee, or admin) — see research.py.
-  const { data: eligibleFaculty = [] } = useQuery<UserOpt[]>({
-    queryKey: ["ams-committee-eligible-faculty", selected?.id],
-    queryFn: async () => (await api.get(`/research/committees/${selected?.id}/eligible-faculty`)).data,
-    enabled: !!selected?.id && selected.can_manage_members && !canLookupUsers,
+  // Major Advisor picker for the Propose modal — role-aware/department-aware
+  // (student's own department, current FACULTY UserRoleAssignment only, never
+  // User.department_id). No committee exists yet at this point, so this is a
+  // dedicated student-scoped endpoint, not the committee-scoped one below.
+  const {
+    data: majorAdvisorCandidates = [], isLoading: advisorsLoading,
+  } = useQuery<FacultyCandidate[]>({
+    queryKey: ["ams-eligible-major-advisors", proposeForm.student_id],
+    queryFn: async () => (await api.get("/research/committees/eligible-major-advisors", { params: { student_id: proposeForm.student_id } })).data,
+    enabled: canPropose && !!proposeForm.student_id,
+  });
+
+  // Same picker, reused for the post-decline HOD reassignment panel — keyed by
+  // the existing committee's student_id (there is still no accepted Major
+  // Advisor at this point, so the committee-scoped eligible-faculty endpoint
+  // below cannot be used here either).
+  const {
+    data: reassignCandidates = [],
+  } = useQuery<FacultyCandidate[]>({
+    queryKey: ["ams-eligible-major-advisors", selected?.student_id],
+    queryFn: async () => (await api.get("/research/committees/eligible-major-advisors", { params: { student_id: selected?.student_id } })).data,
+    enabled: !!selected?.student_id && !!selected?.can_propose_major_advisor && selected.stage === "reverted",
+  });
+
+  // Add Member modal faculty picker — role-aware (server filters by
+  // memberForm.role's department rule) and authorized the same way add_member
+  // itself is (this committee's accepted Major Advisor, or admin). Never
+  // fetches the full faculty directory or filters department eligibility
+  // client-side.
+  const { data: eligibleFaculty = [] } = useQuery<FacultyCandidate[]>({
+    queryKey: ["ams-committee-eligible-faculty", selected?.id, memberForm.role],
+    queryFn: async () => (await api.get(`/research/committees/${selected?.id}/eligible-faculty`, { params: { role: memberForm.role } })).data,
+    enabled: !!selected?.id && !!selected?.can_manage_members && !COMMITTEE_EXTERNAL_ROLES.includes(memberForm.role as typeof COMMITTEE_EXTERNAL_ROLES[number]),
   });
 
   const { data: capacity } = useQuery<CapacityInfo>({
@@ -251,11 +280,16 @@ function StaffCommitteeView() {
     enabled: !!proposeForm.major_advisor_id,
   });
 
-  const facultyOptions = allUsers.filter((u) => ["faculty", "hod"].includes(u.role));
-  // Add Member modal only: admin/HOD keep using the full directory above;
-  // a non-admin accepted Major Advisor uses the committee-scoped list instead.
-  const addMemberFacultyOptions = canLookupUsers ? facultyOptions : eligibleFaculty;
-  const canPickAddMemberFaculty = canLookupUsers || (selected?.can_manage_members ?? false);
+  const isExternalRole = COMMITTEE_EXTERNAL_ROLES.includes(memberForm.role as typeof COMMITTEE_EXTERNAL_ROLES[number]);
+  // Department names available in the CURRENT role-filtered eligible list —
+  // purely a client-side narrowing convenience for the optional department
+  // filter (never re-sent as an authorization decision; the backend already
+  // performed the actual role/department eligibility filtering above).
+  const memberDepartmentOptions = Array.from(new Set(eligibleFaculty.flatMap((f) => f.department_names))).sort();
+  const filteredEligibleFaculty = memberForm.department_filter
+    ? eligibleFaculty.filter((f) => f.department_names.includes(memberForm.department_filter))
+    : eligibleFaculty;
+  const canPickAddMemberFaculty = selected?.can_manage_members ?? false;
 
   function invalidateAll() {
     qc.invalidateQueries({ queryKey: ["ams-committees"] });
@@ -290,11 +324,19 @@ function StaffCommitteeView() {
   });
 
   const addMember = useMutation({
-    mutationFn: () => api.post(`/research/committees/${selected?.id}/members`, memberForm),
+    mutationFn: () => api.post(`/research/committees/${selected?.id}/members`, isExternalRole ? {
+      role: memberForm.role,
+      external_name: memberForm.external_name.trim(),
+      external_designation: memberForm.external_designation.trim(),
+      external_institute: memberForm.external_institute.trim(),
+    } : {
+      role: memberForm.role,
+      faculty_id: memberForm.faculty_id,
+    }),
     onSuccess: () => {
       toast.success("Member added.");
       invalidateAll(); setShowAddMember(false);
-      setMemberForm({ faculty_id: "", role: "member_major" });
+      setMemberForm(emptyMemberForm);
     },
     onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed to add member."),
   });
@@ -414,11 +456,19 @@ function StaffCommitteeView() {
               </div>
               <div>
                 <label className="block text-base font-semibold text-gray-700 mb-1">Major Advisor</label>
-                <select value={proposeForm.major_advisor_id} onChange={(e) => setProposeForm((f) => ({ ...f, major_advisor_id: e.target.value }))}
-                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
-                  <option value="">Select faculty…</option>
-                  {facultyOptions.map((f) => <option key={f.id} value={f.id}>{f.full_name}{f.designation ? ` — ${f.designation}` : ""}</option>)}
-                </select>
+                {!proposeForm.student_id ? (
+                  <p className="text-sm text-gray-500 px-1 py-2">Select a student first.</p>
+                ) : advisorsLoading ? (
+                  <p className="flex items-center gap-2 text-sm text-gray-500 px-1 py-2"><Loader2 size={14} className="animate-spin" /> Loading faculty…</p>
+                ) : majorAdvisorCandidates.length === 0 ? (
+                  <p className="text-sm text-gray-500 px-1 py-2">No faculty found in this student&apos;s department.</p>
+                ) : (
+                  <select value={proposeForm.major_advisor_id} onChange={(e) => setProposeForm((f) => ({ ...f, major_advisor_id: e.target.value }))}
+                    className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
+                    <option value="">Select faculty…</option>
+                    {majorAdvisorCandidates.map((f) => <option key={f.id} value={f.id}>{f.full_name}{f.designation ? ` — ${f.designation}` : ""}</option>)}
+                  </select>
+                )}
                 {capacity && (
                   <p className={`text-xs mt-1 ${capacity.available > 0 ? "text-gray-600" : "text-red-600 font-semibold"}`}>
                     Currently advising {capacity.current}/{capacity.capacity} students {capacity.available > 0 ? `(${capacity.available} slot(s) available)` : "(at capacity)"}
@@ -495,7 +545,7 @@ function StaffCommitteeView() {
                   {/* HOD reassignment after decline */}
                   {selected.can_propose_major_advisor && selected.stage === "reverted" && myMajorAdvisorRow === undefined && (
                     <ReassignPanel
-                      facultyOptions={facultyOptions}
+                      facultyOptions={reassignCandidates}
                       onSubmit={(major_advisor_id) => reassignMajorAdvisor.mutate({ id: selected.id, major_advisor_id })}
                       pending={reassignMajorAdvisor.isPending}
                     />
@@ -518,7 +568,7 @@ function StaffCommitteeView() {
                       ) : (
                         <table className="w-full text-sm">
                           <thead className="bg-gray-50 border-b border-gray-200">
-                            <tr>{["Name", "Designation", "Department", "Advisory Role", "Status", ...(selected.can_manage_members ? ["Action"] : [])].map((h) => (
+                            <tr>{["Name", "Designation", "Department / Institute", "Advisory Role", "Status", ...(selected.can_manage_members ? ["Action"] : [])].map((h) => (
                               <th key={h} className="text-left px-4 py-2.5 font-semibold text-gray-700">{h}</th>
                             ))}</tr>
                           </thead>
@@ -527,9 +577,9 @@ function StaffCommitteeView() {
                               const isMine = currentUser?.id === m.faculty_id && m.role !== "major_advisor";
                               return (
                                 <tr key={m.id} className={i % 2 === 0 ? "bg-white" : "bg-gray-50/50"}>
-                                  <td className="px-4 py-2.5 font-medium text-gray-900">{m.faculty_name ?? "—"}</td>
+                                  <td className="px-4 py-2.5 font-medium text-gray-900">{m.faculty_name ?? "—"}{m.is_external && <span className="ml-1.5 text-xs font-normal text-gray-500">(External)</span>}</td>
                                   <td className="px-4 py-2.5 text-gray-600">{m.designation ?? "—"}</td>
-                                  <td className="px-4 py-2.5 text-gray-600">{m.department_name ?? "—"}</td>
+                                  <td className="px-4 py-2.5 text-gray-600">{m.is_external ? (m.institute ?? "—") : (m.department_names?.length ? m.department_names.join(", ") : m.department_name ?? "—")}</td>
                                   <td className="px-4 py-2.5">
                                     <span className="text-gray-800">{committeeRoleLabel(m.role)}</span>
                                     <p className="text-xs text-gray-500">Major Advisor of {m.major_advisor_count ?? 0} · Member of {m.member_count ?? 0}</p>
@@ -667,31 +717,70 @@ function StaffCommitteeView() {
             ) : (
               <div className="space-y-3">
                 <div>
-                  <label className="block text-base font-semibold text-gray-700 mb-1">Faculty</label>
-                  <select value={memberForm.faculty_id} onChange={(e) => setMemberForm((f) => ({ ...f, faculty_id: e.target.value }))}
-                    className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
-                    <option value="">Select faculty…</option>
-                    {addMemberFacultyOptions.map((f) => <option key={f.id} value={f.id}>{f.full_name}{f.designation ? ` — ${f.designation}` : ""}</option>)}
-                  </select>
-                </div>
-                <div>
                   <label className="block text-base font-semibold text-gray-700 mb-1">Role</label>
                   <div className="grid grid-cols-2 gap-2">
                     {COMMITTEE_MEMBER_ROLES.map((r) => (
-                      <button key={r} type="button" onClick={() => setMemberForm((f) => ({ ...f, role: r }))}
+                      <button key={r} type="button" onClick={() => setMemberForm((f) => ({ ...emptyMemberForm, role: r }))}
                         className={`py-2 text-xs rounded-xl font-semibold border-2 transition-all ${memberForm.role === r ? "border-[#0D6E6E] bg-[#0D6E6E] text-white" : "border-gray-200 text-gray-600"}`}>
                         {committeeRoleLabel(r)}
                       </button>
                     ))}
                   </div>
                 </div>
+                {isExternalRole ? (
+                  <>
+                    <div>
+                      <label className="block text-base font-semibold text-gray-700 mb-1">Name</label>
+                      <input value={memberForm.external_name} onChange={(e) => setMemberForm((f) => ({ ...f, external_name: e.target.value }))} placeholder="Full name"
+                        className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+                    </div>
+                    <div>
+                      <label className="block text-base font-semibold text-gray-700 mb-1">Designation</label>
+                      <input value={memberForm.external_designation} onChange={(e) => setMemberForm((f) => ({ ...f, external_designation: e.target.value }))} placeholder="e.g. Scientist, Professor"
+                        className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+                    </div>
+                    <div>
+                      <label className="block text-base font-semibold text-gray-700 mb-1">Institute</label>
+                      <input value={memberForm.external_institute} onChange={(e) => setMemberForm((f) => ({ ...f, external_institute: e.target.value }))} placeholder="Institute / Organization"
+                        className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    {memberDepartmentOptions.length > 1 && (
+                      <div>
+                        <label className="block text-base font-semibold text-gray-700 mb-1">Department (optional filter)</label>
+                        <select value={memberForm.department_filter} onChange={(e) => setMemberForm((f) => ({ ...f, department_filter: e.target.value }))}
+                          className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
+                          <option value="">All eligible departments</option>
+                          {memberDepartmentOptions.map((d) => <option key={d} value={d}>{d}</option>)}
+                        </select>
+                      </div>
+                    )}
+                    <div>
+                      <label className="block text-base font-semibold text-gray-700 mb-1">Faculty</label>
+                      {filteredEligibleFaculty.length === 0 ? (
+                        <p className="text-sm text-gray-500 px-1 py-2">No eligible faculty found for this role.</p>
+                      ) : (
+                        <select value={memberForm.faculty_id} onChange={(e) => setMemberForm((f) => ({ ...f, faculty_id: e.target.value }))}
+                          className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
+                          <option value="">Select faculty…</option>
+                          {filteredEligibleFaculty.map((f) => <option key={f.id} value={f.id}>{f.full_name}{f.designation ? ` — ${f.designation}` : ""} ({f.department_names.join(", ")})</option>)}
+                        </select>
+                      )}
+                    </div>
+                  </>
+                )}
               </div>
             )}
             <div className="flex gap-3 mt-5">
-              <button onClick={() => { setShowAddMember(false); setMemberForm({ faculty_id: "", role: "member_major" }); }}
+              <button onClick={() => { setShowAddMember(false); setMemberForm(emptyMemberForm); }}
                 className="flex-1 py-2.5 border border-gray-200 rounded-xl text-base font-medium">Cancel</button>
               {canPickAddMemberFaculty && (
-                <button onClick={() => addMember.mutate()} disabled={addMember.isPending || !memberForm.faculty_id}
+                <button onClick={() => addMember.mutate()}
+                  disabled={addMember.isPending || (isExternalRole
+                    ? !memberForm.external_name.trim() || !memberForm.external_designation.trim() || !memberForm.external_institute.trim()
+                    : !memberForm.faculty_id)}
                   className="flex-1 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-base font-bold disabled:opacity-60">
                   {addMember.isPending ? "Adding…" : "Add Member"}
                 </button>
@@ -723,7 +812,7 @@ function StaffCommitteeView() {
   );
 }
 
-function ReassignPanel({ facultyOptions, onSubmit, pending }: { facultyOptions: UserOpt[]; onSubmit: (facultyId: string) => void; pending: boolean }) {
+function ReassignPanel({ facultyOptions, onSubmit, pending }: { facultyOptions: FacultyCandidate[]; onSubmit: (facultyId: string) => void; pending: boolean }) {
   const [id, setId] = useState("");
   return (
     <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">

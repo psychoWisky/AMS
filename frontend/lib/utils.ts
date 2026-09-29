@@ -66,10 +66,11 @@ export const ADMIN_ROLES = ["super_admin", "hod"];
 export const GLOBAL_ROLES = ["super_admin", "vice_chancellor", "incharge_academic_cell", "dpgs"];
 
 // Centralized labels for CommitteeMember.role (BUSINESS_LOGIC.md M.5, Rule 29 —
-// the 5 confirmed PG/PhD Research Committee member types). `co_major_advisor` and
-// `member` are legacy values from before this confirmation — never written by new
-// code (research.py's _MEMBER_ROLES no longer includes them), but kept mapped here
-// so any pre-existing rows still display a label instead of a raw slug.
+// the 5 confirmed PG/PhD Research Committee member types, plus `co_major_advisor`,
+// now confirmed OPTIONAL and selectable — Advisory Committee department-eligibility
+// task, this revision). `member` is a legacy value from before the original
+// confirmation — never written by new code, kept mapped here so any pre-existing
+// row still displays a label instead of a raw slug.
 export const COMMITTEE_ROLE_LABELS: Record<string, string> = {
   major_advisor: "Major Advisor",
   member_major: "Member Major",
@@ -80,9 +81,17 @@ export const COMMITTEE_ROLE_LABELS: Record<string, string> = {
   member: "Member",
 };
 
-// The 4 non-Major-Advisor confirmed types selectable when a Major Advisor adds a
-// committee member (BUSINESS_LOGIC.md M.5) — mirrors research.py's _MEMBER_ROLES.
-export const COMMITTEE_MEMBER_ROLES = ["member_major", "member_minor", "supporting", "member_of_others"] as const;
+// The non-Major-Advisor types selectable when a Major Advisor adds a committee
+// member (BUSINESS_LOGIC.md M.5) — mirrors research.py's _MEMBER_ROLES exactly.
+// Roles requiring an internal AVFU faculty member (department-eligibility
+// enforced server-side) vs. the one external role (no faculty account at all).
+export const COMMITTEE_MEMBER_ROLES = ["member_major", "member_minor", "supporting", "co_major_advisor", "member_of_others"] as const;
+export const COMMITTEE_EXTERNAL_ROLES = ["member_of_others"] as const;
+// Roles whose eligible-faculty list is scoped to the student's OWN department
+// (server-authoritative — this is only used to drive the dropdown's default
+// department filter, never to decide eligibility itself).
+export const COMMITTEE_SAME_DEPARTMENT_ROLES = ["member_major"] as const;
+export const COMMITTEE_OTHER_DEPARTMENT_ROLES = ["member_minor"] as const;
 
 export function committeeRoleLabel(role: string): string {
   return COMMITTEE_ROLE_LABELS[role] ?? role.replace(/_/g, " ");
