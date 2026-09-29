@@ -969,6 +969,22 @@ async def submit_ppw(
             "Your Advisory Committee's Major Advisor must be assigned and must have accepted before you can submit your PPW.",
         )
 
+    # PPW -> Advisory Committee Research Title synchronization (confirmed AVFU
+    # rule): the PPW Research Title is the AUTHORITATIVE Research Title for the
+    # student's Advisory Committee from this point on, and is allowed to
+    # overwrite whatever title the committee already had (including one set at
+    # Advisory Committee creation, or from a prior PPW submission). Submission
+    # is the correct sync point, not `update_ppw`/creation: `research_title`
+    # is only guaranteed non-blank here (the hard validation immediately
+    # above), whereas a draft/reverted-but-not-yet-resubmitted edit is
+    # provisional and should not overwrite the committee's title. `committee`
+    # is the exact row just resolved above via `AdvisoryCommittee.student_id
+    # == user.id` (the authenticated caller's own id, never a client-supplied
+    # committee id) and is already guaranteed non-None by the accepted-Major-
+    # Advisor check above — so this can never touch another student's
+    # committee, and never needs a fresh/duplicate lookup.
+    committee.research_title = p.research_title
+
     applicable_members = [m for m in committee.members if m.role in PPW_COMMITTEE_STAGE_ROLES and m.accepted is True]
 
     dept_id = await _student_department_id(user.id, db)

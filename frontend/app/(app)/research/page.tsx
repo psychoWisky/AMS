@@ -206,7 +206,11 @@ function StaffCommitteeView() {
   const [showPropose, setShowPropose] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showAddMember, setShowAddMember] = useState(false);
-  const [proposeForm, setProposeForm] = useState({ student_id: "", major_advisor_id: "", research_title: "", research_area: "" });
+  // Research Area confirmed NOT part of the active Advisory Committee
+  // creation workflow (PPW title-sync task) — removed from this form. The
+  // backend's `research_area` column/field are untouched for backward
+  // compatibility; this form simply never sends it.
+  const [proposeForm, setProposeForm] = useState({ student_id: "", major_advisor_id: "", research_title: "" });
   const emptyMemberForm = { role: "member_major", faculty_id: "", department_filter: "", external_name: "", external_designation: "", external_institute: "" };
   const [memberForm, setMemberForm] = useState(emptyMemberForm);
   const [confirm, setConfirm] = useState<{ action: () => void; title: string; message: string; confirmLabel: string; confirmClassName?: string } | null>(null);
@@ -301,7 +305,7 @@ function StaffCommitteeView() {
     onSuccess: () => {
       toast.success("Major Advisor proposed. Awaiting their response.");
       invalidateAll(); setShowPropose(false);
-      setProposeForm({ student_id: "", major_advisor_id: "", research_title: "", research_area: "" });
+      setProposeForm({ student_id: "", major_advisor_id: "", research_title: "" });
     },
     onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed to propose Major Advisor."),
   });
@@ -476,14 +480,10 @@ function StaffCommitteeView() {
                 )}
               </div>
               <div>
-                <label className="block text-base font-semibold text-gray-700 mb-1">Research Title</label>
+                <label className="block text-base font-semibold text-gray-700 mb-1">Research Title <span className="font-normal text-gray-400">(optional)</span></label>
                 <input value={proposeForm.research_title} onChange={(e) => setProposeForm((f) => ({ ...f, research_title: e.target.value }))} placeholder="Thesis / Research title"
                   className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
-              </div>
-              <div>
-                <label className="block text-base font-semibold text-gray-700 mb-1">Research Area</label>
-                <input value={proposeForm.research_area} onChange={(e) => setProposeForm((f) => ({ ...f, research_area: e.target.value }))} placeholder="Plant Breeding, Animal Nutrition…"
-                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+                <p className="text-xs text-gray-500 mt-1">Once the student's PPW Research Title is submitted, it will become the authoritative title shown here.</p>
               </div>
             </div>
             <div className="flex gap-3 mt-5">
