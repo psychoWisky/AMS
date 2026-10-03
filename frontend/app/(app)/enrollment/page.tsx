@@ -7,7 +7,7 @@ import { toast } from "sonner";
 import Link from "next/link";
 import { ClipboardList, CheckCircle2, XCircle, Loader2, ArrowRight, Eye, X, Download, FileText } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { COURSE_CATEGORY_LABELS, CREDIT_TYPE_LABELS } from "@/lib/utils";
+import { COURSE_CATEGORY_LABELS, CREDIT_TYPE_LABELS, levelLabel } from "@/lib/utils";
 
 // My Courses task (this revision) — the confirmed BUSINESS_LOGIC.md K.7
 // column set (SL No/Course Type/Course Number/Course Title/Credit/Credit
@@ -273,7 +273,7 @@ export default function EnrollmentPage() {
         <select value={selectedOffering} onChange={(e) => setSelectedOffering(e.target.value)}
           className="flex-1 border border-gray-200 rounded-xl px-3 py-2.5 text-base focus:outline-none">
           <option value="">Select a course offering…</option>
-          {offeringsAll.map((o) => <option key={o.id} value={o.id}>{o.course_number} — {o.course_title}{o.program_level ? ` — ${o.program_level}` : ""} {o.section ? `(${o.section})` : ""}</option>)}
+          {offeringsAll.map((o) => <option key={o.id} value={o.id}>{o.course_number} — {o.course_title}{o.program_level ? ` — ${levelLabel(o.program_level)}` : ""} {o.section ? `(${o.section})` : ""}</option>)}
         </select>
         <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}
           className="border border-gray-200 rounded-xl px-3 py-2.5 text-base focus:outline-none">

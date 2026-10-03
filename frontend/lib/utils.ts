@@ -97,6 +97,23 @@ export function committeeRoleLabel(role: string): string {
   return COMMITTEE_ROLE_LABELS[role] ?? role.replace(/_/g, " ");
 }
 
+// PG -> Masters display-label task (this revision) — CONFIRMED a UI-only
+// rename: the backend/database value remains the literal string "PG"
+// everywhere (API requests/responses, Program.level, Course.program_level,
+// ComprehensiveExamApplication/ExternalExaminerSelection.degree_level, every
+// business-rule dict and eligibility gate) — never touched by this helper.
+// Every frontend spot that renders a programme/course/student "level" value
+// as visible text (filters, dropdown option labels, table cells, badges,
+// summaries, detail views) should route through `levelLabel()` rather than
+// rendering the raw string, so "Masters" is shown consistently without any
+// stored value ever changing. A `<select>`/button's VALUE must still be the
+// raw level ("UG"/"PG"/"PhD") — only the visible label changes.
+export const LEVEL_LABELS: Record<string, string> = { UG: "UG", PG: "Masters", PhD: "PhD" };
+export function levelLabel(level: string | null | undefined): string {
+  if (!level) return "";
+  return LEVEL_LABELS[level] ?? level;
+}
+
 // Confirmed HOD Course Management "Course Type" values (BUSINESS_LOGIC.md L.2,
 // Rule 21) — deliberately a different concept from the pre-existing
 // Course.course_type (theory/practical/both), stored on the new Course.category

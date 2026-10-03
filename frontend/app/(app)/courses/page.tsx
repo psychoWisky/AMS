@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { useRole, useActiveDepartmentId } from "@/stores/auth.store";
 import { toast } from "sonner";
-import { ADMIN_ROLES, COURSE_CATEGORY_LABELS, CREDIT_TYPE_LABELS } from "@/lib/utils";
+import { ADMIN_ROLES, COURSE_CATEGORY_LABELS, CREDIT_TYPE_LABELS, levelLabel } from "@/lib/utils";
 import { BookOpen, Plus, Search, Loader2, Globe, EyeOff, Pencil, Trash2, X, Crown, UserPlus, Upload } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { CourseBulkUploadModal } from "@/components/ui/course-bulk-upload-modal";
@@ -20,7 +20,7 @@ interface Course {
 interface Offering {
   id: string; course_number: string; course_title: string; program_level: string | null; credit_structure: string;
   category: string | null; credit_type: string | null; is_research: boolean;
-  semester_name: string | null; section: string | null; max_enrollment: number;
+  semester_name: string | null; section: string | null; practical_group: string | null; max_enrollment: number;
   enrolled_count: number; status: string; faculty_names: string[];
   department_id: string | null; department_name: string | null; stream: string | null;
 }
@@ -259,6 +259,38 @@ export default function CoursesPage() {
     onError: (e: unknown) => toast.error((e as {response?:{data?:{detail?:string}}})?.response?.data?.detail ?? "Failed."),
   });
 
+  // Offered Courses edit task (this revision) — HOD/Super Admin editing of
+  // OFFERING-SPECIFIC fields only (max enrollment, section, practical group).
+  // Course master details (name/code/category/credits) are intentionally
+  // NOT part of this form — those remain Course Management's job, above.
+  // `canManage` (used to show this button) is the same HOD-or-Super-Admin
+  // gate already used for every other offering action on this page; the
+  // backend's own `update_offering` independently re-verifies department
+  // ownership from the offering's real, stored department, never trusting
+  // anything this form sends.
+  const [editOffering, setEditOffering] = useState<Offering | null>(null);
+  const [offeringEditForm, setOfferingEditForm] = useState({ max_enrollment: "60", section: "", practical_group: "" });
+
+  function openOfferingEdit(o: Offering) {
+    setEditOffering(o);
+    setOfferingEditForm({ max_enrollment: String(o.max_enrollment ?? 60), section: o.section ?? "", practical_group: o.practical_group ?? "" });
+  }
+  function closeOfferingEdit() { setEditOffering(null); }
+
+  const updateOffering = useMutation({
+    mutationFn: () => api.patch(`/courses/offerings/${editOffering!.id}`, {
+      max_enrollment: parseInt(offeringEditForm.max_enrollment, 10),
+      section: offeringEditForm.section || null,
+      practical_group: offeringEditForm.practical_group || null,
+    }),
+    onSuccess: () => {
+      toast.success("Offering updated.");
+      qc.invalidateQueries({ queryKey: ["ams-offerings"] });
+      closeOfferingEdit();
+    },
+    onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed to update offering."),
+  });
+
   function closeOfferingModal() {
     setShowOfferingCreate(false);
     setOfferingForm({ calendar_id: "", semester_id: "", course_id: "", section: "", max_enrollment: "60", department_id: "" });
@@ -361,7 +393,7 @@ export default function CoursesPage() {
             <select value={levelFilter} onChange={(e) => setLevelFilter(e.target.value)}
               className="border border-gray-200 rounded-xl px-3 py-2.5 text-base focus:outline-none">
               <option value="">All Programmes</option>
-              {LEVELS.map((l) => <option key={l} value={l}>{l}</option>)}
+              {LEVELS.map((l) => <option key={l} value={l}>{levelLabel(l)}</option>)}
             </select>
           </div>
 
@@ -373,7 +405,7 @@ export default function CoursesPage() {
             ) : (
               <table className="w-full text-sm min-w-[1000px]">
                 <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10">
-                  <tr>{["Sl No", "Course College", "Course Number", "Course Title", "Programme", "Credit", "Credit Type", "Research", "Compulsory", ...(canManage ? ["Action"] : [])].map((h) => (
+                  <tr>{["Sl No", "Course College", "Course Number", "Course Title", "Programme", "Credit", "Credit Type", "Course Type", ...(canManage ? ["Action"] : [])].map((h) => (
                     <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700 whitespace-nowrap">{h}</th>
                   ))}</tr>
                 </thead>
@@ -384,11 +416,10 @@ export default function CoursesPage() {
                       <td className="px-4 py-3 text-gray-600">{c.college_name ?? "—"}</td>
                       <td className="px-4 py-3 font-mono font-bold text-[#0D6E6E] whitespace-nowrap">{c.course_number}</td>
                       <td className="px-4 py-3 font-medium text-gray-900 max-w-xs truncate">{c.title}</td>
-                      <td className="px-4 py-3"><span className="px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-sm font-semibold">{c.program_level}</span></td>
+                      <td className="px-4 py-3"><span className="px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-sm font-semibold">{levelLabel(c.program_level)}</span></td>
                       <td className="px-4 py-3"><span className="font-mono text-sm bg-[#E6F4F4] text-[#0D6E6E] px-2 py-0.5 rounded">{c.credit_structure}</span></td>
                       <td className="px-4 py-3 text-gray-600">{c.credit_type ? CREDIT_TYPE_LABELS[c.credit_type] : "—"}</td>
-                      <td className="px-4 py-3">{c.is_research ? <span className="text-green-600 font-semibold">Yes</span> : <span className="text-gray-400">No</span>}</td>
-                      <td className="px-4 py-3">{c.is_compulsory ? <span className="text-green-600 font-semibold">Yes</span> : <span className="text-gray-400">No</span>}</td>
+                      <td className="px-4 py-3 text-gray-600">{c.category ? COURSE_CATEGORY_LABELS[c.category] : "—"}</td>
                       {canManage && (
                         <td className="px-4 py-3">
                           <div className="flex gap-1.5">
@@ -457,7 +488,7 @@ export default function CoursesPage() {
                   {LEVELS.map((l) => (
                     <button key={l} type="button" onClick={() => setForm((f) => ({ ...f, program_level: l }))}
                       className={`flex-1 py-2 rounded-xl text-sm font-semibold border-2 transition-all ${form.program_level === l ? "border-[#0D6E6E] bg-[#0D6E6E] text-white" : "border-gray-200 text-gray-600"}`}>
-                      {l}
+                      {levelLabel(l)}
                     </button>
                   ))}
                 </div>
@@ -557,7 +588,7 @@ export default function CoursesPage() {
             <select value={offerLevel} onChange={(e) => setOfferLevel(e.target.value)}
               className="border border-gray-200 rounded-xl px-3 py-2.5 text-base focus:outline-none">
               <option value="">Select Programme…</option>
-              {LEVELS.map((l) => <option key={l} value={l}>{l}</option>)}
+              {LEVELS.map((l) => <option key={l} value={l}>{levelLabel(l)}</option>)}
             </select>
           </div>
 
@@ -578,7 +609,7 @@ export default function CoursesPage() {
                     <tr key={o.id} className={i % 2 === 0 ? "bg-white" : "bg-gray-50/50"}>
                       <td className="px-4 py-3 text-gray-600">{i + 1}</td>
                       <td className="px-4 py-3 font-mono font-bold text-[#0D6E6E] whitespace-nowrap">{o.course_number}</td>
-                      <td className="px-4 py-3 max-w-xs truncate">{o.course_title}{o.program_level && (<span className="ml-2 px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-xs font-semibold">{o.program_level}</span>)}</td>
+                      <td className="px-4 py-3 max-w-xs truncate">{o.course_title}{o.program_level && (<span className="ml-2 px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-xs font-semibold">{levelLabel(o.program_level)}</span>)}</td>
                       <td className="px-4 py-3 text-gray-600 whitespace-nowrap">{o.semester_name ?? "—"}</td>
                       <td className="px-4 py-3 font-mono text-sm">{o.credit_structure}</td>
                       <td className="px-4 py-3 text-gray-600">{o.credit_type ? CREDIT_TYPE_LABELS[o.credit_type] : "—"}</td>
@@ -590,6 +621,7 @@ export default function CoursesPage() {
                             className="text-sm font-semibold text-[#0D6E6E] hover:underline">View Details</button>
                           {canManage && o.status !== "closed" && (
                             <>
+                              <button onClick={() => openOfferingEdit(o)} className="p-1.5 text-gray-600 hover:bg-gray-100 rounded-lg" title="Edit offering details"><Pencil size={14} /></button>
                               {o.status === "draft" && (
                                 <button onClick={() => setOfferingStatus.mutate({ id: o.id, status: "published" })}
                                   className="flex items-center gap-1 text-sm font-semibold text-green-700 hover:underline"><Globe size={12} /> Publish</button>
@@ -612,6 +644,45 @@ export default function CoursesPage() {
         </>
       )}
 
+      {/* Edit Offering modal (Offered Courses edit task) — OFFERING-SPECIFIC
+          fields only; course master details are not editable here at all. */}
+      {editOffering && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
+            <h3 className="text-xl font-bold mb-1">Edit Offering</h3>
+            <p className="text-sm text-gray-600 mb-1">{editOffering.course_number} — {editOffering.course_title}</p>
+            <p className="text-xs text-gray-500 mb-4">Only this offering's own details can be changed here. To change the course's name, code, type or credits, use Course Management instead.</p>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-base font-semibold text-gray-700 mb-1">Max Enrollment</label>
+                <input type="number" min={1} value={offeringEditForm.max_enrollment}
+                  onChange={(e) => setOfferingEditForm((f) => ({ ...f, max_enrollment: e.target.value }))}
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+              </div>
+              <div>
+                <label className="block text-base font-semibold text-gray-700 mb-1">Section</label>
+                <input value={offeringEditForm.section} onChange={(e) => setOfferingEditForm((f) => ({ ...f, section: e.target.value }))}
+                  placeholder="e.g. A / B / C"
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+              </div>
+              <div>
+                <label className="block text-base font-semibold text-gray-700 mb-1">Practical Group</label>
+                <input value={offeringEditForm.practical_group} onChange={(e) => setOfferingEditForm((f) => ({ ...f, practical_group: e.target.value }))}
+                  placeholder="e.g. G1 / G2"
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+              </div>
+            </div>
+            <div className="flex gap-3 mt-5">
+              <button onClick={closeOfferingEdit} className="flex-1 py-2.5 border border-gray-200 rounded-xl text-base font-medium hover:bg-gray-50">Cancel</button>
+              <button onClick={() => { if (!offeringEditForm.max_enrollment || parseInt(offeringEditForm.max_enrollment, 10) <= 0) { toast.error("Max Enrollment must be a positive number."); return; } updateOffering.mutate(); }}
+                disabled={updateOffering.isPending} className="flex-1 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-base font-bold hover:bg-[#178F8F] disabled:opacity-60">
+                {updateOffering.isPending ? "Saving…" : "Save Changes"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Available to Department ─────────────────────────────────────── */}
       {tab === "availability" && (
         <div className="bg-white rounded-2xl border border-gray-200 overflow-auto max-h-[65vh]">
@@ -630,7 +701,7 @@ export default function CoursesPage() {
                 {availableToMe.map((row, i) => (
                   <tr key={row.availability_id} className={i % 2 === 0 ? "bg-white" : "bg-gray-50/50"}>
                     <td className="px-4 py-3 font-mono font-bold text-[#0D6E6E] whitespace-nowrap">{row.course_number}</td>
-                    <td className="px-4 py-3 max-w-xs truncate">{row.course_title}{row.program_level && (<span className="ml-2 px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-xs font-semibold">{row.program_level}</span>)}</td>
+                    <td className="px-4 py-3 max-w-xs truncate">{row.course_title}{row.program_level && (<span className="ml-2 px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-xs font-semibold">{levelLabel(row.program_level)}</span>)}</td>
                     <td className="px-4 py-3 font-mono text-sm">{row.credit_structure}</td>
                     <td className="px-4 py-3 text-gray-600">{row.owning_department_name ?? "—"}</td>
                     <td className="px-4 py-3">
@@ -671,7 +742,7 @@ export default function CoursesPage() {
                   className="w-full flex items-center justify-between text-left px-3 py-2.5 text-sm hover:bg-[#E6F4F4] border-b border-gray-50 last:border-0 disabled:opacity-50">
                   <span>
                     <span className="font-mono font-bold text-[#0D6E6E]">{c.course_number}</span> — {c.title}{" "}
-                    <span className="text-gray-500">({c.program_level}, {c.credit_structure}, {c.department_name ?? "—"})</span>
+                    <span className="text-gray-500">({levelLabel(c.program_level)}, {c.credit_structure}, {c.department_name ?? "—"})</span>
                   </span>
                   <Plus size={14} className="text-[#0D6E6E] shrink-0" />
                 </button>
@@ -711,7 +782,7 @@ export default function CoursesPage() {
                 <select value={offeringForm.course_id} onChange={(e) => setOfferingForm((f) => ({ ...f, course_id: e.target.value }))}
                   className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
                   <option value="">Select course…</option>
-                  {courses.map((c) => <option key={c.id} value={c.id}>{c.course_number} — {c.title} — {c.program_level}{c.is_research ? " (Research)" : ""}</option>)}
+                  {courses.map((c) => <option key={c.id} value={c.id}>{c.course_number} — {c.title} — {levelLabel(c.program_level)}{c.is_research ? " (Research)" : ""}</option>)}
                 </select>
               </div>
               {isHod ? (

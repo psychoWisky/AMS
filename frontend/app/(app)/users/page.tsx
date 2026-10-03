@@ -5,7 +5,7 @@ import { api } from "@/services/api";
 import { useRole } from "@/stores/auth.store";
 import { toast } from "sonner";
 import { Users, Plus, Search, Loader2, Pencil, KeyRound, Upload, ShieldCheck } from "lucide-react";
-import { ROLES, ADMIN_ROLES } from "@/lib/utils";
+import { ROLES, ADMIN_ROLES, levelLabel } from "@/lib/utils";
 import { ChangePasswordModal } from "@/components/ui/change-password-modal";
 import { UserBulkUploadModal } from "@/components/ui/user-bulk-upload-modal";
 
@@ -66,7 +66,12 @@ const DEPARTMENT_ROLE_OPTIONS = ["hod", "faculty"];
 // reused every time the form must return to empty (opening Add User, a
 // successful create, and Cancel) instead of relying on stale useState from a
 // previous session of the modal.
-const EMPTY_FORM = { email: "", password: "", first_name: "", middle_name: "", last_name: "", role: "faculty", designation: "", mobile: "", department_id: "", program_id: "" };
+// College/Outstation + Department-mapping task (this revision) — `college_id`
+// added to the Create form, mirroring the Edit form's existing support
+// (EMPTY_EDIT_FORM below). Super Admin only (this entire page is Super-Admin-
+// only — see lib/navigation.ts's `/users` route, `roles: ["super_admin"]` —
+// so no additional per-field role gate is needed in the modal itself).
+const EMPTY_FORM = { email: "", password: "", first_name: "", middle_name: "", last_name: "", role: "faculty", designation: "", mobile: "", department_id: "", program_id: "", college_id: "" };
 const EMPTY_EDIT_FORM = {
   email: "", first_name: "", middle_name: "", last_name: "", role: "", designation: "", mobile: "", department_id: "", program_id: "",
   title: "", employee_id: "", date_of_birth: "", gender: "", blood_group: "", father_name: "", abc_id: "", address: "", college_id: "",
@@ -108,7 +113,7 @@ export default function UsersPage() {
   const { data: colleges = [] } = useQuery<{ id: string; name: string }[]>({
     queryKey: ["ams-colleges-active"],
     queryFn: async () => (await api.get("/admin/colleges")).data,
-    enabled: !!editUser,
+    enabled: showCreate || !!editUser,
   });
 
   const { data: programs = [] } = useQuery<ProgramOpt[]>({
@@ -120,38 +125,43 @@ export default function UsersPage() {
   // Programme<->Department many-to-many redesign — Department options are
   // now filtered BY Programme (reverse of the old Department->Programme
   // direction), since one Department may belong to several Programmes.
+  // College/Outstation + Department-mapping task (this revision) — the SAME
+  // query now also filters by `college_id` when one is selected (the backend's
+  // `GET /departments` ANDs both filters when both are supplied — see
+  // `departments.py`'s `list_departments`). Either filter alone, both, or
+  // neither all work; this is one combined query, not two separate ones.
   const createDeptQuery = useQuery<DepartmentOpt[]>({
-    queryKey: ["ams-departments-for-program", form.program_id],
-    queryFn: async () => (await api.get("/departments", { params: { program_id: form.program_id } })).data,
-    enabled: showCreate && !!form.program_id,
+    queryKey: ["ams-departments-for-program-college", form.program_id, form.college_id],
+    queryFn: async () => (await api.get("/departments", { params: { program_id: form.program_id || undefined, college_id: form.college_id || undefined } })).data,
+    enabled: showCreate && !!(form.program_id || form.college_id),
   });
   const editDeptQuery = useQuery<DepartmentOpt[]>({
-    queryKey: ["ams-departments-for-program", editForm.program_id],
-    queryFn: async () => (await api.get("/departments", { params: { program_id: editForm.program_id } })).data,
-    enabled: !!editUser && !!editForm.program_id,
+    queryKey: ["ams-departments-for-program-college", editForm.program_id, editForm.college_id],
+    queryFn: async () => (await api.get("/departments", { params: { program_id: editForm.program_id || undefined, college_id: editForm.college_id || undefined } })).data,
+    enabled: !!editUser && !!(editForm.program_id || editForm.college_id),
   });
   const createDeptOptions = createDeptQuery.data ?? [];
   const editDeptOptions = editDeptQuery.data ?? [];
-  const createDepartments = form.program_id ? createDeptOptions : departments;
-  const editDepartments = editForm.program_id ? editDeptOptions : departments;
+  const createDepartments = (form.program_id || form.college_id) ? createDeptOptions : departments;
+  const editDepartments = (editForm.program_id || editForm.college_id) ? editDeptOptions : departments;
 
   // If the currently-selected Department is no longer valid for whichever
-  // Programme is now selected, clear it rather than silently submitting an
-  // invalid pair — the backend would reject it anyway, but this avoids a
-  // round-trip error for the common "changed Programme" case. Guarded on
-  // `isSuccess` so this never fires against the query's transient empty
-  // default before its actual data has arrived (which would otherwise wipe
-  // out a perfectly valid pre-existing selection, e.g. when opening Edit).
+  // Programme/College is now selected, clear it rather than silently
+  // submitting an invalid combination — the backend would reject it anyway,
+  // but this avoids a round-trip error for the common "changed filter" case.
+  // Guarded on `isSuccess` so this never fires against the query's transient
+  // empty default before its actual data has arrived (which would otherwise
+  // wipe out a perfectly valid pre-existing selection, e.g. when opening Edit).
   useEffect(() => {
-    if (createDeptQuery.isSuccess && form.program_id && form.department_id && !createDeptOptions.some((d) => d.id === form.department_id)) {
+    if (createDeptQuery.isSuccess && (form.program_id || form.college_id) && form.department_id && !createDeptOptions.some((d) => d.id === form.department_id)) {
       setForm((f) => ({ ...f, department_id: "" }));
     }
-  }, [createDeptQuery.isSuccess, createDeptOptions, form.program_id, form.department_id]);
+  }, [createDeptQuery.isSuccess, createDeptOptions, form.program_id, form.college_id, form.department_id]);
   useEffect(() => {
-    if (editDeptQuery.isSuccess && editForm.program_id && editForm.department_id && !editDeptOptions.some((d) => d.id === editForm.department_id)) {
+    if (editDeptQuery.isSuccess && (editForm.program_id || editForm.college_id) && editForm.department_id && !editDeptOptions.some((d) => d.id === editForm.department_id)) {
       setEditForm((f) => ({ ...f, department_id: "" }));
     }
-  }, [editDeptQuery.isSuccess, editDeptOptions, editForm.program_id, editForm.department_id]);
+  }, [editDeptQuery.isSuccess, editDeptOptions, editForm.program_id, editForm.college_id, editForm.department_id]);
 
   const createUser = useMutation({
     mutationFn: () => api.post("/auth/users", {
@@ -159,6 +169,7 @@ export default function UsersPage() {
       middle_name: form.middle_name || null,
       department_id: form.department_id || null,
       program_id: form.program_id || null,
+      college_id: form.college_id || null,
     }),
     // Issue 4 fix: reset to EMPTY_FORM (not just close the modal) on success,
     // so the next time Add User is opened it can never show User A's data.
@@ -327,11 +338,25 @@ export default function UsersPage() {
                 </select>
               </div>
               <div>
+                {/* College/Outstation + Department-mapping task (this
+                    revision) — Super Admin only (this entire page is
+                    Super-Admin-only, see the EMPTY_FORM comment above).
+                    Selecting a College/Outstation narrows the Department
+                    dropdown below via the combined createDeptQuery; it is
+                    never required (a user may legitimately have none). */}
+                <label className="block text-base font-semibold text-gray-700 mb-1">College/Outstation <span className="font-normal text-gray-500">(optional)</span></label>
+                <select value={form.college_id} onChange={(e) => setForm((f) => ({ ...f, college_id: e.target.value }))}
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
+                  <option value="">None</option>
+                  {colleges.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              </div>
+              <div>
                 <label className="block text-base font-semibold text-gray-700 mb-1">Programme <span className="font-normal text-gray-500">(optional)</span></label>
                 <select value={form.program_id} onChange={(e) => setForm((f) => ({ ...f, program_id: e.target.value }))}
                   className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
                   <option value="">None</option>
-                  {programs.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.level})</option>)}
+                  {programs.map((p) => <option key={p.id} value={p.id}>{p.name} ({levelLabel(p.level)})</option>)}
                 </select>
               </div>
               <div>
@@ -341,8 +366,8 @@ export default function UsersPage() {
                   <option value="">None</option>
                   {createDepartments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
                 </select>
-                {form.program_id && createDepartments.length === 0 && (
-                  <p className="text-xs text-amber-600 mt-1">No Departments are associated with this Programme yet.</p>
+                {(form.program_id || form.college_id) && createDepartments.length === 0 && (
+                  <p className="text-xs text-amber-600 mt-1">No Departments are associated with the selected Programme/College/Outstation yet.</p>
                 )}
               </div>
             </div>
@@ -427,7 +452,7 @@ export default function UsersPage() {
               {editSelect("Blood Group", "blood_group", BLOOD_GROUPS.map((g) => ({ value: g, label: g })))}
               {editInput("Father's Name", "father_name")}
               {editInput("ABC ID", "abc_id")}
-              {editSelect("College", "college_id", colleges.map((c) => ({ value: c.id, label: c.name })))}
+              {editSelect("College/Outstation", "college_id", colleges.map((c) => ({ value: c.id, label: c.name })))}
               <div className="md:col-span-2">
                 <label className="block text-base font-semibold text-gray-700 mb-1">Address</label>
                 <textarea rows={2} value={editForm.address} onChange={(e) => setEditForm((f) => ({ ...f, address: e.target.value }))}

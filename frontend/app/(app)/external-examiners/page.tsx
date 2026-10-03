@@ -9,6 +9,7 @@ import {
   ProposalTable, RevertNotice, SelectionStatusBadge, StageTimeline, StudentInfoCard,
   apiErrorMessage, type SelectionDetail,
 } from "@/components/ui/external-examiner-parts";
+import { levelLabel } from "@/lib/utils";
 
 // Major Advisor's own page. There is NO student route/page for this module at all — the student has
 // zero visibility (confirmed requirement); the Major Advisor prepares the list on their behalf. The
@@ -120,14 +121,14 @@ export default function ExternalExaminersPage() {
           <label className="block text-sm font-semibold text-gray-700 mb-1">Student</label>
           <select value={studentId} onChange={(e) => pickStudent(e.target.value)} className="w-full md:w-96 border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
             <option value="">Select a student…</option>
-            {eligibleForNew.map((c) => <option key={c.student_id} value={c.student_id}>{c.student_name} ({c.student_roll}) — {c.program_level}</option>)}
+            {eligibleForNew.map((c) => <option key={c.student_id} value={c.student_id}>{c.student_name} ({c.student_roll}) — {levelLabel(c.program_level)}</option>)}
           </select>
-          {eligibleForNew.length === 0 && <p className="text-xs text-gray-500 mt-1">You have no eligible students (accepted Major Advisor, PG/PhD, no selection currently under approval or approved).</p>}
+          {eligibleForNew.length === 0 && <p className="text-xs text-gray-500 mt-1">You have no eligible students (accepted Major Advisor, Masters/PhD, no selection currently under approval or approved).</p>}
         </div>
 
         {studentId && requiredCount && (
           <>
-            <p className="text-sm text-gray-600">{selectedStudent?.program_level} requires exactly <b>{requiredCount}</b> proposed examiners. The Vice Chancellor will later select {requiredCount === 3 ? "1" : "2"} of them.</p>
+            <p className="text-sm text-gray-600">{levelLabel(selectedStudent?.program_level)} requires exactly <b>{requiredCount}</b> proposed examiners. The Vice Chancellor will later select {requiredCount === 3 ? "1" : "2"} of them.</p>
             <div className="space-y-4">
               {proposals.map((p, i) => (
                 <div key={i} className="border border-gray-200 rounded-xl p-4">

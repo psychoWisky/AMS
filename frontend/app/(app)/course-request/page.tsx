@@ -6,6 +6,7 @@ import { useRole } from "@/stores/auth.store";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ClipboardList, Loader2, CheckCircle2, XCircle, Eye, X } from "lucide-react";
+import { levelLabel } from "@/lib/utils";
 
 interface Calendar { id: string; name: string; academic_year: string; }
 interface Semester { id: string; calendar_id: string; name: string; }
@@ -246,7 +247,7 @@ export default function CourseRequestPage() {
             <select value={offeringId} onChange={(e) => setOfferingId(e.target.value)}
               className="border border-gray-200 rounded-xl px-3 py-2.5 text-base focus:outline-none min-w-[220px]">
               <option value="">Course…</option>
-              {myOfferings.map((o) => <option key={o.id} value={o.id}>{o.course_number} — {o.course_title}{o.program_level ? ` — ${o.program_level}` : ""}</option>)}
+              {myOfferings.map((o) => <option key={o.id} value={o.id}>{o.course_number} — {o.course_title}{o.program_level ? ` — ${levelLabel(o.program_level)}` : ""}</option>)}
             </select>
           </div>
 

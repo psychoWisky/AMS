@@ -298,7 +298,19 @@ async def t_no_n_plus_one_queries():
     n_all, q_all = counts[0]
     n_few, q_few = counts[-1]
     assert n_all > n_few + 5, counts
-    assert q_all == q_few, f"query count must not grow with the number of users listed: {counts}"
+    # Your Profile Department/College display task (this revision) — list_users
+    # now also `selectinload(User.college)` (needed so `_user_dict`'s new
+    # `college_name` field never lazy-loads/crashes for a row that DOES have
+    # one). SQLAlchemy's `selectinload` skips issuing its batched IN-query
+    # entirely when every row in that particular result set has a NULL FK —
+    # so the exact query count can legitimately differ by this one
+    # conditional, data-dependent batch between two different filters,
+    # without that growth being O(n) in the number of rows (still +1 at most,
+    # never +1-per-row, which is the actual "no N+1" property this test
+    # guards). Exact equality was too strict for a field that is
+    # conditionally batch-loaded; a small constant tolerance preserves the
+    # real invariant.
+    assert abs(q_all - q_few) <= 1, f"query count must not grow with the number of users listed (beyond one conditional, data-dependent batch): {counts}"
     assert q_all <= 15, f"expected a small constant number of queries, got {counts}"
 
 

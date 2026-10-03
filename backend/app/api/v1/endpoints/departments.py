@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from app.db.base import get_db
 from app.core.dependencies import get_current_user, require_roles
-from app.models.user import User, UserRole, Department, Program, ProgramDepartment, College, CollegeProgram, Designation, Role
+from app.models.user import User, UserRole, Department, Program, ProgramDepartment, College, CollegeProgram, DepartmentCollege, Designation, Role
 
 router = APIRouter(prefix="/departments", tags=["Departments"])
 admin_router = APIRouter(prefix="/admin", tags=["Admin — Master Data"])
@@ -61,6 +61,9 @@ class ProgramDepartmentIn(BaseModel):
 class CollegeProgramIn(BaseModel):
     program_id: UUID
 
+class DepartmentCollegeIn(BaseModel):
+    department_id: UUID
+
 class CollegeIn(BaseModel):
     name: str; code: str
 
@@ -88,22 +91,29 @@ class RoleUpdate(BaseModel):
 @router.get("")
 async def list_departments(
     stream: Optional[str] = None, include_inactive: bool = False,
-    program_id: Optional[UUID] = None,
+    program_id: Optional[UUID] = None, college_id: Optional[UUID] = None,
     db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user),
 ):
-    """Existing stream/include_inactive filters unchanged. `program_id`
-    (Programme<->Department many-to-many redesign) restricts the result to
-    Departments actually associated with that Programme via
-    ams_program_departments — this is what drives the "Programme -> filtered
-    Department" selector direction (Orientation, Users page) everywhere else
-    in AMS. Omitting it preserves the exact prior unfiltered-by-programme
-    behavior for existing consumers."""
+    """Existing stream/include_inactive/program_id filters unchanged.
+    `college_id` (College/Outstation + Department-mapping task) restricts the
+    result to Departments actually associated with that College/Outstation via
+    `ams_department_colleges` — this is what drives the Add Users modal's
+    "College/Outstation -> filtered Department" selector. Omitting it preserves
+    the exact prior unfiltered-by-college behavior for existing consumers.
+    Independent of `program_id`: the two filters, if both supplied, are ANDed
+    (a Department must satisfy both), never combined into some derived
+    Department->Programme->College chain (none exists — see DepartmentCollege's
+    model docstring)."""
     q = select(Department)
     if not include_inactive: q = q.where(Department.is_active == True)
     if stream: q = q.where(Department.stream == stream)
     if program_id:
         q = q.where(Department.id.in_(
             select(ProgramDepartment.department_id).where(ProgramDepartment.program_id == program_id)
+        ))
+    if college_id:
+        q = q.where(Department.id.in_(
+            select(DepartmentCollege.department_id).where(DepartmentCollege.college_id == college_id)
         ))
     result = await db.execute(q.order_by(Department.name))
     return [{"id": str(d.id), "name": d.name, "code": d.code, "stream": d.stream, "is_active": d.is_active} for d in result.scalars().all()]
@@ -406,6 +416,119 @@ async def remove_college_program(
         raise HTTPException(404, "Program not found.")
     result = await db.execute(
         select(CollegeProgram).where(CollegeProgram.college_id == college_id, CollegeProgram.program_id == program_id)
+    )
+    link = result.scalar_one_or_none()
+    if link:
+        await db.delete(link)
+        await db.commit()
+
+
+# ── Department <-> College/Outstation associations (College/Outstation +
+# Department-mapping task, this revision) ──────────────────────────────────
+# Explicit, Super Admin-managed many-to-many — CONFIRMED: one Department may
+# belong to multiple Colleges/Outstations, and one College/Outstation may
+# have multiple Departments. Independent of the Programme<->Department and
+# College<->Programme associations above (no chain is derived between them —
+# see DepartmentCollege's model docstring). Removing an association only
+# removes the join row — never the Department, College, or any User/Course/
+# UserRoleAssignment that references either; this table is NOT read by any
+# RBAC/authorization check anywhere in AMS (see the same docstring).
+
+async def validate_department_college_pair(
+    department_id: Optional[UUID], college_id: Optional[UUID], db: AsyncSession,
+) -> None:
+    """Mirrors `validate_program_department_pair` exactly: whenever BOTH a
+    Department and a College/Outstation are supplied together, that exact
+    pair must exist in `ams_department_colleges`. Neither field is made
+    mandatory by this check — if either is None, it is skipped entirely."""
+    if not department_id or not college_id:
+        return
+    result = await db.execute(
+        select(DepartmentCollege.id).where(
+            DepartmentCollege.department_id == department_id,
+            DepartmentCollege.college_id == college_id,
+        ).limit(1)
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(400, "This Department is not associated with the selected College/Outstation.")
+
+
+@router.get("/{department_id}/colleges")
+async def list_department_colleges(
+    department_id: UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user),
+):
+    """Department-side view of the Department<->College/Outstation
+    association (see the College endpoints under
+    /admin/colleges/{id}/departments, which are the only write path — the
+    same rows are managed from either side)."""
+    if not await db.get(Department, department_id):
+        raise HTTPException(404, "Department not found.")
+    result = await db.execute(
+        select(DepartmentCollege, College)
+        .join(College, College.id == DepartmentCollege.college_id)
+        .where(DepartmentCollege.department_id == department_id)
+        .order_by(College.name)
+    )
+    return [{"association_id": str(link.id), "college_id": str(c.id), "college_name": c.name, "college_code": c.code}
+            for link, c in result.all()]
+
+
+@admin_router.get("/colleges/{college_id}/departments")
+async def list_college_departments(
+    college_id: UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user),
+):
+    if not await db.get(College, college_id):
+        raise HTTPException(404, "College not found.")
+    result = await db.execute(
+        select(DepartmentCollege, Department)
+        .join(Department, Department.id == DepartmentCollege.department_id)
+        .where(DepartmentCollege.college_id == college_id)
+        .order_by(Department.name)
+    )
+    return [{"association_id": str(link.id), "department_id": str(d.id), "department_name": d.name, "department_code": d.code}
+            for link, d in result.all()]
+
+
+@admin_router.post("/colleges/{college_id}/departments", status_code=201)
+async def add_college_department(
+    college_id: UUID, body: DepartmentCollegeIn, db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(*_MASTER_DATA_ROLES)),
+):
+    if not await db.get(College, college_id):
+        raise HTTPException(404, "College not found.")
+    if not await db.get(Department, body.department_id):
+        raise HTTPException(404, "Department not found.")
+    existing = await db.execute(
+        select(DepartmentCollege.id).where(DepartmentCollege.college_id == college_id, DepartmentCollege.department_id == body.department_id)
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(409, "This Department is already associated with this College/Outstation.")
+    link = DepartmentCollege(college_id=college_id, department_id=body.department_id)
+    db.add(link)
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Concurrent duplicate: uq_department_college is the race-safe backstop.
+        await db.rollback()
+        raise HTTPException(409, "This Department is already associated with this College/Outstation.")
+    return {"id": str(link.id), "message": "Department associated with College/Outstation."}
+
+
+@admin_router.delete("/colleges/{college_id}/departments/{department_id}", status_code=204)
+async def remove_college_department(
+    college_id: UUID, department_id: UUID, db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(*_MASTER_DATA_ROLES)),
+):
+    """Removes ONLY the association row. Unknown College/Department ids are a
+    404 (never silently ignored); once both exist, removing an association
+    that isn't there is an idempotent no-op 204, matching the existing
+    Programme<->Department/College<->Programme removals."""
+    if not await db.get(College, college_id):
+        raise HTTPException(404, "College not found.")
+    if not await db.get(Department, department_id):
+        raise HTTPException(404, "Department not found.")
+    result = await db.execute(
+        select(DepartmentCollege).where(DepartmentCollege.college_id == college_id, DepartmentCollege.department_id == department_id)
     )
     link = result.scalar_one_or_none()
     if link:

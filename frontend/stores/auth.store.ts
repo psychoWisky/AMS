@@ -41,7 +41,14 @@ interface AuthUser {
   active_department_id: string | null;
   designation: string | null;
   department_id: string | null;
+  // Your Profile Department/College display task — resolved NAME for the
+  // CURRENTLY ACTIVE department/session context (backend: `_user_dict` in
+  // auth.py). For multi-department Faculty this is only the active
+  // department, never a concatenation of every department they hold a role
+  // in — it changes on the next request after a role/department switch.
+  department_name: string | null;
   college_id: string | null;
+  college_name: string | null;
   program_id: string | null;
   student_roll: string | null;
   date_of_birth: string | null;

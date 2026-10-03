@@ -28,7 +28,7 @@ from app.models.user import User, UserRole, RefreshToken, UserRoleAssignment, De
 # both fields are supplied together they must form a real association.
 # Neither field becomes mandatory by importing this (Faculty/HOD keep working
 # with Department-only or neither, exactly as today).
-from app.api.v1.endpoints.departments import validate_program_department_pair
+from app.api.v1.endpoints.departments import validate_program_department_pair, validate_department_college_pair
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
@@ -94,6 +94,14 @@ class CreateUserRequest(BaseModel):
     employee_id: Optional[str] = None
     student_roll: Optional[str] = None
     admission_year: Optional[int] = None
+    # College/Outstation + Department-mapping task (this revision) — Super
+    # Admin may assign a College/Outstation at creation time, same as Edit
+    # User already supports (UpdateUserRequest.college_id below). Not
+    # required: a user may legitimately have no College/Outstation (most
+    # existing users today have none — see create_user's validation, which
+    # only runs when a value is actually supplied). No default is ever
+    # assigned when omitted.
+    college_id: Optional[UUID] = None
 
 # Widened (this task's confirmed requirement) to also cover the fields Super
 # Admin actually enters on the Add User form — first/middle/last name and
@@ -285,9 +293,27 @@ def _user_dict(u: User) -> dict:
         "active_department_id": str(active.department_id) if active.department_id else None,
         "designation": u.designation,
         "department_id": str(u.department_id) if u.department_id else None,
+        # Your Profile Department/College display task (this revision) —
+        # resolved NAME for the CURRENTLY ACTIVE department/session context,
+        # not every department this user might hold a role in: for a
+        # department-bearing active assignment (HOD/FACULTY), the name comes
+        # from that assignment's own `department` (already eager-loaded by
+        # get_assigned_role_assignments); for a STUDENT (whose assignment is
+        # always departmentless) or any other departmentless active role,
+        # falls back to the user's own `User.department` (their home
+        # department — eager-loaded by get_current_user). A multi-department
+        # FACULTY member therefore sees only their currently active
+        # department here, never a concatenation of all of them — switching
+        # roles/departments changes this value on the next request, with no
+        # new API call required.
+        "department_name": (
+            active.department.name if getattr(active, "department", None)
+            else (u.department.name if getattr(u, "department", None) else None)
+        ),
         # Bulk Faculty/User Excel Upload task (this revision) — College is
         # part of the user's own profile now (User.college_id).
         "college_id": str(u.college_id) if u.college_id else None,
+        "college_name": u.college.name if getattr(u, "college", None) else None,
         "program_id": str(u.program_id) if u.program_id else None,
         "student_roll": u.student_roll,
         "employee_id": u.employee_id,
@@ -350,7 +376,10 @@ async def _issue_tokens(user: User, request: Request, db: AsyncSession) -> Token
 
 @router.post("/login", response_model=TokenResponse)
 async def login(payload: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(User).where(User.email == payload.email.lower()))
+    result = await db.execute(
+        select(User).options(selectinload(User.department), selectinload(User.college))
+        .where(User.email == payload.email.lower())
+    )
     user = result.scalar_one_or_none()
     if not user or not user.hashed_password or not verify_password(payload.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Incorrect email or password.")
@@ -372,7 +401,10 @@ async def refresh(payload: RefreshRequest, request: Request, db: AsyncSession = 
     if not stored:
         raise HTTPException(status_code=401, detail="Refresh token revoked.")
     stored.is_revoked = True
-    result = await db.execute(select(User).where(User.id == user_id, User.is_active == True))
+    result = await db.execute(
+        select(User).options(selectinload(User.department), selectinload(User.college))
+        .where(User.id == user_id, User.is_active == True)
+    )
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=401, detail="User not found.")
@@ -463,6 +495,15 @@ async def create_user(
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Email already registered.")
     await validate_program_department_pair(body.program_id, body.department_id, db)
+    # College/Outstation + Department-mapping task (this revision) — Super
+    # Admin only (enforced by this endpoint's own `require_roles`, unchanged).
+    # A client-supplied college_id is never trusted blindly: it must be a real,
+    # existing College, and whenever a department is ALSO supplied, that exact
+    # (department, college) pair must already be a confirmed association —
+    # mirrors validate_program_department_pair's exact pattern/reasoning.
+    if body.college_id is not None and not await db.get(College, body.college_id):
+        raise HTTPException(status_code=400, detail="The specified college does not exist.")
+    await validate_department_college_pair(body.department_id, body.college_id, db)
 
     # Incharge Academic Cell / DPGS task (Section 3.1/8) — this legacy
     # create-with-a-single-role path must honor the SAME "exactly one active
@@ -497,6 +538,7 @@ async def create_user(
         employee_id=body.employee_id,
         student_roll=body.student_roll,
         admission_year=body.admission_year,
+        college_id=body.college_id,
         is_active=True,
         is_verified=True,
     )
@@ -637,6 +679,14 @@ async def update_user(
     if body.college_id is not None and not await db.get(College, body.college_id):
         raise HTTPException(status_code=400, detail="The specified college does not exist.")
 
+    # College/Outstation + Department-mapping task (this revision) — same
+    # effective-pair reasoning as the Programme<->Department check above: only
+    # re-validate when the request actually touches department_id or
+    # college_id, against whichever value the OTHER field already has.
+    if body.department_id is not None or body.college_id is not None:
+        effective_college_id = body.college_id if body.college_id is not None else target.college_id
+        await validate_department_college_pair(effective_department_id, effective_college_id, db)
+
     # Only fields actually sent are applied. A null/blank optional profile field
     # CLEARS it; fields that must always have a value (or whose clearing is
     # deliberately unsupported here) are ignored when null, as before.
@@ -770,6 +820,7 @@ async def list_users(
         select(User).where(User.is_active == True, staff_user_clause())
         .options(
             selectinload(User.department),
+            selectinload(User.college),
             selectinload(User.role_assignments).selectinload(UserRoleAssignment.department),
         )
     )

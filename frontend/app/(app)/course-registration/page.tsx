@@ -6,7 +6,7 @@ import { useUser } from "@/stores/auth.store";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ClipboardCheck, Loader2, CheckSquare, Square, X, Download, FileText } from "lucide-react";
-import { CREDIT_TYPE_LABELS } from "@/lib/utils";
+import { CREDIT_TYPE_LABELS, levelLabel } from "@/lib/utils";
 
 interface Calendar { id: string; name: string; academic_year: string; }
 interface Semester { id: string; calendar_id: string; name: string; }
@@ -657,7 +657,7 @@ export default function CourseRegistrationPage() {
                       <td className="border border-gray-300 px-2 py-1.5">{currentRegistration.academic_year ?? "—"}</td>
                       <td className="border border-gray-300 px-2 py-1.5 font-semibold">Degree Programme</td>
                       <td className="border border-gray-300 px-2 py-1.5">
-                        {currentRegistration.program_name ?? "—"}{currentRegistration.program_level ? ` (${currentRegistration.program_level})` : ""}
+                        {currentRegistration.program_name ?? "—"}{currentRegistration.program_level ? ` (${levelLabel(currentRegistration.program_level)})` : ""}
                       </td>
                     </tr>
                     <tr>

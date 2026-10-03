@@ -137,6 +137,15 @@ async def _setup() -> None:
         for prog in ("P1", "P2"):
             r = await _call("POST", f"/admin/colleges/{S[college]}/programs", S["super"], json={"program_id": str(S[prog].id)})
             assert r.status_code == 201, r.text
+    # College/Outstation + Department-mapping task (this revision) — User
+    # Management's own PATCH /auth/users/{id} now also validates the
+    # Department/College/Outstation pair whenever both are present on the
+    # effective (post-patch) state. "ST" below is edited with college_id=C1
+    # while its legacy department_id is D1 (real seeded departments, not
+    # zztest-isolated — this association is removed automatically when C1 is
+    # deleted at teardown, via ams_department_colleges' ON DELETE CASCADE).
+    r = await _call("POST", f"/admin/colleges/{S['C1']}/departments", S["super"], json={"department_id": str(S["D1"].id)})
+    assert r.status_code == 201, r.text
 
     D1, D2, P1, P2 = S["D1"].id, S["D2"].id, S["P1"].id, S["P2"].id
     prof = dict(date_of_birth=date(2000, 1, 1), gender="Male", blood_group="O+", father_name="ZZTEST Father", abc_id="ABC-SM", address="ZZTEST addr", mobile="9876543210", admission_year=2026)

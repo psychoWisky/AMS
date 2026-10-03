@@ -5,6 +5,7 @@ import { api } from "@/services/api";
 import { toast } from "sonner";
 import { ShieldCheck, Plus, Pencil, Loader2, Building2, GraduationCap, School, Lock, BadgeCheck, Trash2, Info } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { levelLabel } from "@/lib/utils";
 
 interface DepartmentRow { id: string; name: string; code: string; stream: string | null; is_active: boolean; }
 // Programme<->Department many-to-many redesign — a Programme no longer
@@ -18,12 +19,20 @@ interface CollegeRow { id: string; name: string; code: string; is_active: boolea
 // the Programme<->Department associations above; managed from either side.
 interface CollegeProgramLink { association_id: string; program_id: string; program_name: string; program_code: string; program_level: string; }
 interface ProgramCollegeLink { association_id: string; college_id: string; college_name: string; college_code: string; }
+// Department<->College/Outstation many-to-many (College/Outstation +
+// Department-mapping task, this revision) — independent of the two
+// associations above (no chain is derived); managed from either side.
+interface DepartmentCollegeLink { association_id: string; college_id: string; college_name: string; college_code: string; }
+interface CollegeDepartmentLink { association_id: string; department_id: string; department_name: string; department_code: string; }
 interface DesignationRow { id: string; name: string; is_active: boolean; created_at: string; }
 interface RoleRow { id: string; code: string; name: string; is_system: boolean; is_active: boolean; user_count: number; }
 
 const TABS = ["departments", "programmes", "colleges", "designations", "roles"] as const;
 type Tab = (typeof TABS)[number];
-const TAB_LABEL: Record<Tab, string> = { departments: "Departments", programmes: "Programmes", colleges: "Colleges", designations: "Designations", roles: "Roles" };
+// College -> College/Outstation display-label task (this revision) — label
+// only: the tab key, route, model/table/API field names all remain "college"
+// unchanged (see College model docstring, backend/app/models/user.py).
+const TAB_LABEL: Record<Tab, string> = { departments: "Departments", programmes: "Programmes", colleges: "College/Outstation", designations: "Designations", roles: "Roles" };
 
 export default function AdminPage() {
   const qc = useQueryClient();
@@ -32,6 +41,10 @@ export default function AdminPage() {
   // Programmes/Colleges list queries below must also be enabled while it is
   // open, whichever tab it was opened from).
   const [collegeAssocFor, setCollegeAssocFor] = useState<{ type: "college" | "program"; id: string; name: string } | null>(null);
+  // Department<->College/Outstation association modal (College/Outstation +
+  // Department-mapping task) — same pattern as collegeAssocFor above, kept
+  // as a SEPARATE state since it's an independent association.
+  const [deptCollegeAssocFor, setDeptCollegeAssocFor] = useState<{ type: "college" | "department"; id: string; name: string } | null>(null);
   const [confirm, setConfirm] = useState<{ action: () => void; title: string; message: string } | null>(null);
 
   // ── Departments ──────────────────────────────────────────────────────────
@@ -42,7 +55,7 @@ export default function AdminPage() {
   const { data: departments = [], isLoading: deptLoading } = useQuery<DepartmentRow[]>({
     queryKey: ["ams-admin-departments"],
     queryFn: async () => (await api.get("/departments", { params: { include_inactive: true } })).data,
-    enabled: tab === "departments" || tab === "programmes",
+    enabled: tab === "departments" || tab === "programmes" || !!deptCollegeAssocFor,
   });
 
   const saveDept = useMutation({
@@ -160,6 +173,37 @@ export default function AdminPage() {
     onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed to update college association."),
   });
 
+  // ── Department <-> College/Outstation associations (College/Outstation +
+  // Department-mapping task) ────────────────────────────────────────────────
+  // Same UX as the two checklists above: opened from a Department row
+  // (checklist = all Colleges) or a College row (checklist = all
+  // Departments); both sides toggle the SAME ams_department_colleges rows.
+  // Confirmed business rule: a Department may be linked to MULTIPLE
+  // Colleges/Outstations, and vice versa — this is a plain checklist, not a
+  // single-select, matching that cardinality exactly.
+  const deptCollegeAssocQuery = useQuery<(DepartmentCollegeLink | CollegeDepartmentLink)[]>({
+    queryKey: ["ams-dept-college-associations", deptCollegeAssocFor?.type, deptCollegeAssocFor?.id],
+    queryFn: async () => {
+      const url = deptCollegeAssocFor!.type === "department"
+        ? `/departments/${deptCollegeAssocFor!.id}/colleges`
+        : `/admin/colleges/${deptCollegeAssocFor!.id}/departments`;
+      return (await api.get(url)).data;
+    },
+    enabled: !!deptCollegeAssocFor,
+  });
+  const deptCollegeLinkedIds = new Set(
+    (deptCollegeAssocQuery.data ?? []).map((r) => deptCollegeAssocFor?.type === "department" ? (r as DepartmentCollegeLink).college_id : (r as CollegeDepartmentLink).department_id)
+  );
+
+  const toggleDeptCollegeAssoc = useMutation({
+    mutationFn: ({ collegeId, departmentId, linked }: { collegeId: string; departmentId: string; linked: boolean }) =>
+      linked
+        ? api.delete(`/admin/colleges/${collegeId}/departments/${departmentId}`)
+        : api.post(`/admin/colleges/${collegeId}/departments`, { department_id: departmentId }),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["ams-dept-college-associations", deptCollegeAssocFor?.type, deptCollegeAssocFor?.id] }),
+    onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed to update association."),
+  });
+
   // ── Colleges ─────────────────────────────────────────────────────────────
   const [showCollegeForm, setShowCollegeForm] = useState(false);
   const [editCollege, setEditCollege] = useState<CollegeRow | null>(null);
@@ -168,7 +212,7 @@ export default function AdminPage() {
   const { data: colleges = [], isLoading: collegeLoading } = useQuery<CollegeRow[]>({
     queryKey: ["ams-admin-colleges"],
     queryFn: async () => (await api.get("/admin/colleges", { params: { include_inactive: true } })).data,
-    enabled: tab === "colleges" || !!collegeAssocFor,
+    enabled: tab === "colleges" || !!collegeAssocFor || !!deptCollegeAssocFor,
   });
 
   const saveCollege = useMutation({
@@ -309,7 +353,7 @@ export default function AdminPage() {
     <div className="p-6 w-full">
       <div className="mb-6">
         <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2"><ShieldCheck size={24} className="text-[#0D6E6E]" />Administration</h1>
-        <p className="text-gray-700 text-base mt-1">Master data — roles, departments, programmes, colleges and designations</p>
+        <p className="text-gray-700 text-base mt-1">Master data — roles, departments, programmes, colleges/outstations and designations</p>
       </div>
 
       <div className="flex gap-2 mb-5">
@@ -343,6 +387,8 @@ export default function AdminPage() {
                           <button onClick={() => openEditDept(d)} className="p-1.5 text-gray-600 hover:bg-gray-100 rounded-lg" title="Edit"><Pencil size={15} /></button>
                           <button onClick={() => setAssocFor({ type: "department", id: d.id, name: d.name })}
                             className="text-xs font-semibold px-2 py-1 rounded-lg text-[#0D6E6E] hover:bg-[#E6F4F4]">Programmes</button>
+                          <button onClick={() => setDeptCollegeAssocFor({ type: "department", id: d.id, name: d.name })}
+                            className="text-xs font-semibold px-2 py-1 rounded-lg text-[#0D6E6E] hover:bg-[#E6F4F4]">College/Outstation</button>
                           <button onClick={() => setConfirm({ action: () => toggleDeptActive.mutate({ id: d.id, is_active: !d.is_active }), title: d.is_active ? "Deactivate Department" : "Activate Department", message: `${d.is_active ? "Deactivate" : "Activate"} ${d.name}? Existing courses/users referencing it are not affected.` })}
                             className={`text-xs font-semibold px-2 py-1 rounded-lg ${d.is_active ? "text-red-600 hover:bg-red-50" : "text-green-700 hover:bg-green-50"}`}>{d.is_active ? "Deactivate" : "Activate"}</button>
                         </div>
@@ -371,7 +417,7 @@ export default function AdminPage() {
                     <tr key={p.id} className={i % 2 === 0 ? "bg-white" : "bg-gray-50/50"}>
                       <td className="px-4 py-3 font-medium flex items-center gap-2"><GraduationCap size={14} className="text-gray-400" />{p.name}</td>
                       <td className="px-4 py-3 font-mono text-[#0D6E6E]">{p.code}</td>
-                      <td className="px-4 py-3 text-gray-600">{p.level}</td>
+                      <td className="px-4 py-3 text-gray-600">{levelLabel(p.level)}</td>
                       <td className="px-4 py-3 text-gray-600">{p.duration_years} yrs</td>
                       <td className="px-4 py-3"><span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${p.is_active ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-600"}`}>{p.is_active ? "Active" : "Inactive"}</span></td>
                       <td className="px-4 py-3">
@@ -456,15 +502,49 @@ export default function AdminPage() {
         </div>
       )}
 
-      {/* ── Colleges tab ────────────────────────────────────────────────── */}
+      {/* ── Department <-> College/Outstation associations modal ────────── */}
+      {deptCollegeAssocFor && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 max-h-[80vh] overflow-y-auto">
+            <h3 className="text-xl font-bold mb-1">{deptCollegeAssocFor.type === "department" ? "Associated Colleges/Outstations" : "Associated Departments"}</h3>
+            <p className="text-sm text-gray-600 mb-4">{deptCollegeAssocFor.name}</p>
+            {(deptCollegeAssocQuery.isLoading || (deptCollegeAssocFor.type === "department" ? collegeLoading : deptLoading)) ? (
+              <div className="flex justify-center py-8"><Loader2 className="animate-spin text-gray-600" /></div>
+            ) : deptCollegeAssocQuery.isError ? (
+              <p className="text-sm text-red-600 py-4">Could not load the current assignments. Close and try again.</p>
+            ) : (deptCollegeAssocFor.type === "department" ? colleges : departments).length === 0 ? (
+              <p className="text-sm text-gray-500 py-4">{deptCollegeAssocFor.type === "department" ? "No colleges/outstations exist yet." : "No departments exist yet."}</p>
+            ) : (
+              <div className="space-y-1.5">
+                {(deptCollegeAssocFor.type === "department" ? colleges : departments).map((item) => {
+                  const linked = deptCollegeLinkedIds.has(item.id);
+                  const collegeId = deptCollegeAssocFor.type === "department" ? item.id : deptCollegeAssocFor.id;
+                  const departmentId = deptCollegeAssocFor.type === "department" ? deptCollegeAssocFor.id : item.id;
+                  return (
+                    <label key={item.id} className="flex items-center gap-2.5 px-3 py-2 rounded-lg hover:bg-gray-50 cursor-pointer">
+                      <input type="checkbox" checked={linked} disabled={toggleDeptCollegeAssoc.isPending}
+                        onChange={() => toggleDeptCollegeAssoc.mutate({ collegeId, departmentId, linked })}
+                        className="w-4 h-4 accent-[#0D6E6E]" />
+                      <span className="text-sm text-gray-800">{item.name}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+            <button onClick={() => setDeptCollegeAssocFor(null)} className="w-full mt-5 py-2.5 border border-gray-200 rounded-xl text-base font-medium hover:bg-gray-50">Close</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Colleges tab (displayed as "College/Outstation") ──────────────── */}
       {tab === "colleges" && (
         <>
           <div className="flex justify-end mb-3">
-            <button onClick={() => setShowCollegeForm(true)} className="flex items-center gap-2 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-xl font-semibold text-sm hover:bg-[#178F8F]"><Plus size={15} /> Add College</button>
+            <button onClick={() => setShowCollegeForm(true)} className="flex items-center gap-2 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-xl font-semibold text-sm hover:bg-[#178F8F]"><Plus size={15} /> Add College/Outstation</button>
           </div>
           <div className="bg-white rounded-2xl border border-gray-200 overflow-auto max-h-[65vh]">
             {collegeLoading ? <div className="flex justify-center py-12"><Loader2 className="animate-spin text-gray-600" /></div> : colleges.length === 0 ? (
-              <div className="text-center py-16 text-gray-600"><School size={40} className="mx-auto mb-3 opacity-30" /><p>No colleges added yet.</p></div>
+              <div className="text-center py-16 text-gray-600"><School size={40} className="mx-auto mb-3 opacity-30" /><p>No colleges/outstations added yet.</p></div>
             ) : (
               <table className="w-full text-sm">
                 <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10"><tr>{["Name", "Code", "Status", "Action"].map((h) => <th key={h} className="text-left px-4 py-3 font-semibold text-gray-700">{h}</th>)}</tr></thead>
@@ -479,6 +559,8 @@ export default function AdminPage() {
                           <button onClick={() => openEditCollege(c)} className="p-1.5 text-gray-600 hover:bg-gray-100 rounded-lg" title="Edit"><Pencil size={15} /></button>
                           <button onClick={() => setCollegeAssocFor({ type: "college", id: c.id, name: c.name })}
                             className="text-xs font-semibold px-2 py-1 rounded-lg text-[#0D6E6E] hover:bg-[#E6F4F4]">Programmes</button>
+                          <button onClick={() => setDeptCollegeAssocFor({ type: "college", id: c.id, name: c.name })}
+                            className="text-xs font-semibold px-2 py-1 rounded-lg text-[#0D6E6E] hover:bg-[#E6F4F4]">Departments</button>
                           {c.is_active ? (
                             <button onClick={() => setConfirm({ action: () => deactivateCollege.mutate(c.id), title: "Deactivate College", message: `Deactivate ${c.name}? This is a soft delete — it can be reactivated later.` })}
                               className="text-xs font-semibold px-2 py-1 rounded-lg text-red-600 hover:bg-red-50">Deactivate</button>
@@ -606,7 +688,7 @@ export default function AdminPage() {
               <div><label className="block text-base font-semibold text-gray-700 mb-1">Code *</label><input value={progForm.code} onChange={(e) => setProgForm((f) => ({ ...f, code: e.target.value }))} disabled={!!editProg} className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E] disabled:bg-gray-50" /></div>
               <div><label className="block text-base font-semibold text-gray-700 mb-1">Level</label>
                 <select value={progForm.level} onChange={(e) => setProgForm((f) => ({ ...f, level: e.target.value }))} className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
-                  {["UG", "PG", "PhD"].map((l) => <option key={l} value={l}>{l}</option>)}
+                  {["UG", "PG", "PhD"].map((l) => <option key={l} value={l}>{levelLabel(l)}</option>)}
                 </select>
               </div>
               <div><label className="block text-base font-semibold text-gray-700 mb-1">Duration (years)</label><input type="number" min={1} max={7} value={progForm.duration_years} onChange={(e) => setProgForm((f) => ({ ...f, duration_years: e.target.value }))} className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" /></div>
@@ -626,7 +708,7 @@ export default function AdminPage() {
       {showCollegeForm && (
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
-            <h3 className="text-xl font-bold mb-4">{editCollege ? "Edit College" : "Add College"}</h3>
+            <h3 className="text-xl font-bold mb-4">{editCollege ? "Edit College/Outstation" : "Add College/Outstation"}</h3>
             <div className="space-y-3">
               <div><label className="block text-base font-semibold text-gray-700 mb-1">Name *</label><input value={collegeForm.name} onChange={(e) => setCollegeForm((f) => ({ ...f, name: e.target.value }))} className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" /></div>
               <div><label className="block text-base font-semibold text-gray-700 mb-1">Code *</label><input value={collegeForm.code} onChange={(e) => setCollegeForm((f) => ({ ...f, code: e.target.value }))} disabled={!!editCollege} className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E] disabled:bg-gray-50" /></div>

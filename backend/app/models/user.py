@@ -119,17 +119,31 @@ class Department(Base):
     # rows here is valid and expected for administrative/support departments
     # (e.g. Finance & Accounts, Administration) that have no Programme at all.
     program_links: Mapped[list["ProgramDepartment"]] = relationship("ProgramDepartment", back_populates="department", cascade="all, delete-orphan")
+    # Department<->College/Outstation many-to-many (College/Outstation +
+    # Department-mapping task, this revision) — see DepartmentCollege below.
+    # A Department with zero rows here is valid (no mapping is invented).
+    college_links: Mapped[list["DepartmentCollege"]] = relationship("DepartmentCollege", back_populates="department", cascade="all, delete-orphan", foreign_keys="DepartmentCollege.department_id")
 
 
 class College(Base):
-    """Master data entity for Super Admin (BUSINESS_LOGIC.md Section N.5). Flat,
-    no relationship to Department/Program yet — none was confirmed (Open Question 49)."""
+    """Master data entity for Super Admin (BUSINESS_LOGIC.md Section N.5).
+    Displayed to users as "College/Outstation" (label-only — see
+    `frontend/lib/utils.ts`'s `collegeLabel`); the model/table/column names are
+    unchanged, per explicit instruction not to rename internal identifiers for
+    a display-only requirement. Department<->College/Outstation is now a
+    confirmed many-to-many relationship — see `DepartmentCollege` below
+    (College/Outstation + Department-mapping task, this revision; supersedes
+    this docstring's earlier "no relationship to Department/Program yet" note
+    and resolves Open Question 49 for Department specifically — Programme's
+    own College relationship, `CollegeProgram`, is unchanged and independent)."""
     __tablename__ = "ams_colleges"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     code: Mapped[str] = mapped_column(String(20), unique=True, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    department_links: Mapped[list["DepartmentCollege"]] = relationship("DepartmentCollege", back_populates="college", cascade="all, delete-orphan", foreign_keys="DepartmentCollege.college_id")
 
 
 class Designation(Base):
@@ -338,6 +352,45 @@ class CollegeProgram(Base):
 
     college: Mapped["College"] = relationship("College", foreign_keys=[college_id])
     program: Mapped["Program"] = relationship("Program", foreign_keys=[program_id])
+
+
+class DepartmentCollege(Base):
+    """Department<->College/Outstation many-to-many association (College/
+    Outstation + Department-mapping task, this revision) — CONFIRMED business
+    rule: one Department may belong to multiple Colleges/Outstations, and one
+    College/Outstation may have multiple Departments. Modeled directly on
+    `ProgramDepartment`/`CollegeProgram` above (same synthetic `id` PK,
+    `UniqueConstraint` on the pair, `ON DELETE CASCADE` FKs — never a
+    composite PK, consistent with every other association table in this file).
+
+    Deliberately INDEPENDENT of `ProgramDepartment` and `CollegeProgram`: no
+    Department->Programme->College chain is derived from or validated against
+    this table, and this table is never derived from them either (the
+    investigation confirmed `ams_college_programs` is unpopulated in practice
+    and that chain cannot be relied on). This is the ONLY direct
+    Department<->College relationship in AMS.
+
+    CONFIRMED NOT an authorization mechanism: this table is for institutional
+    organization/selection-filtering only (e.g. narrowing a Department dropdown
+    by selected College). Department-based RBAC (HOD/Faculty/Student isolation)
+    continues to read exclusively from `UserRoleAssignment.department_id` /
+    `User.department_id` — see `app.core.dependencies` — never from this table.
+    A shared College/Outstation between two Departments must never be read as
+    implying shared access between their HODs/Faculty.
+
+    A Department or College with zero rows here is valid and expected — no
+    mapping is invented or backfilled by this revision; Super Admin populates
+    mappings explicitly, same as `CollegeProgram`."""
+    __tablename__ = "ams_department_colleges"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    department_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_departments.id", ondelete="CASCADE"))
+    college_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_colleges.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (UniqueConstraint("department_id", "college_id", name="uq_department_college"),)
+
+    department: Mapped["Department"] = relationship("Department", back_populates="college_links", foreign_keys=[department_id])
+    college: Mapped["College"] = relationship("College", back_populates="department_links", foreign_keys=[college_id])
 
 
 class RefreshToken(Base):

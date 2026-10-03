@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { toast } from "sonner";
 import { FileSpreadsheet, Plus, X, Loader2, Search, CheckCircle2, Clock, RotateCcw, Download } from "lucide-react";
+import { levelLabel } from "@/lib/utils";
 
 interface PpwCourseRow {
   id: string; sl_no: number; course_id: string; course_number: string | null;
@@ -449,7 +450,7 @@ function PpwEditor({ ppw }: { ppw: Ppw }) {
           <p className="mt-4">
             This is to submit the Proposed Programme of Work of <strong>{ppw.header.student_name}</strong>
             {ppw.header.student_roll && <> (Roll No. {ppw.header.student_roll})</>}, a{" "}
-            {ppw.header.program_level ?? "—"} student of <strong>{ppw.header.program_name ?? "—"}</strong> under the
+            {levelLabel(ppw.header.program_level) || "—"} student of <strong>{ppw.header.program_name ?? "—"}</strong> under the
             Department of <strong>{ppw.header.department_name ?? "—"}</strong>
             {ppw.header.admission_year && <> (Admission Year: {ppw.header.admission_year})</>}.
           </p>

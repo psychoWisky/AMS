@@ -162,6 +162,34 @@ class OfferingIn(BaseModel):
             raise ValueError("The Leader must be one of the selected faculty members.")
         return self
 
+# Offered Courses edit task (this revision) — deliberately OFFERING-SPECIFIC
+# fields ONLY: `max_enrollment`/`section`/`practical_group` belong to
+# CourseOffering itself (the semester-specific teaching instance), never to
+# the underlying Course master record (name/code/category/credits — those
+# remain Course Management's exclusive responsibility, see update_course).
+# `calendar_id`/`semester_id`/`course_id`/`department_id` are deliberately
+# EXCLUDED — none of them may be changed through this endpoint: changing
+# which course/semester/calendar an offering represents would orphan its
+# existing enrollments/registrations, and department is never editable here
+# at all (confirmed requirement — see update_offering's own re-check below,
+# which additionally refuses even if a client were to smuggle one in via an
+# unknown field, since Pydantic simply has no such field to populate).
+# Faculty (re)assignment is NOT part of this schema either — it already has
+# its own dedicated, validated endpoints (`POST`/`DELETE
+# /offerings/{id}/faculty`, unchanged by this task) and is not duplicated here.
+class OfferingUpdateIn(BaseModel):
+    max_enrollment: Optional[int] = None
+    section: Optional[str] = None
+    practical_group: Optional[str] = None
+
+    @field_validator("max_enrollment")
+    @classmethod
+    def _positive_enrollment(cls, v):
+        if v is not None and v <= 0:
+            raise ValueError("max_enrollment must be a positive number.")
+        return v
+
+
 class OfferingOut(BaseModel):
     id: UUID; calendar_id: UUID; semester_id: UUID; course_id: UUID
     max_enrollment: int; section: Optional[str]; practical_group: Optional[str]
@@ -1357,6 +1385,42 @@ async def update_offering_status(
     _authorize_department_manage(o.department_id, user)
     o.status = status; await db.commit()
     return {"message": f"Offering status set to {status}."}
+
+
+@router.patch("/offerings/{offering_id}")
+async def update_offering(
+    offering_id: UUID, body: OfferingUpdateIn, db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(*_MANAGE_ROLES)),
+):
+    """Offered Courses edit task (this revision) — HOD/Super Admin may edit an
+    offering's own semester-specific details (max enrollment, section,
+    practical group) ONLY. Course master fields (name/code/category/credits)
+    have no setter here at all — `OfferingUpdateIn` simply has no such field
+    (see its docstring) — and are unreachable through this endpoint by
+    construction, not merely by convention.
+
+    Authorization mirrors `update_offering_status` exactly: `_authorize_
+    department_manage` reads `o.department_id` — the offering's REAL, already-
+    persisted department (loaded from the database on the line below, never
+    trusted from the request body, which has no department_id field to send
+    one through in the first place) — against the caller's server-derived
+    `user.active_department_id`. An HOD whose active department differs from
+    the offering's gets 403, exactly as every other offering-management
+    action in this file; Super Admin is unrestricted. A foreign/non-existent
+    offering id is 404 before authorization is even evaluated, matching this
+    file's existing convention elsewhere."""
+    o = await db.get(CourseOffering, offering_id)
+    if not o: raise HTTPException(404, "Offering not found.")
+    _authorize_department_manage(o.department_id, user)
+
+    for field, value in body.model_dump(exclude_unset=True).items():
+        setattr(o, field, value)
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(409, "An offering for this course/semester/department/section combination already exists.")
+    return {"message": "Offering updated."}
 
 
 @router.post("/offerings/{offering_id}/faculty")

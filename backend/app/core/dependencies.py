@@ -91,7 +91,18 @@ async def get_current_user(
     user_id = payload.get("sub") if payload else None
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token.")
-    result = await db.execute(select(User).where(User.id == user_id, User.is_active == True))
+    # Your Profile Department/College display task (this revision) — eager-load
+    # both relationships on this ALREADY-EXECUTED query (no extra round trip):
+    # `user.department` is the authoritative source for a STUDENT's own
+    # department (students have no department-bearing UserRoleAssignment, see
+    # get_assigned_role_assignments) and the fallback for any staff session
+    # whose active assignment is itself departmentless; `user.college` is
+    # always read from here, since College lives directly on User, never on
+    # UserRoleAssignment.
+    result = await db.execute(
+        select(User).options(selectinload(User.department), selectinload(User.college))
+        .where(User.id == user_id, User.is_active == True)
+    )
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found.")

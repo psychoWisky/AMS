@@ -226,11 +226,17 @@ export default function DashboardPage() {
       {/* Quick info */}
       <div className="mt-8 bg-white rounded-2xl border border-gray-200 p-5">
         <h2 className="font-bold text-gray-800 mb-3">Your Profile</h2>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 text-sm">
           <div><p className="text-gray-700">Name</p><p className="font-semibold">{user?.full_name}</p></div>
           <div><p className="text-gray-700">Role</p><p className="font-semibold">{ROLES[role as keyof typeof ROLES] ?? role}</p></div>
           <div><p className="text-gray-700">Email</p><p className="font-semibold break-all">{user?.email}</p></div>
           <div><p className="text-gray-700">Designation</p><p className="font-semibold">{user?.designation ?? "—"}</p></div>
+          {/* Your Profile Department/College display task — the CURRENTLY
+              ACTIVE department/session context (see auth.store.ts's
+              department_name/college_name docs); updates on the next request
+              after a role/department switch, no logout required. */}
+          <div><p className="text-gray-700">Department</p><p className="font-semibold">{user?.department_name ?? "Not assigned"}</p></div>
+          <div><p className="text-gray-700">College/Outstation</p><p className="font-semibold">{user?.college_name ?? "Not assigned"}</p></div>
         </div>
       </div>
     </div>
