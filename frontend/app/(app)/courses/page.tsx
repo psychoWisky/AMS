@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { useRole, useActiveDepartmentId } from "@/stores/auth.store";
 import { toast } from "sonner";
-import { ADMIN_ROLES, COURSE_CATEGORY_LABELS, CREDIT_TYPE_LABELS, levelLabel } from "@/lib/utils";
+import { ADMIN_ROLES, COURSE_CATEGORY_LABELS, CREDIT_TYPE_LABELS, levelLabel, RESEARCH_ASSIGNMENT_TYPE_LABELS, researchAssignmentTypeLabel } from "@/lib/utils";
 import { BookOpen, Plus, Search, Loader2, Globe, EyeOff, Pencil, Trash2, X, Crown, UserPlus, Upload } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { CourseBulkUploadModal } from "@/components/ui/course-bulk-upload-modal";
@@ -18,10 +18,15 @@ interface Course {
   is_research: boolean; is_compulsory: boolean;
 }
 interface Offering {
-  id: string; course_number: string; course_title: string; program_level: string | null; credit_structure: string;
+  id: string; calendar_id: string; academic_year: string | null;
+  course_number: string; course_title: string; program_level: string | null; credit_structure: string;
   category: string | null; credit_type: string | null; is_research: boolean;
-  semester_name: string | null; section: string | null; practical_group: string | null; max_enrollment: number;
+  semester_id: string; semester_name: string | null; section: string | null; practical_group: string | null; max_enrollment: number;
+  // Research Course Assignment Strategy task — offering-level strategy
+  // (null for every non-Research-category offering).
+  research_assignment_type: string | null;
   enrolled_count: number; status: string; faculty_names: string[];
+  faculty: { id: string; name: string | null; is_leader: boolean }[];
   department_id: string | null; department_name: string | null; stream: string | null;
 }
 interface OfferingInstructor { id: string; name: string; designation: string | null; department_name: string | null; role: string; is_leader: boolean; }
@@ -75,7 +80,7 @@ export default function CoursesPage() {
   const [offerSemesterId, setOfferSemesterId] = useState("");
   const [offerLevel, setOfferLevel] = useState("");
   const [showOfferingCreate, setShowOfferingCreate] = useState(false);
-  const [offeringForm, setOfferingForm] = useState({ calendar_id: "", semester_id: "", course_id: "", section: "", max_enrollment: "60", department_id: "" });
+  const [offeringForm, setOfferingForm] = useState({ calendar_id: "", semester_id: "", course_id: "", section: "", max_enrollment: "60", department_id: "", research_assignment_type: "" });
   const [facultySearch, setFacultySearch] = useState("");
   const [facultyOpen, setFacultyOpen] = useState(false);
   const [selectedFaculty, setSelectedFaculty] = useState<{ id: string; name: string }[]>([]);
@@ -240,6 +245,7 @@ export default function CoursesPage() {
       section: offeringForm.section || null,
       faculty_ids: isResearchOffering ? [] : selectedFaculty.map((f) => f.id),
       leader_id: isResearchOffering ? null : leaderId,
+      research_assignment_type: isResearchOffering ? offeringForm.research_assignment_type : null,
     }),
     onSuccess: () => {
       toast.success("Offering created.");
@@ -259,29 +265,79 @@ export default function CoursesPage() {
     onError: (e: unknown) => toast.error((e as {response?:{data?:{detail?:string}}})?.response?.data?.detail ?? "Failed."),
   });
 
-  // Offered Courses edit task (this revision) — HOD/Super Admin editing of
-  // OFFERING-SPECIFIC fields only (max enrollment, section, practical group).
-  // Course master details (name/code/category/credits) are intentionally
-  // NOT part of this form — those remain Course Management's job, above.
-  // `canManage` (used to show this button) is the same HOD-or-Super-Admin
-  // gate already used for every other offering action on this page; the
-  // backend's own `update_offering` independently re-verifies department
-  // ownership from the offering's real, stored department, never trusting
-  // anything this form sends.
+  // Complete Offered Course Editing task (this revision, extends the
+  // earlier max_enrollment/section/practical_group-only version) —
+  // HOD/Super Admin editing of OFFERING-SPECIFIC fields: Academic Year,
+  // Semester, Assigned Faculty, Max Enrollment, Section, Practical Group,
+  // and — for a Research Course offering only — its Research Assignment
+  // strategy. Course master details (name/code/category/credits) are
+  // intentionally NOT part of this form — those remain Course Management's
+  // job, above. `canManage` (used to show this button) is the same
+  // HOD-or-Super-Admin gate already used for every other offering action on
+  // this page; the backend's own `update_offering` independently
+  // re-verifies department ownership from the offering's real, stored
+  // department, never trusting anything this form sends — Department
+  // itself is never editable here at all (no field for it exists).
   const [editOffering, setEditOffering] = useState<Offering | null>(null);
-  const [offeringEditForm, setOfferingEditForm] = useState({ max_enrollment: "60", section: "", practical_group: "" });
+  const [offeringEditForm, setOfferingEditForm] = useState({
+    calendar_id: "", semester_id: "", max_enrollment: "60", section: "", practical_group: "", research_assignment_type: "",
+  });
+  // Reuses the SAME selectedFaculty/leaderId/facultySearch/facultyOpen state
+  // the Create Offering form above uses — only one of the two modals is ever
+  // open at a time, so sharing this UI state (rather than duplicating it) is
+  // safe and consistent with this file's existing economy of state.
 
   function openOfferingEdit(o: Offering) {
     setEditOffering(o);
-    setOfferingEditForm({ max_enrollment: String(o.max_enrollment ?? 60), section: o.section ?? "", practical_group: o.practical_group ?? "" });
+    setOfferingEditForm({
+      calendar_id: o.calendar_id, semester_id: o.semester_id,
+      max_enrollment: String(o.max_enrollment ?? 60), section: o.section ?? "", practical_group: o.practical_group ?? "",
+      research_assignment_type: o.research_assignment_type ?? "",
+    });
+    setSelectedFaculty(o.faculty.map((f) => ({ id: f.id, name: f.name ?? "" })));
+    setLeaderId(o.faculty.find((f) => f.is_leader)?.id ?? "");
+    setFacultySearch(""); setFacultyOpen(false);
   }
-  function closeOfferingEdit() { setEditOffering(null); }
+  function closeOfferingEdit() {
+    setEditOffering(null);
+    setSelectedFaculty([]); setLeaderId(""); setFacultySearch("");
+  }
+
+  const { data: editSemesters = [] } = useQuery<Semester[]>({
+    queryKey: ["ams-semesters-for-offering-edit", offeringEditForm.calendar_id],
+    queryFn: async () => (await api.get(`/academic/calendars/${offeringEditForm.calendar_id}/semesters`)).data,
+    enabled: !!editOffering && !!offeringEditForm.calendar_id,
+  });
+
+  // Faculty candidates for the offering's OWN (immutable) department — the
+  // same assignment-based GET /auth/users?role=faculty&department_id=
+  // endpoint the Create Offering form already uses, scoped here to
+  // `editOffering.department_id` rather than the create form's department
+  // choice (the two modals are never open together, but keeping separate
+  // query keys/results avoids any stale-data flash between them).
+  const { data: editFacultyUsers = [] } = useQuery<FacultyUser[]>({
+    queryKey: ["ams-faculty-candidates-edit", editOffering?.department_id],
+    queryFn: async () => (await api.get("/auth/users", { params: { role: "faculty", department_id: editOffering?.department_id } })).data,
+    enabled: !!editOffering?.department_id,
+  });
+  const filteredEditFaculty = useMemo(() => {
+    const q = facultySearch.trim().toLowerCase();
+    return editFacultyUsers
+      .filter((f) => !selectedFaculty.some((s) => s.id === f.id))
+      .filter((f) => !q || f.full_name.toLowerCase().includes(q));
+  }, [editFacultyUsers, facultySearch, selectedFaculty]);
+
+  const isEditResearchOffering = !!editOffering?.is_research;
 
   const updateOffering = useMutation({
     mutationFn: () => api.patch(`/courses/offerings/${editOffering!.id}`, {
+      semester_id: offeringEditForm.semester_id,
       max_enrollment: parseInt(offeringEditForm.max_enrollment, 10),
       section: offeringEditForm.section || null,
       practical_group: offeringEditForm.practical_group || null,
+      research_assignment_type: isEditResearchOffering ? offeringEditForm.research_assignment_type : null,
+      faculty_ids: isEditResearchOffering ? [] : selectedFaculty.map((f) => f.id),
+      leader_id: isEditResearchOffering ? null : (leaderId || null),
     }),
     onSuccess: () => {
       toast.success("Offering updated.");
@@ -293,7 +349,7 @@ export default function CoursesPage() {
 
   function closeOfferingModal() {
     setShowOfferingCreate(false);
-    setOfferingForm({ calendar_id: "", semester_id: "", course_id: "", section: "", max_enrollment: "60", department_id: "" });
+    setOfferingForm({ calendar_id: "", semester_id: "", course_id: "", section: "", max_enrollment: "60", department_id: "", research_assignment_type: "" });
     setSelectedFaculty([]); setLeaderId(""); setFacultySearch("");
   }
 
@@ -613,7 +669,14 @@ export default function CoursesPage() {
                       <td className="px-4 py-3 text-gray-600 whitespace-nowrap">{o.semester_name ?? "—"}</td>
                       <td className="px-4 py-3 font-mono text-sm">{o.credit_structure}</td>
                       <td className="px-4 py-3 text-gray-600">{o.credit_type ? CREDIT_TYPE_LABELS[o.credit_type] : "—"}</td>
-                      <td className="px-4 py-3">{o.is_research ? <span className="text-green-600 font-semibold">Yes</span> : <span className="text-gray-400">No</span>}</td>
+                      <td className="px-4 py-3">
+                        {o.is_research ? (
+                          <div>
+                            <span className="text-green-600 font-semibold">Yes</span>
+                            <p className="text-xs text-gray-500">{researchAssignmentTypeLabel(o.research_assignment_type)}</p>
+                          </div>
+                        ) : <span className="text-gray-400">No</span>}
+                      </td>
                       <td className="px-4 py-3"><span className={`px-2 py-0.5 rounded-full text-sm font-semibold ${STATUS_COLOR[o.status] ?? "bg-gray-100"}`}>{o.status}</span></td>
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
@@ -648,22 +711,42 @@ export default function CoursesPage() {
           fields only; course master details are not editable here at all. */}
       {editOffering && (
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">
             <h3 className="text-xl font-bold mb-1">Edit Offering</h3>
             <p className="text-sm text-gray-600 mb-1">{editOffering.course_number} — {editOffering.course_title}</p>
-            <p className="text-xs text-gray-500 mb-4">Only this offering's own details can be changed here. To change the course's name, code, type or credits, use Course Management instead.</p>
+            <p className="text-xs text-gray-500 mb-4">Only this offering's own details can be changed here. Course details (name, code, type, credits) are managed from Course Management.</p>
             <div className="space-y-3">
               <div>
-                <label className="block text-base font-semibold text-gray-700 mb-1">Max Enrollment</label>
-                <input type="number" min={1} value={offeringEditForm.max_enrollment}
-                  onChange={(e) => setOfferingEditForm((f) => ({ ...f, max_enrollment: e.target.value }))}
-                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+                <label className="block text-base font-semibold text-gray-700 mb-1">Academic Year</label>
+                <select value={offeringEditForm.calendar_id}
+                  onChange={(e) => setOfferingEditForm((f) => ({ ...f, calendar_id: e.target.value, semester_id: "" }))}
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
+                  <option value="">Select academic year…</option>
+                  {calendars.map((c) => <option key={c.id} value={c.id}>{c.academic_year}</option>)}
+                </select>
               </div>
               <div>
-                <label className="block text-base font-semibold text-gray-700 mb-1">Section</label>
-                <input value={offeringEditForm.section} onChange={(e) => setOfferingEditForm((f) => ({ ...f, section: e.target.value }))}
-                  placeholder="e.g. A / B / C"
-                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+                <label className="block text-base font-semibold text-gray-700 mb-1">Semester</label>
+                <select value={offeringEditForm.semester_id} onChange={(e) => setOfferingEditForm((f) => ({ ...f, semester_id: e.target.value }))}
+                  disabled={!offeringEditForm.calendar_id}
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E] disabled:opacity-50">
+                  <option value="">Select semester…</option>
+                  {editSemesters.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-base font-semibold text-gray-700 mb-1">Max Enrollment</label>
+                  <input type="number" min={1} value={offeringEditForm.max_enrollment}
+                    onChange={(e) => setOfferingEditForm((f) => ({ ...f, max_enrollment: e.target.value }))}
+                    className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+                </div>
+                <div>
+                  <label className="block text-base font-semibold text-gray-700 mb-1">Section</label>
+                  <input value={offeringEditForm.section} onChange={(e) => setOfferingEditForm((f) => ({ ...f, section: e.target.value }))}
+                    placeholder="e.g. A / B / C"
+                    className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+                </div>
               </div>
               <div>
                 <label className="block text-base font-semibold text-gray-700 mb-1">Practical Group</label>
@@ -671,10 +754,80 @@ export default function CoursesPage() {
                   placeholder="e.g. G1 / G2"
                   className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
               </div>
+
+              {isEditResearchOffering ? (
+                <div>
+                  <label className="block text-base font-semibold text-gray-700 mb-1">Research Course Assignment</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {(Object.keys(RESEARCH_ASSIGNMENT_TYPE_LABELS) as string[]).map((v) => (
+                      <button key={v} type="button" onClick={() => setOfferingEditForm((f) => ({ ...f, research_assignment_type: v }))}
+                        className={`py-2 rounded-xl text-sm font-semibold border-2 transition-all ${offeringEditForm.research_assignment_type === v ? "border-[#0D6E6E] bg-[#0D6E6E] text-white" : "border-gray-200 text-gray-600"}`}>
+                        {RESEARCH_ASSIGNMENT_TYPE_LABELS[v]}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Changing this affects future enrollments and examiner assignments only — students already assigned an instructor/examiner under the previous setting are not changed.
+                  </p>
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-base font-semibold text-gray-700 mb-1">
+                    Assigned Faculty ({selectedFaculty.length}/{MAX_OFFERING_FACULTY}) — select 1 to {MAX_OFFERING_FACULTY} and mark exactly one Leader
+                  </label>
+                  {selectedFaculty.length > 0 && (
+                    <div className="space-y-1.5 mb-2">
+                      {selectedFaculty.map((f) => (
+                        <div key={f.id} className="flex items-center justify-between p-2 bg-gray-50 rounded-lg text-sm">
+                          <label className="flex items-center gap-2 cursor-pointer">
+                            <input type="radio" name="edit-leader" checked={leaderId === f.id} onChange={() => setLeaderId(f.id)} />
+                            <span className="font-medium">{f.name}</span>
+                            {leaderId === f.id && <span className="flex items-center gap-1 text-xs font-semibold text-amber-700"><Crown size={11} /> Leader</span>}
+                          </label>
+                          <button type="button" onClick={() => removeFaculty(f.id)} className="text-gray-400 hover:text-red-600"><X size={14} /></button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {selectedFaculty.length < MAX_OFFERING_FACULTY && (
+                    <div className="relative">
+                      <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                      <input value={facultySearch} onChange={(e) => setFacultySearch(e.target.value)}
+                        onFocus={() => setFacultyOpen(true)}
+                        onBlur={() => setTimeout(() => setFacultyOpen(false), 150)}
+                        placeholder="Click to browse or search faculty…"
+                        className="w-full pl-8 pr-3 py-2 border border-gray-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+                      {facultyOpen && (
+                        <div className="mt-1 border border-gray-200 rounded-xl max-h-48 overflow-y-auto absolute z-10 bg-white w-full shadow-lg">
+                          {filteredEditFaculty.length === 0 ? (
+                            <p className="text-sm text-gray-500 p-2">{editFacultyUsers.length === 0 ? "No faculty found in this department." : "No matching faculty."}</p>
+                          ) : filteredEditFaculty.slice(0, 20).map((f) => (
+                            <button key={f.id} type="button" onMouseDown={(e) => e.preventDefault()} onClick={() => { addFaculty(f); setFacultyOpen(false); }}
+                              className="w-full flex items-center justify-between text-left px-3 py-2 text-sm hover:bg-[#E6F4F4]">
+                              <span>{f.full_name}{f.designation ? ` — ${f.designation}` : ""}</span>
+                              <UserPlus size={13} className="text-[#0D6E6E]" />
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
             <div className="flex gap-3 mt-5">
               <button onClick={closeOfferingEdit} className="flex-1 py-2.5 border border-gray-200 rounded-xl text-base font-medium hover:bg-gray-50">Cancel</button>
-              <button onClick={() => { if (!offeringEditForm.max_enrollment || parseInt(offeringEditForm.max_enrollment, 10) <= 0) { toast.error("Max Enrollment must be a positive number."); return; } updateOffering.mutate(); }}
+              <button onClick={() => {
+                  if (!offeringEditForm.calendar_id || !offeringEditForm.semester_id) { toast.error("Academic year and semester are required."); return; }
+                  if (!offeringEditForm.max_enrollment || parseInt(offeringEditForm.max_enrollment, 10) <= 0) { toast.error("Max Enrollment must be a positive number."); return; }
+                  if (isEditResearchOffering) {
+                    if (!offeringEditForm.research_assignment_type) { toast.error("Select a Research Course Assignment strategy."); return; }
+                  } else {
+                    if (selectedFaculty.length === 0) { toast.error("Select at least 1 faculty member."); return; }
+                    if (!leaderId) { toast.error("Mark exactly one faculty member as Leader."); return; }
+                  }
+                  updateOffering.mutate();
+                }}
                 disabled={updateOffering.isPending} className="flex-1 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-base font-bold hover:bg-[#178F8F] disabled:opacity-60">
                 {updateOffering.isPending ? "Saving…" : "Save Changes"}
               </button>
@@ -817,12 +970,31 @@ export default function CoursesPage() {
 
               {/* Research Course task — no faculty picker at all for a Research
                   Course offering: the instructor is determined individually
-                  per student (from their own Major Advisor) at registration
-                  time, never pre-assigned to the whole offering. */}
+                  per student at registration time, never pre-assigned to the
+                  whole offering. Research Course Assignment Strategy task
+                  (this revision) — HOD/Super Admin must choose WHICH per-
+                  student party is resolved: the existing Major Advisor
+                  behavior, or the student's thesis External Examiner. This
+                  is an OFFERING-level choice (not stored on the Course), so
+                  the same Research course may be offered elsewhere with the
+                  other strategy. */}
               {isResearchOffering ? (
-                <div className="rounded-xl bg-[#E6F4F4] border border-[#0D6E6E]/20 px-3 py-2.5 text-sm text-[#0D6E6E]">
-                  This is a Research Course — no instructor is assigned here. Each student&apos;s own
-                  Major Advisor automatically becomes their instructor when they register.
+                <div>
+                  <label className="block text-base font-semibold text-gray-700 mb-1">Research Course Assignment *</label>
+                  <div className="grid grid-cols-2 gap-2 mb-2">
+                    {(Object.keys(RESEARCH_ASSIGNMENT_TYPE_LABELS) as string[]).map((v) => (
+                      <button key={v} type="button" onClick={() => setOfferingForm((f) => ({ ...f, research_assignment_type: v }))}
+                        className={`py-2 rounded-xl text-sm font-semibold border-2 transition-all ${offeringForm.research_assignment_type === v ? "border-[#0D6E6E] bg-[#0D6E6E] text-white" : "border-gray-200 text-gray-600"}`}>
+                        {RESEARCH_ASSIGNMENT_TYPE_LABELS[v]}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="rounded-xl bg-[#E6F4F4] border border-[#0D6E6E]/20 px-3 py-2.5 text-sm text-[#0D6E6E]">
+                    {offeringForm.research_assignment_type === "external_examiner"
+                      ? "Each enrolled student's own selected thesis External Examiner automatically becomes their instructor — assigned immediately if already selected, or as soon as it is selected afterward."
+                      : "Each enrolled student's own accepted Major Advisor automatically becomes their instructor when they register."}
+                    {" "}No instructor is pre-assigned to this offering itself.
+                  </div>
                 </div>
               ) : (
               <div>
@@ -881,7 +1053,9 @@ export default function CoursesPage() {
                     toast.error("Academic year, semester and course are required."); return;
                   }
                   if (!isHod && !offeringForm.department_id) { toast.error("Department is required."); return; }
-                  if (!isResearchOffering) {
+                  if (isResearchOffering) {
+                    if (!offeringForm.research_assignment_type) { toast.error("Select a Research Course Assignment strategy."); return; }
+                  } else {
                     if (selectedFaculty.length === 0) { toast.error("Select at least 1 faculty member."); return; }
                     if (!leaderId) { toast.error("Mark exactly one faculty member as Leader."); return; }
                   }
@@ -915,11 +1089,20 @@ export default function CoursesPage() {
                 <div><p className="text-xs font-semibold text-gray-500 uppercase">Credit Type</p><p className="text-sm text-gray-800">{selectedOffering.credit_type ? CREDIT_TYPE_LABELS[selectedOffering.credit_type] : "—"}</p></div>
                 <div><p className="text-xs font-semibold text-gray-500 uppercase">Section</p><p className="text-sm text-gray-800">{selectedOffering.section ?? "—"}</p></div>
                 <div><p className="text-xs font-semibold text-gray-500 uppercase">Status</p><p className="text-sm text-gray-800 capitalize">{selectedOffering.status}</p></div>
+                {selectedOffering.is_research && (
+                  <div><p className="text-xs font-semibold text-gray-500 uppercase">Research Course Assignment</p><p className="text-sm text-gray-800">{researchAssignmentTypeLabel(selectedOffering.research_assignment_type)}</p></div>
+                )}
               </div>
               <div>
                 <h4 className="text-base font-bold text-gray-900 mb-2">Course Instructors</h4>
                 <div className="bg-white border border-gray-200 rounded-xl overflow-hidden overflow-x-auto">
-                  {selectedOffering.faculty.length === 0 ? (
+                  {selectedOffering.is_research ? (
+                    <p className="text-sm text-gray-600 text-center py-6 px-4">
+                      No instructor is pre-assigned to a Research Course offering. Each enrolled student's own{" "}
+                      {selectedOffering.research_assignment_type === "external_examiner" ? "selected thesis External Examiner" : "accepted Major Advisor"}{" "}
+                      automatically becomes their instructor.
+                    </p>
+                  ) : selectedOffering.faculty.length === 0 ? (
                     <p className="text-sm text-gray-600 text-center py-6">No instructors assigned yet.</p>
                   ) : (
                     <table className="w-full text-sm">

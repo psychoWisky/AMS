@@ -865,6 +865,7 @@ async def test_level_offerings_reference_distinct_courses_by_id():
             offs = (await db.execute(
                 select(CourseOffering).options(
                     selectinload(CourseOffering.course), selectinload(CourseOffering.semester),
+                    selectinload(CourseOffering.calendar),  # Research Course Assignment Strategy task — _offering_dict now also reads o.calendar.academic_year
                     selectinload(CourseOffering.department), selectinload(CourseOffering.faculty_assignments),
                 ).where(CourseOffering.id.in_(offering_ids))
             )).scalars().all()

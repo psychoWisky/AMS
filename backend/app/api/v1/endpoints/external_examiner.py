@@ -54,6 +54,11 @@ from app.core.dependencies import get_current_user, require_roles
 from app.core.email import enqueue_email
 from app.core.security import generate_temp_password, hash_password
 from app.core.student_scope import resolve_student_department_id
+# Research Course Assignment Strategy task — hooks the EXISTING VC-selection
+# success path below into the per-student Research-enrollment backfill,
+# reusing (never duplicating) the resolution helper enrollment.py's enroll()/
+# register_courses() already use at enrollment time.
+from app.core.research_assignment import backfill_pending_external_examiner_assignments
 from app.db.base import get_db
 from app.models.audit import AuditLog
 from app.models.external_examiner import (
@@ -975,6 +980,18 @@ async def vc_select_examiners(
         else:
             subject, mail_body = _build_existing_examiner_email(examiner_name, student_name, department_name, degree_name, college_name, ams_url)
         enqueue_email(db, examiner.email, subject, mail_body)
+
+    # Research Course Assignment Strategy task (this revision) — the
+    # confirmed hook point: immediately after this VC selection's
+    # `ExternalExaminerAssignment` row(s) are created above (same
+    # transaction, not yet committed — Section 24's transactional-safety
+    # requirement), find this student's Research-category, "external_
+    # examiner"-strategy enrollments still awaiting an examiner
+    # (`instructor_id IS NULL`) and fill them in. Idempotent by construction
+    # (see the helper's own docstring) — the retried-request paths above
+    # return early before reaching this line at all, so this never runs
+    # twice for the same completed selection.
+    await backfill_pending_external_examiner_assignments(s.student_id, db)
 
     cycle.vc_selection_completed_at = now
     cycle.completed_at = now

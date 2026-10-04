@@ -41,11 +41,16 @@ from app.core.security import create_bulk_upload_confirmation_token, decode_toke
 from app.core.bulk_upload import parse_bulk_upload_file
 from app.models.user import User, UserRole, UserRoleAssignment, Program, Department
 from app.models.course import Course, CourseOffering, OfferingFaculty, CourseAvailability
+from app.models.academic import AcademicCalendar, Semester
 from app.models.enrollment import StudentEnrollment
 # Programme<->Department many-to-many redesign — single shared student-scope
 # resolver (app/core/student_scope.py), re-exported under this file's
 # existing private name so every call site below is unchanged.
 from app.core.student_scope import resolve_student_scope as _resolve_student_scope
+# Research Course Assignment Strategy task — the two allowed
+# `CourseOffering.research_assignment_type` values, single source of truth
+# shared with enrollment.py/external_examiner.py (never duplicated).
+from app.core.research_assignment import RESEARCH_ASSIGNMENT_TYPES
 
 router = APIRouter(prefix="/courses", tags=["Courses"])
 
@@ -147,6 +152,22 @@ class OfferingIn(BaseModel):
     # bypassable by a client claiming any particular category.
     faculty_ids: List[UUID] = []
     leader_id: Optional[UUID] = None
+    # Research Course Assignment Strategy task (this revision) — REQUIRED
+    # when the selected Course is Research-category, forbidden (must be
+    # omitted/None) otherwise. This schema has no DB access and cannot know
+    # the course's real category, so both halves of that rule are enforced
+    # server-side in `create_offering` after loading the real `Course` row —
+    # never here, and never bypassable by a client's own claim about the
+    # course's category. Pydantic only validates the ENUM shape (one of the
+    # two allowed strings, if given at all).
+    research_assignment_type: Optional[str] = None
+
+    @field_validator("research_assignment_type")
+    @classmethod
+    def _valid_research_assignment_type(cls, v):
+        if v is not None and v not in RESEARCH_ASSIGNMENT_TYPES:
+            raise ValueError(f"research_assignment_type must be one of: {', '.join(RESEARCH_ASSIGNMENT_TYPES)}")
+        return v
 
     @model_validator(mode="after")
     def validate_faculty(self):
@@ -162,25 +183,47 @@ class OfferingIn(BaseModel):
             raise ValueError("The Leader must be one of the selected faculty members.")
         return self
 
-# Offered Courses edit task (this revision) — deliberately OFFERING-SPECIFIC
-# fields ONLY: `max_enrollment`/`section`/`practical_group` belong to
+# Offered Courses edit task (complete offering-editing revision) —
+# deliberately OFFERING-SPECIFIC fields ONLY: every field below belongs to
 # CourseOffering itself (the semester-specific teaching instance), never to
-# the underlying Course master record (name/code/category/credits — those
-# remain Course Management's exclusive responsibility, see update_course).
-# `calendar_id`/`semester_id`/`course_id`/`department_id` are deliberately
-# EXCLUDED — none of them may be changed through this endpoint: changing
-# which course/semester/calendar an offering represents would orphan its
-# existing enrollments/registrations, and department is never editable here
-# at all (confirmed requirement — see update_offering's own re-check below,
-# which additionally refuses even if a client were to smuggle one in via an
-# unknown field, since Pydantic simply has no such field to populate).
-# Faculty (re)assignment is NOT part of this schema either — it already has
-# its own dedicated, validated endpoints (`POST`/`DELETE
-# /offerings/{id}/faculty`, unchanged by this task) and is not duplicated here.
+# the underlying Course master record (name/code/category/credits/program/
+# department — those remain Course Management's exclusive responsibility,
+# see update_course). `course_id`/`department_id` are deliberately EXCLUDED
+# entirely — department is never editable here at all (confirmed
+# requirement — see update_offering's own re-check below, which additionally
+# refuses even if a client were to smuggle one in via an unknown field,
+# since Pydantic simply has no such field to populate); which Course an
+# offering represents is likewise immutable through this endpoint.
+#
+# `semester_id` (replaces the earlier revision's omission of Academic
+# Year/Semester editing entirely): the offering's `calendar_id` ("Academic
+# Year") is ALWAYS re-derived from the chosen Semester's own `calendar_id`
+# in `update_offering` — mirroring `enrollment.py`'s `register_courses`
+# ("derived_calendar_id = semester.calendar_id — authoritative — never
+# body.calendar_id") — so a client can never send a calendar_id/semester_id
+# pair that disagree with each other. There is deliberately no separate
+# `calendar_id` field on this schema at all, for that reason.
+#
+# `faculty_ids`/`leader_id`: an OPTIONAL bulk replace of the offering's
+# entire `OfferingFaculty` set, reusing the EXACT SAME validation
+# (`_validate_offering_faculty`) that `create_offering` already uses —
+# never duplicated. Omitted (unset) entirely -> faculty is left untouched,
+# so the existing single-faculty `POST`/`DELETE /offerings/{id}/faculty`
+# endpoints remain fully usable on their own for incremental changes; this
+# field is for replacing the whole list in one call from the unified editor.
+#
+# `research_assignment_type`: editable only for a Research-category
+# offering (re-checked in `update_offering` against the real `Course.category`,
+# never trusted from the client) — see `OfferingIn`'s identical validator
+# for the enum-shape check.
 class OfferingUpdateIn(BaseModel):
+    semester_id: Optional[UUID] = None
+    faculty_ids: Optional[List[UUID]] = None
+    leader_id: Optional[UUID] = None
     max_enrollment: Optional[int] = None
     section: Optional[str] = None
     practical_group: Optional[str] = None
+    research_assignment_type: Optional[str] = None
 
     @field_validator("max_enrollment")
     @classmethod
@@ -189,10 +232,37 @@ class OfferingUpdateIn(BaseModel):
             raise ValueError("max_enrollment must be a positive number.")
         return v
 
+    @field_validator("research_assignment_type")
+    @classmethod
+    def _valid_research_assignment_type(cls, v):
+        if v is not None and v not in RESEARCH_ASSIGNMENT_TYPES:
+            raise ValueError(f"research_assignment_type must be one of: {', '.join(RESEARCH_ASSIGNMENT_TYPES)}")
+        return v
+
+    @model_validator(mode="after")
+    def _validate_faculty_shape(self):
+        # Mirrors OfferingIn.validate_faculty exactly — only runs when
+        # faculty_ids is actually being replaced (not unset); the research-
+        # vs-non-research branch (0 allowed vs 1-3 required) is enforced in
+        # update_offering, which alone knows the offering's real course category.
+        if self.faculty_ids is None:
+            if self.leader_id is not None:
+                raise ValueError("leader_id must not be set without also replacing faculty_ids.")
+            return self
+        if self.faculty_ids:
+            if len(set(self.faculty_ids)) != len(self.faculty_ids):
+                raise ValueError("Duplicate faculty selected.")
+            if len(self.faculty_ids) > _MAX_OFFERING_FACULTY:
+                raise ValueError(f"An offering can have at most {_MAX_OFFERING_FACULTY} assigned faculty.")
+        elif self.leader_id is not None:
+            raise ValueError("leader_id must not be set when faculty_ids is empty.")
+        return self
+
 
 class OfferingOut(BaseModel):
     id: UUID; calendar_id: UUID; semester_id: UUID; course_id: UUID
     max_enrollment: int; section: Optional[str]; practical_group: Optional[str]
+    research_assignment_type: Optional[str] = None
     status: str
     course_number: Optional[str] = None
     course_title: Optional[str] = None
@@ -1096,12 +1166,15 @@ def _offering_dict(o: CourseOffering, enrolled: int) -> dict:
         "credit_type": o.course.credit_type if o.course else None,
         "is_research": bool(o.course and o.course.category == "research"),
         "semester_name": o.semester.name if o.semester else None,
+        "academic_year": o.calendar.academic_year if o.calendar else None,
         "max_enrollment": o.max_enrollment, "section": o.section,
         "practical_group": o.practical_group, "status": o.status,
+        "research_assignment_type": o.research_assignment_type,
         "department_id": str(o.department_id) if o.department_id else None,
         "department_name": o.department.name if o.department else None,
         "stream": o.department.stream if o.department else None,
         "faculty_names": [fa.faculty.full_name for fa in o.faculty_assignments if fa.faculty],
+        "faculty": [{"id": str(fa.faculty_id), "name": fa.faculty.full_name if fa.faculty else None, "is_leader": fa.role == "primary"} for fa in o.faculty_assignments],
         "enrolled_count": enrolled,
     }
 
@@ -1115,6 +1188,7 @@ async def list_all_offerings(
 ):
     q = select(CourseOffering).options(
         selectinload(CourseOffering.course),
+        selectinload(CourseOffering.calendar),
         selectinload(CourseOffering.semester),
         selectinload(CourseOffering.department),
         selectinload(CourseOffering.faculty_assignments).selectinload(OfferingFaculty.faculty),
@@ -1236,6 +1310,59 @@ async def _assert_faculty_in_department(faculty_ids: list[UUID], department_id: 
         raise HTTPException(403, "One or more selected faculty members do not hold a Faculty assignment in this department.")
 
 
+def _validate_offering_faculty_shape(course: Course, faculty_ids: list[UUID], leader_id: Optional[UUID]) -> None:
+    """The authoritative faculty-REQUIREMENT rule, keyed off the REAL
+    `Course.category` loaded from the database (never a client-supplied
+    category/flag) — shared by `create_offering` and `update_offering`'s
+    bulk faculty replace, never duplicated. A Research Course offering must
+    NOT have a pre-assigned OfferingFaculty instructor at all (Rule #5:
+    never create two competing instructor authorities — the per-student
+    Major Advisor/External Examiner assignment, resolved at registration
+    time, is the sole authority for a Research Course). Every other course
+    category keeps the pre-existing "1-3 faculty, exactly one Leader"
+    requirement."""
+    if course.category == "research":
+        if faculty_ids:
+            raise HTTPException(
+                400,
+                "Research Course offerings cannot have a pre-assigned instructor. The instructor "
+                "is determined individually for each student from their Major Advisor or External "
+                "Examiner, depending on this offering's Research Assignment strategy.",
+            )
+    else:
+        if not (_MIN_OFFERING_FACULTY <= len(faculty_ids) <= _MAX_OFFERING_FACULTY):
+            raise HTTPException(400, f"An offering must have between {_MIN_OFFERING_FACULTY} and {_MAX_OFFERING_FACULTY} assigned faculty.")
+        if leader_id is None:
+            raise HTTPException(400, "A Leader must be selected.")
+
+
+def _validate_research_assignment_type(course: Course, research_assignment_type: Optional[str], *, creating: bool) -> None:
+    """Research Course Assignment Strategy task — the authoritative
+    REQUIRED-for-Research / FORBIDDEN-for-non-Research rule, keyed off the
+    REAL `Course.category` (never a client-supplied claim). Shared by
+    `create_offering` and `update_offering`, never duplicated. `creating`
+    distinguishes the two REQUIRED-ness messages only — a non-Research
+    course is forbidden from ever having a value in either case."""
+    if course.category == "research":
+        if creating and research_assignment_type is None:
+            raise HTTPException(400, "Research Assignment (Major Advisor or External Examiner) is required for a Research Course offering.")
+    elif research_assignment_type is not None:
+        raise HTTPException(400, "Research Assignment does not apply to a non-Research Course offering.")
+
+
+async def _replace_offering_faculty(offering: CourseOffering, faculty_ids: list[UUID], leader_id: Optional[UUID], db: AsyncSession) -> None:
+    """Deletes every existing `OfferingFaculty` row for this offering and
+    inserts the new set — used only by `update_offering`'s optional bulk
+    replace (`OfferingUpdateIn.faculty_ids` actually supplied). The
+    incremental single-faculty `POST`/`DELETE /offerings/{id}/faculty`
+    endpoints are untouched and remain independently usable."""
+    await db.execute(
+        OfferingFaculty.__table__.delete().where(OfferingFaculty.offering_id == offering.id)
+    )
+    for fid in faculty_ids:
+        db.add(OfferingFaculty(offering_id=offering.id, faculty_id=fid, role="primary" if fid == leader_id else "secondary"))
+
+
 @router.post("/offerings", status_code=201)
 async def create_offering(
     body: OfferingIn, db: AsyncSession = Depends(get_db),
@@ -1243,32 +1370,11 @@ async def create_offering(
 ):
     _authorize_department_manage(body.department_id, user)
 
-    # Research Course task — the authoritative faculty-requirement rule, keyed
-    # off the REAL `Course.category` loaded from the database (never a
-    # client-supplied category/flag). A Research Course offering must NOT
-    # have a pre-assigned OfferingFaculty instructor at all (Rule #5: never
-    # create two competing instructor authorities — the per-student Major
-    # Advisor assignment, resolved at registration time, is the sole
-    # authority for a Research Course). Every other course category keeps
-    # the pre-existing "1-3 faculty, exactly one Leader" requirement exactly
-    # as it was, enforced here rather than in the (now-relaxed) Pydantic
-    # schema so a client cannot bypass it by omitting faculty_ids.
     course = await db.get(Course, body.course_id)
     if not course:
         raise HTTPException(404, "Course not found.")
-    if course.category == "research":
-        if body.faculty_ids:
-            raise HTTPException(
-                400,
-                "Research Course offerings cannot have a pre-assigned instructor. The instructor "
-                "is determined individually for each student from their Major Advisor at "
-                "registration time.",
-            )
-    else:
-        if not (_MIN_OFFERING_FACULTY <= len(body.faculty_ids) <= _MAX_OFFERING_FACULTY):
-            raise HTTPException(400, f"An offering must have between {_MIN_OFFERING_FACULTY} and {_MAX_OFFERING_FACULTY} assigned faculty.")
-        if body.leader_id is None:
-            raise HTTPException(400, "A Leader must be selected.")
+    _validate_offering_faculty_shape(course, body.faculty_ids, body.leader_id)
+    _validate_research_assignment_type(course, body.research_assignment_type, creating=True)
 
     await _assert_faculty_in_department(body.faculty_ids, body.department_id, db)
 
@@ -1282,6 +1388,7 @@ async def create_offering(
         course_id=body.course_id, department_id=body.department_id,
         max_enrollment=body.max_enrollment,
         section=body.section, practical_group=body.practical_group,
+        research_assignment_type=body.research_assignment_type if course.category == "research" else None,
         created_by=user.id,
     )
     db.add(offering)
@@ -1311,6 +1418,7 @@ async def get_offering(offering_id: UUID, db: AsyncSession = Depends(get_db), us
     result = await db.execute(
         select(CourseOffering).options(
             selectinload(CourseOffering.course),
+            selectinload(CourseOffering.calendar),
             selectinload(CourseOffering.semester),
             selectinload(CourseOffering.department),
             selectinload(CourseOffering.faculty_assignments).selectinload(OfferingFaculty.faculty).selectinload(User.department),
@@ -1352,6 +1460,7 @@ async def get_offering(offering_id: UUID, db: AsyncSession = Depends(get_db), us
     enrolled = sum(1 for e in o.enrollments if e.status == "approved")
     return {
         "id": str(o.id), "calendar_id": str(o.calendar_id),
+        "academic_year": o.calendar.academic_year if o.calendar else None,
         "semester_id": str(o.semester_id), "semester_name": o.semester.name if o.semester else None,
         "course_id": str(o.course_id),
         "course_number": o.course.course_number if o.course else None,
@@ -1362,6 +1471,7 @@ async def get_offering(offering_id: UUID, db: AsyncSession = Depends(get_db), us
         "credit_type": o.course.credit_type if o.course else None,
         "max_enrollment": o.max_enrollment, "section": o.section,
         "practical_group": o.practical_group, "status": o.status,
+        "research_assignment_type": o.research_assignment_type,
         "department_id": str(o.department_id) if o.department_id else None,
         "department_name": o.department.name if o.department else None,
         "stream": o.department.stream if o.department else None,
@@ -1392,12 +1502,16 @@ async def update_offering(
     offering_id: UUID, body: OfferingUpdateIn, db: AsyncSession = Depends(get_db),
     user: User = Depends(require_roles(*_MANAGE_ROLES)),
 ):
-    """Offered Courses edit task (this revision) — HOD/Super Admin may edit an
-    offering's own semester-specific details (max enrollment, section,
-    practical group) ONLY. Course master fields (name/code/category/credits)
-    have no setter here at all — `OfferingUpdateIn` simply has no such field
-    (see its docstring) — and are unreachable through this endpoint by
-    construction, not merely by convention.
+    """Complete Offered Course Editing task (this revision, extends the
+    earlier max_enrollment/section/practical_group-only version) — HOD/Super
+    Admin may edit an offering's own semester-specific details: Academic
+    Year (via `semester_id`, see below), Semester, Assigned Faculty, Max
+    Enrollment, Section, Practical Group, and — for a Research Course
+    offering only — its Research Assignment strategy. Course master fields
+    (name/code/category/credits/program/department) have no setter here at
+    all — `OfferingUpdateIn` simply has no such field — and are unreachable
+    through this endpoint by construction, not merely by convention; they
+    remain exclusively editable through Course Management (`update_course`).
 
     Authorization mirrors `update_offering_status` exactly: `_authorize_
     department_manage` reads `o.department_id` — the offering's REAL, already-
@@ -1408,12 +1522,53 @@ async def update_offering(
     the offering's gets 403, exactly as every other offering-management
     action in this file; Super Admin is unrestricted. A foreign/non-existent
     offering id is 404 before authorization is even evaluated, matching this
-    file's existing convention elsewhere."""
+    file's existing convention elsewhere.
+
+    Academic Year/Semester (confirmed decision, Section 8 of this task): no
+    existing rule in this repository ever blocked editing an offering's
+    semester after students have enrolled in it, so none is invented here —
+    changing `semester_id` never deletes, migrates or invalidates any
+    existing `StudentEnrollment` row (they keep pointing at this same
+    `offering_id`; only the offering's own semester/calendar metadata
+    changes). This is a deliberate, documented choice, not an oversight —
+    see BUSINESS_LOGIC.md's Offered Course Editing section for the same note.
+    `calendar_id` ("Academic Year") is never accepted as a separate field —
+    it is ALWAYS re-derived from the chosen Semester's own `calendar_id`
+    (mirrors `enrollment.py`'s `register_courses`), so the two can never
+    disagree."""
     o = await db.get(CourseOffering, offering_id)
     if not o: raise HTTPException(404, "Offering not found.")
     _authorize_department_manage(o.department_id, user)
 
-    for field, value in body.model_dump(exclude_unset=True).items():
+    course = await db.get(Course, o.course_id)
+    if not course:
+        raise HTTPException(404, "The offering's course could not be found.")
+
+    updates = body.model_dump(exclude_unset=True)
+    faculty_ids = updates.pop("faculty_ids", None)
+    leader_id = updates.pop("leader_id", None)
+    semester_id = updates.pop("semester_id", None)
+
+    if semester_id is not None:
+        semester = await db.get(Semester, semester_id)
+        if not semester:
+            raise HTTPException(400, "The specified semester does not exist.")
+        o.semester_id = semester.id
+        o.calendar_id = semester.calendar_id  # authoritative — never a client-supplied calendar_id
+
+    if "research_assignment_type" in updates:
+        _validate_research_assignment_type(course, updates["research_assignment_type"], creating=False)
+
+    if faculty_ids is not None:
+        # Bulk replace (OfferingUpdateIn's own validator already checked the
+        # unconditional shape — duplicates/cap/leader-membership; the
+        # research-vs-non-research REQUIREMENT below is what only this
+        # endpoint, which alone knows the real Course, can check).
+        _validate_offering_faculty_shape(course, faculty_ids, leader_id)
+        await _assert_faculty_in_department(faculty_ids, o.department_id, db)
+        await _replace_offering_faculty(o, faculty_ids, leader_id, db)
+
+    for field, value in updates.items():
         setattr(o, field, value)
     try:
         await db.commit()

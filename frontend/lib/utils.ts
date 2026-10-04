@@ -114,6 +114,18 @@ export function levelLabel(level: string | null | undefined): string {
   return LEVEL_LABELS[level] ?? level;
 }
 
+// Research Course Assignment Strategy task — CourseOffering.research_assignment_type
+// values (never exposed as raw enum names to users — see Section 28's explicit
+// "Major Advisor" / "External Examiner" labels, not "major_advisor" / "external_examiner").
+export const RESEARCH_ASSIGNMENT_TYPE_LABELS: Record<string, string> = {
+  major_advisor: "Major Advisor",
+  external_examiner: "External Examiner",
+};
+export function researchAssignmentTypeLabel(value: string | null | undefined): string {
+  if (!value) return "—";
+  return RESEARCH_ASSIGNMENT_TYPE_LABELS[value] ?? value;
+}
+
 // Confirmed HOD Course Management "Course Type" values (BUSINESS_LOGIC.md L.2,
 // Rule 21) — deliberately a different concept from the pre-existing
 // Course.course_type (theory/practical/both), stored on the new Course.category

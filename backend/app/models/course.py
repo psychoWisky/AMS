@@ -100,6 +100,18 @@ class CourseOffering(Base):
     max_enrollment: Mapped[int]    = mapped_column(Integer, default=60)
     section: Mapped[str | None]    = mapped_column(String(20))   # A / B / C
     practical_group: Mapped[str | None] = mapped_column(String(20))  # G1 / G2
+    # Research Course assignment-strategy task (this revision) — an
+    # OFFERING-LEVEL property, deliberately NOT on `Course`: the same
+    # Research-category course may be offered in one context as
+    # "major_advisor" and in another as "external_examiner" (confirmed
+    # requirement). NULL for every non-Research-category offering (enforced
+    # in the endpoint layer — see courses.py's `create_offering`/
+    # `update_offering`, never a DB CHECK, since that would require a
+    # cross-table lookup at the Course this offering references). Never
+    # stores a specific faculty/examiner id — see `app.core.research_
+    # assignment` for why: the actual Major Advisor/examiner is always
+    # STUDENT-specific, resolved per enrollment, never offering-wide.
+    research_assignment_type: Mapped[str | None] = mapped_column(String(20))  # major_advisor / external_examiner
     status: Mapped[str]            = mapped_column(String(20), default="draft")  # draft / published / closed
     created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id"))
     created_at: Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

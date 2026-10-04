@@ -84,6 +84,10 @@ from app.models.course import Course, CourseOffering, OfferingFaculty
 from app.models.academic import AcademicCalendar, Semester
 from app.models.research import AdvisoryCommittee, CommitteeMember
 from app.core.major_advisor import resolve_accepted_major_advisor
+# Research Course Assignment Strategy task — External Examiner strategy's
+# counterpart to the Major Advisor resolution above; reused (never
+# duplicated) by external_examiner.py's VC-selection endpoint too.
+from app.core.research_assignment import resolve_selected_external_examiner
 # Programme<->Department many-to-many redesign — single shared student-scope
 # resolvers (app/core/student_scope.py), re-exported under this file's
 # existing private names so every call site below is unchanged.
@@ -679,15 +683,30 @@ async def enroll(
 
     # Research Course task: this offering's OWN instructor is never touched
     # here (Rule #4) — for a Research Course, the AUTHENTICATED student's
-    # (never a client-supplied id) accepted Major Advisor is resolved and
-    # snapshotted onto THIS enrollment row only. Resolution raises a clear
-    # 400 if zero or more than one accepted Major Advisor exists — never
-    # silently proceeds with none, never arbitrarily picks one. A client
-    # cannot influence this by supplying an instructor_id: `EnrollRequest`
-    # has no such field.
+    # (never a client-supplied id) resolved party is snapshotted onto THIS
+    # enrollment row only. A client cannot influence this by supplying an
+    # instructor_id: `EnrollRequest` has no such field.
+    #
+    # Research Course Assignment Strategy task (this revision) — which party
+    # is resolved now depends on THIS OFFERING's own `research_assignment_type`
+    # (never a client claim, never Course-level — the same Research course
+    # may be offered elsewhere with the other strategy):
+    #   "major_advisor" (or legacy NULL, pre-dating this task — unchanged
+    #     existing behavior): resolve_accepted_major_advisor RAISES a clear
+    #     400 if zero or more than one accepted Major Advisor exists — never
+    #     silently proceeds with none, never arbitrarily picks one.
+    #   "external_examiner": resolve_selected_external_examiner NEVER raises
+    #     — enrollment must succeed even if the student's thesis External
+    #     Examiner has not been selected yet (confirmed Case B requirement);
+    #     instructor_id is simply left NULL ("pending"), and
+    #     backfill_pending_external_examiner_assignments (external_examiner.py)
+    #     fills it in automatically once a selection later completes.
     instructor_id = None
     if course.category == "research":
-        instructor_id = await resolve_accepted_major_advisor(user.id, db)
+        if offering.research_assignment_type == "external_examiner":
+            instructor_id = await resolve_selected_external_examiner(user.id, db)
+        else:
+            instructor_id = await resolve_accepted_major_advisor(user.id, db)
 
     e = StudentEnrollment(student_id=user.id, offering_id=body.offering_id, instructor_id=instructor_id)
     db.add(e); await db.commit()
@@ -781,19 +800,33 @@ async def register_courses(
         courses[oid] = course
         requested_credits += course.total_credits
 
-    # Research Course task: resolved ONCE for the whole request (same student,
-    # same instant, same transaction) — never per-offering — and applied only
-    # to the offerings in THIS batch whose course is a Research Course
-    # (`category == "research"`). Raises a clear 400 before any row is
-    # written if the student has zero or more than one accepted Major
-    # Advisor (see app/core/major_advisor.py); never silently proceeds with
-    # a null/arbitrary instructor. This offering's own CourseOffering row is
-    # never mutated — the resolved instructor is only ever written onto this
-    # student's own StudentEnrollment row(s) below.
+    # Research Course task: resolved ONCE for the whole request per STRATEGY
+    # (same student, same instant, same transaction) — never per-offering —
+    # and applied only to the offerings in THIS batch whose course is a
+    # Research Course (`category == "research"`). This offering's own
+    # CourseOffering row is never mutated — the resolved party is only ever
+    # written onto this student's own StudentEnrollment row(s) below.
+    #
+    # Research Course Assignment Strategy task (this revision) — a single
+    # batch request may legitimately contain BOTH strategies at once (e.g.
+    # Research Course A -> Major Advisor, Research Course B -> External
+    # Examiner, Section 21's confirmed "multiple Research courses" case), so
+    # the two groups are resolved independently:
+    #   "major_advisor" (or legacy NULL): `resolve_accepted_major_advisor`
+    #     RAISES 400 before any row is written if zero/more-than-one accepted
+    #     Major Advisor exists — unchanged existing behavior.
+    #   "external_examiner": `resolve_selected_external_examiner` NEVER
+    #     raises — these offerings' enrollments succeed with instructor_id
+    #     left NULL ("pending") if no examiner is selected yet.
     research_offering_ids = {oid for oid, c in courses.items() if c.category == "research"}
+    major_advisor_strategy_oids = {oid for oid in research_offering_ids if offerings[oid].research_assignment_type != "external_examiner"}
+    external_examiner_strategy_oids = research_offering_ids - major_advisor_strategy_oids
     research_instructor_id: Optional[UUID] = None
-    if research_offering_ids:
+    if major_advisor_strategy_oids:
         research_instructor_id = await resolve_accepted_major_advisor(user.id, db)
+    external_examiner_instructor_id: Optional[UUID] = None
+    if external_examiner_strategy_oids:
+        external_examiner_instructor_id = await resolve_selected_external_examiner(user.id, db)
 
     # Major/Minor/Supporting discipline task (this revision) — validated
     # against PRE-EXISTING selections for this semester (via the same
@@ -868,9 +901,15 @@ async def register_courses(
 
     for oid in body.offering_ids:
         classification = body.classifications.get(oid) if body.classifications else None
+        if oid in major_advisor_strategy_oids:
+            resolved_instructor_id = research_instructor_id
+        elif oid in external_examiner_strategy_oids:
+            resolved_instructor_id = external_examiner_instructor_id
+        else:
+            resolved_instructor_id = None
         db.add(StudentEnrollment(
             student_id=user.id, offering_id=oid, registration_id=registration.id, classification=classification,
-            instructor_id=research_instructor_id if oid in research_offering_ids else None,
+            instructor_id=resolved_instructor_id,
         ))
     try:
         await db.commit()

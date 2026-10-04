@@ -238,6 +238,10 @@ async def t_hod_creates_research_offering_without_instructor():
         "calendar_id": str(S["SEM"].calendar_id), "semester_id": str(S["SEM"].id),
         "course_id": str(CRS["research"]), "department_id": str(S["D1"].id),
         "faculty_ids": [], "leader_id": None,
+        # Research Course Assignment Strategy task (this revision) — now
+        # REQUIRED for a Research Course offering; "major_advisor" is the
+        # exact existing behavior every test below this one assumes.
+        "research_assignment_type": "major_advisor",
     })
     assert r.status_code == 201, r.text
     OFF["research"] = uuid.UUID(r.json()["id"])
