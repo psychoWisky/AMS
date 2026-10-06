@@ -671,14 +671,24 @@ async def enroll(
     if count_result.scalar() >= offering.max_enrollment:
         raise HTTPException(400, "Offering is full.")
 
-    # Prevent duplicate
+    # Prevent duplicate — only an ACTIVE (non-withdrawn) enrollment blocks
+    # re-registration. A `withdrawn` row is historical, not active: per the
+    # file's own `status != "withdrawn"` convention used throughout (e.g.
+    # `_semester_active_credits`, `_recompute_card_readiness`), it must not
+    # be treated as "already enrolled". `uq_enrollment` permits at most one
+    # StudentEnrollment row ever per (student, offering), for any status —
+    # so re-registration over a withdrawn row REACTIVATES that same row
+    # (Option A) below rather than inserting a second one (which would
+    # violate the constraint and would also silently fork the
+    # `WithdrawalRequest` audit trail, which keys off this row's id).
     existing = await db.execute(
         select(StudentEnrollment).where(
             StudentEnrollment.student_id == user.id,
             StudentEnrollment.offering_id == body.offering_id,
         )
     )
-    if existing.scalar_one_or_none():
+    existing_enrollment = existing.scalar_one_or_none()
+    if existing_enrollment and existing_enrollment.status != "withdrawn":
         raise HTTPException(409, "Already enrolled or request pending.")
 
     # Research Course task: this offering's OWN instructor is never touched
@@ -708,8 +718,28 @@ async def enroll(
         else:
             instructor_id = await resolve_accepted_major_advisor(user.id, db)
 
-    e = StudentEnrollment(student_id=user.id, offering_id=body.offering_id, instructor_id=instructor_id)
-    db.add(e); await db.commit()
+    if existing_enrollment:
+        # Reactivate the historical withdrawn row in place (Option A) —
+        # mirrors a fresh enrollment's starting state exactly (same fields
+        # a brand-new row would have) rather than carrying forward anything
+        # stale from the prior cycle (e.g. a Course Teacher's old
+        # processed_by/remarks from before the withdrawal, or an
+        # instructor_id resolved against a Major Advisor relationship that
+        # may since have changed). The row's id — and therefore its
+        # `WithdrawalRequest` history — is preserved untouched.
+        existing_enrollment.status = "pending"
+        existing_enrollment.enrolled_at = datetime.now(timezone.utc)
+        existing_enrollment.processed_by = None
+        existing_enrollment.processed_at = None
+        existing_enrollment.remarks = None
+        existing_enrollment.classification = None
+        existing_enrollment.instructor_id = instructor_id
+        existing_enrollment.registration_id = None
+        e = existing_enrollment
+    else:
+        e = StudentEnrollment(student_id=user.id, offering_id=body.offering_id, instructor_id=instructor_id)
+        db.add(e)
+    await db.commit()
     return {"message": "Enrollment request submitted.", "id": str(e.id)}
 
 
@@ -775,6 +805,13 @@ async def register_courses(
     offerings: dict[UUID, CourseOffering] = {}
     courses: dict[UUID, Course] = {}
     requested_credits = 0
+    # Offerings with a historical `withdrawn` StudentEnrollment row — this
+    # batch REACTIVATES that same row per-offering below instead of
+    # inserting a second one (Option A, mirrors the single-offering
+    # `enroll()` fix). A withdrawn row is never "already registered" — only
+    # an active (non-withdrawn) row blocks re-registration, consistent with
+    # the file's own `status != "withdrawn"` convention used elsewhere.
+    existing_withdrawn: dict[UUID, StudentEnrollment] = {}
     for oid in body.offering_ids:
         offering = await db.get(CourseOffering, oid)
         if not offering or offering.status != "published" or offering.semester_id != body.semester_id:
@@ -791,11 +828,14 @@ async def register_courses(
         )
         if count_result.scalar() >= offering.max_enrollment:
             raise HTTPException(400, f"{course.course_number} is full.")
-        dupe = await db.execute(select(StudentEnrollment.id).where(
+        dupe = await db.execute(select(StudentEnrollment).where(
             StudentEnrollment.student_id == user.id, StudentEnrollment.offering_id == oid,
         ))
-        if dupe.scalar_one_or_none():
-            raise HTTPException(409, f"You are already registered for {course.course_number}.")
+        dupe_enrollment = dupe.scalar_one_or_none()
+        if dupe_enrollment:
+            if dupe_enrollment.status != "withdrawn":
+                raise HTTPException(409, f"You are already registered for {course.course_number}.")
+            existing_withdrawn[oid] = dupe_enrollment
         offerings[oid] = offering
         courses[oid] = course
         requested_credits += course.total_credits
@@ -907,10 +947,26 @@ async def register_courses(
             resolved_instructor_id = external_examiner_instructor_id
         else:
             resolved_instructor_id = None
-        db.add(StudentEnrollment(
-            student_id=user.id, offering_id=oid, registration_id=registration.id, classification=classification,
-            instructor_id=resolved_instructor_id,
-        ))
+        reactivated = existing_withdrawn.get(oid)
+        if reactivated:
+            # Reactivate the historical withdrawn row in place (Option A) —
+            # same reasoning as the single-offering `enroll()` fix: mirror a
+            # fresh enrollment's starting state rather than carrying forward
+            # anything stale from the prior cycle, while keeping the row's
+            # id (and thus its `WithdrawalRequest` audit trail) unchanged.
+            reactivated.status = "pending"
+            reactivated.enrolled_at = datetime.now(timezone.utc)
+            reactivated.processed_by = None
+            reactivated.processed_at = None
+            reactivated.remarks = None
+            reactivated.classification = classification
+            reactivated.instructor_id = resolved_instructor_id
+            reactivated.registration_id = registration.id
+        else:
+            db.add(StudentEnrollment(
+                student_id=user.id, offering_id=oid, registration_id=registration.id, classification=classification,
+                instructor_id=resolved_instructor_id,
+            ))
     try:
         await db.commit()
     except IntegrityError:

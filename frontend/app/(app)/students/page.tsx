@@ -3,7 +3,8 @@ import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { toast } from "sonner";
-import { GraduationCap, Search, Loader2, Pencil, ChevronLeft, ChevronRight } from "lucide-react";
+import { GraduationCap, Search, Loader2, Pencil, KeyRound, ChevronLeft, ChevronRight } from "lucide-react";
+import { ChangePasswordModal } from "@/components/ui/change-password-modal";
 
 // Super Admin's global student management (route access: see lib/navigation.ts;
 // every endpoint below is independently Super Admin-only on the backend).
@@ -74,6 +75,7 @@ export default function StudentsPage() {
   const [collegeId, setCollegeId] = useState("");
   const [page, setPage] = useState(1);
   const [editing, setEditing] = useState<Student | null>(null);
+  const [resetPwStudent, setResetPwStudent] = useState<Student | null>(null);
   const [form, setForm] = useState<Form>(EMPTY_FORM);
   const [initial, setInitial] = useState<Form>(EMPTY_FORM);
 
@@ -244,8 +246,9 @@ export default function StudentsPage() {
                   <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{s.academic_year ?? <span className="text-gray-400">Not assigned</span>}</td>
                   <td className="px-4 py-3 text-gray-700">{s.latest_semester ?? "—"}</td>
                   <td className="px-4 py-3"><span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${s.is_active ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-600"}`}>{s.is_active ? "Active" : "Inactive"}</span></td>
-                  <td className="px-4 py-3">
+                  <td className="px-4 py-3 whitespace-nowrap">
                     <button onClick={() => openEdit(s)} title="Edit student" className="p-1.5 text-gray-600 hover:bg-gray-100 rounded-lg"><Pencil size={16} /></button>
+                    <button onClick={() => setResetPwStudent(s)} title="Reset password" className="p-1.5 text-gray-600 hover:bg-gray-100 rounded-lg"><KeyRound size={16} /></button>
                   </td>
                 </tr>
               ))}
@@ -349,6 +352,15 @@ export default function StudentsPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {resetPwStudent && (
+        <ChangePasswordModal
+          mode="admin-reset"
+          targetUserId={resetPwStudent.id}
+          targetUserName={resetPwStudent.full_name}
+          onClose={() => setResetPwStudent(null)}
+        />
       )}
     </div>
   );
