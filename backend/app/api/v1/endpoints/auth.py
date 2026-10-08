@@ -133,7 +133,9 @@ class UpdateUserRequest(BaseModel):
     gender: Optional[str] = None
     blood_group: Optional[str] = None
     father_name: Optional[str] = None
-    abc_id: Optional[str] = None
+    # ABC ID is a student-only identifier (never applicable to staff) — this
+    # admin endpoint only ever targets staff accounts (students are managed
+    # under /students), so no abc_id field exists here at all.
     address: Optional[str] = None
     college_id: Optional[UUID] = None
 
@@ -162,7 +164,7 @@ class UpdateUserRequest(BaseModel):
     def _dob(cls, v):
         return pf.check_date_of_birth(v)
 
-    @field_validator("designation", "employee_id", "father_name", "abc_id", "address", "middle_name")
+    @field_validator("designation", "employee_id", "father_name", "address", "middle_name")
     @classmethod
     def _blank_to_none(cls, v):
         return pf.blank_to_none(v)
@@ -247,7 +249,82 @@ class CreateFacultyRequest(BaseModel):
         return v.lower()
 
 
-def _user_dict(u: User) -> dict:
+# HOD: Edit Faculty (own department only) — deliberately a SEPARATE, narrower
+# schema from UpdateUserRequest (Super Admin's own edit), not an extension of
+# that endpoint's authorization: role, department_id and is_active are never
+# accepted here at all, so an HOD can never reassign a faculty's role or
+# department, or deactivate them, through this path. No abc_id field either —
+# that identifier is student-only and student-viewable-only (see
+# UpdateUserRequest/update_my_profile's own comments on this).
+class UpdateFacultyRequest(BaseModel):
+    email: Optional[EmailStr] = None
+    first_name: Optional[str] = None
+    middle_name: Optional[str] = None
+    last_name: Optional[str] = None
+    designation: Optional[str] = None
+    mobile: Optional[str] = None
+    program_id: Optional[UUID] = None
+    employee_id: Optional[str] = None
+    title: Optional[str] = None
+    date_of_birth: Optional[date] = None
+    gender: Optional[str] = None
+    blood_group: Optional[str] = None
+    father_name: Optional[str] = None
+    address: Optional[str] = None
+    college_id: Optional[UUID] = None
+
+    @field_validator("title")
+    @classmethod
+    def _title(cls, v):
+        return pf.canonical_choice(v, pf.TITLES, "Title")
+
+    @field_validator("gender")
+    @classmethod
+    def _gender(cls, v):
+        return pf.canonical_choice(v, pf.GENDERS, "Gender")
+
+    @field_validator("blood_group")
+    @classmethod
+    def _blood_group(cls, v):
+        return pf.canonical_choice(v, pf.BLOOD_GROUPS, "Blood group")
+
+    @field_validator("mobile")
+    @classmethod
+    def _mobile(cls, v):
+        return pf.check_mobile(v)
+
+    @field_validator("date_of_birth")
+    @classmethod
+    def _dob(cls, v):
+        return pf.check_date_of_birth(v)
+
+    @field_validator("designation", "employee_id", "father_name", "address", "middle_name")
+    @classmethod
+    def _blank_to_none(cls, v):
+        return pf.blank_to_none(v)
+
+
+def _user_dict(u: User, *, include_abc_id: bool = False) -> dict:
+    # ABC ID hardening (this revision) — `include_abc_id` is explicit and
+    # defaults to False: ABC ID is a student-only, student-viewable-only
+    # identifier (see UpdateMyProfileRequest/update_my_profile), so every
+    # call site must opt IN by name rather than this helper assuming a
+    # caller's target is always safe to expose. Pass True ONLY at a true
+    # self-view call site (the subject `u` is the authenticated caller
+    # themselves, from `get_current_user`/`_issue_tokens`/role-switching) —
+    # never for a call site that serializes some OTHER user (staff
+    # directory, HOD's faculty edit, Super Admin's user edit, etc.), even
+    # though today's other call sites happen to only ever target non-student
+    # users anyway. This is a defense-in-depth guard against a FUTURE call
+    # site forgetting that constraint, not a reaction to a found leak.
+    #
+    # `include_abc_id=True` alone is still not sufficient to surface the
+    # value below: it is additionally gated on the CURRENT SESSION's active
+    # role being STUDENT (the same `active` assignment this function already
+    # computes for the `active_role` field, never a stale/legacy `User.role`
+    # value) — a multi-role account (e.g. Faculty AND Student) must not see
+    # its own ABC ID while a session is actively acting as Faculty, mirroring
+    # update_my_profile's identical write-side gate exactly.
     # Multi-role/multi-department task (this revision, extending the
     # earlier multi-role/role-switching task) — `role`/`department_id`
     # remain for legacy/display compatibility only (see their own model
@@ -323,7 +400,7 @@ def _user_dict(u: User) -> dict:
         "gender": u.gender,
         "blood_group": u.blood_group,
         "father_name": u.father_name,
-        "abc_id": u.abc_id,
+        "abc_id": u.abc_id if (include_abc_id and active.role == UserRole.STUDENT) else None,
         "address": u.address,
         "must_change_password": u.must_change_password,
         "profile_complete": is_profile_complete(u),
@@ -371,7 +448,9 @@ async def _issue_tokens(user: User, request: Request, db: AsyncSession) -> Token
     user.active_department_id = initial_active.department_id
     user.assigned_roles = [a.role for a in assignments]
     user.assigned_role_assignments = assignments
-    return TokenResponse(access_token=access_token, refresh_token=refresh_token, user=_user_dict(user))
+    # Self-view: `user` is the account that just authenticated — including
+    # their own ABC ID (if a student) is correct here.
+    return TokenResponse(access_token=access_token, refresh_token=refresh_token, user=_user_dict(user, include_abc_id=True))
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -426,7 +505,8 @@ async def logout(payload: RefreshRequest, db: AsyncSession = Depends(get_db), _:
 
 @router.get("/me")
 async def me(user: User = Depends(get_current_user)):
-    return _user_dict(user)
+    # Self-view: including the caller's own ABC ID (if a student) is correct here.
+    return _user_dict(user, include_abc_id=True)
 
 
 @router.patch("/me")
@@ -437,11 +517,17 @@ async def update_my_profile(
 ):
     """Self-service profile edit — any authenticated user may edit their own
     permitted fields. Field set is restricted by UpdateMyProfileRequest itself
-    (see its docstring) rather than by role, so this is safe for any role to call."""
+    (see its docstring) rather than by role, so this is safe for any role to call.
+    ABC ID is the one exception: it is a student-only identifier, so a
+    non-student caller may never set it on themselves even though the shared
+    schema (students also use this endpoint) still carries the field."""
+    if "abc_id" in body.model_fields_set and user.active_role != UserRole.STUDENT:
+        raise HTTPException(status_code=403, detail="ABC ID is only applicable to student accounts.")
     for field, value in body.model_dump(exclude_none=True).items():
         setattr(user, field, value)
     await db.commit()
-    return _user_dict(user)
+    # Self-view: including the caller's own ABC ID (if a student) is correct here.
+    return _user_dict(user, include_abc_id=True)
 
 
 @router.post("/change-password")
@@ -836,7 +922,9 @@ async def list_users(
             # department-less ones such as Student), not what they hold elsewhere.
             assignments = [a for a in assignments if a.department_id is None or a.department_id == scope_department_id]
         u.assigned_role_assignments = assignments
-        d = _user_dict(u)
+        # Other-user view (staff directory) — ABC ID is never included here,
+        # regardless of caller (Super Admin/HOD/Incharge/DPGS/VC).
+        d = _user_dict(u, include_abc_id=False)
         d["assigned_role_assignments"] = [_assignment_dict(a) for a in assignments]
         d["assigned_roles"] = sorted({a.role.value for a in assignments})
         d["active_role"] = None
@@ -919,7 +1007,8 @@ async def switch_role(
     user.active_role = target_assignment.role
     user.active_department_id = target_assignment.department_id
     await db.commit()
-    return _user_dict(user)
+    # Self-view: including the caller's own ABC ID (if a student) is correct here.
+    return _user_dict(user, include_abc_id=True)
 
 
 @router.get("/users/{user_id}/roles")
@@ -1186,6 +1275,82 @@ async def create_faculty(
         "message": "Faculty account created. Credential email queued for delivery.",
         "email_queued": True,
     }
+
+
+# ── HOD: Edit Faculty (own department only) ───────────────────────────────────
+
+@router.patch("/faculty/{user_id}")
+async def update_faculty(
+    user_id: UUID,
+    body: UpdateFacultyRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(UserRole.HOD)),
+):
+    """HOD may edit a Faculty member's profile — the same field set Super
+    Admin edits via PATCH /auth/users/{id}, minus role/department_id/
+    is_active (an HOD can never reassign a faculty's role or department, or
+    deactivate them, through this path) and minus abc_id (student-only,
+    student-viewable-only). Scoped to the HOD's own ACTIVE department only
+    (never a client-supplied department, mirroring create_faculty above),
+    and only to a target who actually holds a FACULTY assignment in that
+    exact department — never another department's faculty, and never a
+    non-Faculty target."""
+    if not user.active_department_id:
+        raise HTTPException(status_code=400, detail="Your account has no department assigned; contact an administrator.")
+
+    # _user_dict (used for the response below) reads u.department/u.college
+    # lazily — every other caller eager-loads them first (see its own
+    # comments); db.get() alone would leave them unloaded and raise on an
+    # async lazy-load attempt, so they're eager-loaded here too.
+    target = (await db.execute(
+        select(User).where(User.id == user_id).options(selectinload(User.department), selectinload(User.college))
+    )).scalar_one_or_none()
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    # Authoritative scope check via UserRoleAssignment (never the legacy
+    # User.role/department_id columns — same reasoning as
+    # _role_holder_condition: a faculty member may hold other roles/
+    # departments too, so only an actual FACULTY assignment in THIS HOD's
+    # own active department counts).
+    is_faculty_here = (await db.execute(
+        select(UserRoleAssignment.id).where(
+            UserRoleAssignment.user_id == target.id,
+            UserRoleAssignment.role == UserRole.FACULTY,
+            UserRoleAssignment.department_id == user.active_department_id,
+        )
+    )).scalar_one_or_none()
+    if not is_faculty_here:
+        raise HTTPException(status_code=403, detail="You may only edit Faculty in your own department.")
+
+    if body.email is not None:
+        new_email = body.email.lower()
+        if new_email != target.email:
+            dupe = await db.execute(select(User).where(User.email == new_email, User.id != target.id))
+            if dupe.scalar_one_or_none():
+                raise HTTPException(status_code=409, detail="Email already registered.")
+            target.email = new_email
+
+    if body.college_id is not None:
+        if not await db.get(College, body.college_id):
+            raise HTTPException(status_code=400, detail="The specified college does not exist.")
+        await validate_department_college_pair(target.department_id, body.college_id, db)
+
+    if body.program_id is not None:
+        await validate_program_department_pair(body.program_id, target.department_id, db)
+
+    updates = body.model_dump(exclude_unset=True)
+    updates.pop("email", None)
+    for field, value in updates.items():
+        if value is None and field in _NOT_CLEARABLE_USER_FIELDS:
+            continue
+        setattr(target, field, value)
+
+    await db.commit()
+    # Other-user view (HOD editing a Faculty member) — ABC ID is never
+    # included here; `target` is never a student (scope-checked above), and
+    # this is never a self-view regardless.
+    return _user_dict(target, include_abc_id=False)
 
 
 # ── Bulk Faculty/User Excel Upload (this revision) ──────────────────────────

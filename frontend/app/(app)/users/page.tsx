@@ -15,7 +15,7 @@ interface User {
   first_name?: string; middle_name?: string | null; last_name?: string; mobile?: string | null;
   department_name?: string | null;
   title?: string | null; employee_id?: string | null; date_of_birth?: string | null; gender?: string | null;
-  blood_group?: string | null; father_name?: string | null; abc_id?: string | null; address?: string | null;
+  blood_group?: string | null; father_name?: string | null; address?: string | null;
   college_id?: string | null;
   // Every persisted role assignment, role + department kept as a pair (see
   // GET /auth/users). `role`/`department_name` above are only the user's
@@ -39,7 +39,7 @@ const TITLES = ["Dr.", "Mr", "Mrs", "Miss"];
 const GENDERS = ["Male", "Female", "Other"];
 const BLOOD_GROUPS = ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"];
 // Profile fields the Edit dialog sends only when the admin actually changed them.
-const PROFILE_EDIT_FIELDS = ["title", "employee_id", "date_of_birth", "gender", "blood_group", "father_name", "abc_id", "address", "college_id"] as const;
+const PROFILE_EDIT_FIELDS = ["title", "employee_id", "date_of_birth", "gender", "blood_group", "father_name", "address", "college_id"] as const;
 // One "Role — Department" line per real assignment; the pair is never split
 // into separate role / department lists. Institution-wide roles have no
 // department and read "Role — Global"; a Student has none either (their
@@ -74,7 +74,7 @@ const DEPARTMENT_ROLE_OPTIONS = ["hod", "faculty"];
 const EMPTY_FORM = { email: "", password: "", first_name: "", middle_name: "", last_name: "", role: "faculty", designation: "", mobile: "", department_id: "", program_id: "", college_id: "" };
 const EMPTY_EDIT_FORM = {
   email: "", first_name: "", middle_name: "", last_name: "", role: "", designation: "", mobile: "", department_id: "", program_id: "",
-  title: "", employee_id: "", date_of_birth: "", gender: "", blood_group: "", father_name: "", abc_id: "", address: "", college_id: "",
+  title: "", employee_id: "", date_of_birth: "", gender: "", blood_group: "", father_name: "", address: "", college_id: "",
 };
 
 export default function UsersPage() {
@@ -252,7 +252,6 @@ export default function UsersPage() {
       gender: u.gender ?? "",
       blood_group: u.blood_group ?? "",
       father_name: u.father_name ?? "",
-      abc_id: u.abc_id ?? "",
       address: u.address ?? "",
       college_id: u.college_id ?? "",
     };
@@ -451,7 +450,6 @@ export default function UsersPage() {
               {editSelect("Gender", "gender", GENDERS.map((g) => ({ value: g, label: g })))}
               {editSelect("Blood Group", "blood_group", BLOOD_GROUPS.map((g) => ({ value: g, label: g })))}
               {editInput("Father's Name", "father_name")}
-              {editInput("ABC ID", "abc_id")}
               {editSelect("College/Outstation", "college_id", colleges.map((c) => ({ value: c.id, label: c.name })))}
               <div className="md:col-span-2">
                 <label className="block text-base font-semibold text-gray-700 mb-1">Address</label>

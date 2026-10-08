@@ -293,9 +293,10 @@ async def t_search_and_pagination():
 async def t_student_detail_and_staff_are_not_students():
     r = await _call("GET", f"/students/{U['S1']}", S["super"]); assert r.status_code == 200
     d = r.json()
-    for f in ("email", "first_name", "middle_name", "last_name", "student_roll", "mobile", "date_of_birth", "gender", "blood_group", "father_name", "abc_id", "address",
+    for f in ("email", "first_name", "middle_name", "last_name", "student_roll", "mobile", "date_of_birth", "gender", "blood_group", "father_name", "address",
               "admission_year", "program_id", "department_id", "college_id", "is_active", "academic_year_id", "academic_year", "latest_semester"):
         assert f in d, f"detail is missing {f}"
+    assert "abc_id" not in d, "ABC ID is student-only, student-viewable-only — Super Admin must not see it via /students"
     assert d["college_id"] == str(S["C2"]) and "college_from_orientation" not in d
     d4 = (await _call("GET", f"/students/{U['S4']}", S["super"])).json()
     assert d4["college_id"] is None and d4["college_name"] is None, "a student without a college has none"
@@ -310,7 +311,7 @@ async def t_edit_every_field_and_roll_sync():
     body = {
         "email": f"{_PFX}s1_edited_{_TAG}@avfu.ac.in", "first_name": "Edited", "middle_name": "Mid", "last_name": "Student",
         "student_roll": new_roll, "mobile": "+91 98765-43210", "date_of_birth": "1999-05-17", "gender": "female", "blood_group": "ab-",
-        "father_name": "Edited Father", "abc_id": "ABC-EDITED", "address": "Edited address\nline 2", "admission_year": 2025,
+        "father_name": "Edited Father", "address": "Edited address\nline 2", "admission_year": 2025,
         "program_id": str(S["P2"].id), "department_id": str(S["D2"].id), "college_id": str(S["C1"]), "is_active": True,
     }
     r = await _call("PATCH", f"/students/{U['S1']}", S["super"], json=body); assert r.status_code == 200, r.text
@@ -318,6 +319,9 @@ async def t_edit_every_field_and_roll_sync():
     expect = {**body, "gender": "Female", "blood_group": "AB-", "email": body["email"].lower()}
     for k, v in expect.items():
         assert d[k] == v, f"{k}: {d[k]!r} != {v!r}"
+    # ABC ID is not part of this endpoint at all anymore (student-only, student-viewable-only).
+    assert (await _call("PATCH", f"/students/{U['S1']}", S["super"], json={"abc_id": "ABC-SHOULD-BE-IGNORED"})).status_code == 200
+    assert "abc_id" not in (await _call("GET", f"/students/{U['S1']}", S["super"])).json()
     assert d["program_name"] == S["P2"].name and d["department_name"] == S["D2"].name and d["college_name"] == "ZZTEST SM College C1"
     u = await _db_user("S1")
     assert u.role == UserRole.STUDENT, "editing a student never changes their role"
@@ -325,10 +329,10 @@ async def t_edit_every_field_and_roll_sync():
         cand = (await db.execute(select(OrientationCandidate).where(OrientationCandidate.student_user_id == U["S1"]))).scalar_one()
     assert cand.roll_no == new_roll, "the Orientation copy of the roll number must follow the canonical User.student_roll"
     # clearing optional fields, and clearing the college (leaves NO college — S1's candidate names C1 but is never consulted)
-    r = await _call("PATCH", f"/students/{U['S1']}", S["super"], json={"abc_id": None, "address": "  ", "middle_name": "", "gender": None, "college_id": None})
+    r = await _call("PATCH", f"/students/{U['S1']}", S["super"], json={"address": "  ", "middle_name": "", "gender": None, "college_id": None})
     assert r.status_code == 200, r.text
     d = (await _call("GET", f"/students/{U['S1']}", S["super"])).json()
-    assert d["abc_id"] is None and d["address"] is None and d["middle_name"] is None and d["gender"] is None
+    assert d["address"] is None and d["middle_name"] is None and d["gender"] is None
     assert d["college_id"] is None and d["college_name"] is None, "cleared college stays cleared; no Orientation fallback"
     # the student can still authenticate, and is still a student
     me = await _call("GET", "/auth/me", TOK["S1"]); assert me.status_code == 200 and me.json()["active_role"] == "student"
@@ -371,7 +375,7 @@ async def t_edit_user_full_profile_and_roles_untouched():
         before_roles = sorted((a.role.value, str(a.department_id)) for a in (await db.execute(select(UserRoleAssignment).where(UserRoleAssignment.user_id == U["ST"]))).scalars().all())
     body = {
         "title": "dr.", "first_name": "Staff", "middle_name": "M", "last_name": "Edited", "designation": "Associate Professor", "employee_id": f"ZZTEST-EMP-EDITED-{_TAG}",
-        "mobile": "9123456789", "date_of_birth": "1980-02-03", "gender": "Other", "blood_group": "b+", "father_name": "Staff Father", "abc_id": "ABC-STAFF",
+        "mobile": "9123456789", "date_of_birth": "1980-02-03", "gender": "Other", "blood_group": "b+", "father_name": "Staff Father",
         "address": "Staff address", "college_id": str(S["C1"]),
     }
     r = await _call("PATCH", f"/auth/users/{U['ST']}", S["super"], json=body); assert r.status_code == 200, r.text
@@ -379,6 +383,7 @@ async def t_edit_user_full_profile_and_roles_untouched():
     exp = {**body, "title": "Dr.", "blood_group": "B+"}
     for k, v in exp.items():
         assert row[k] == v, f"{k}: {row[k]!r} != {v!r}"
+    assert row["abc_id"] is None, "ABC ID is student-only — not writable for staff via this endpoint even if sent"
     async with AsyncSessionLocal() as db:
         after_roles = sorted((a.role.value, str(a.department_id)) for a in (await db.execute(select(UserRoleAssignment).where(UserRoleAssignment.user_id == U["ST"]))).scalars().all())
     assert after_roles == before_roles == sorted([("faculty", str(S["D1"].id)), ("hod", str(S["D2"].id))]), "profile edits never touch role assignments"

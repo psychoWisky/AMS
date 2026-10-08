@@ -18,7 +18,7 @@ interface Student {
   first_name: string | null; middle_name: string | null; last_name: string | null;
   student_roll: string | null; mobile: string | null; date_of_birth: string | null;
   gender: string | null; blood_group: string | null; father_name: string | null;
-  abc_id: string | null; address: string | null; admission_year: number | null;
+  address: string | null; admission_year: number | null;
   program_id: string | null; program_name: string | null; program_code: string | null;
   department_id: string | null; department_name: string | null;
   college_id: string | null; college_name: string | null;
@@ -35,9 +35,13 @@ const PAGE_SIZE = 25;
 const GENDERS = ["Male", "Female", "Other"];
 const BLOOD_GROUPS = ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"];
 
+// ABC ID is intentionally absent from this page: it is a student-only,
+// student-viewable-only identifier — not even Super Admin may view or edit
+// it here. Only the student themselves can see/set it, via their own
+// self-service profile.
 const EMPTY_FORM = {
   first_name: "", middle_name: "", last_name: "", student_roll: "", email: "", mobile: "", date_of_birth: "",
-  gender: "", blood_group: "", father_name: "", abc_id: "", address: "", admission_year: "",
+  gender: "", blood_group: "", father_name: "", address: "", admission_year: "",
   program_id: "", department_id: "", college_id: "", academic_year_id: "", is_active: true,
 };
 type Form = typeof EMPTY_FORM;
@@ -58,7 +62,7 @@ function toForm(s: Student): Form {
   return {
     first_name: s.first_name ?? "", middle_name: s.middle_name ?? "", last_name: s.last_name ?? "",
     student_roll: s.student_roll ?? "", email: s.email, mobile: s.mobile ?? "", date_of_birth: s.date_of_birth ?? "",
-    gender: s.gender ?? "", blood_group: s.blood_group ?? "", father_name: s.father_name ?? "", abc_id: s.abc_id ?? "",
+    gender: s.gender ?? "", blood_group: s.blood_group ?? "", father_name: s.father_name ?? "",
     address: s.address ?? "", admission_year: s.admission_year ? String(s.admission_year) : "",
     program_id: s.program_id ?? "", department_id: s.department_id ?? "", college_id: s.college_id ?? "", academic_year_id: s.academic_year_id ?? "", is_active: s.is_active,
   };
@@ -283,7 +287,6 @@ export default function StudentsPage() {
               {input("Last Name", "last_name", "text", true)}
               {input("Roll Number", "student_roll", "text", true)}
               {input("Email", "email", "email", true)}
-              {input("ABC ID", "abc_id")}
             </div>
 
             <p className="text-sm font-bold text-gray-800 mb-2">Personal</p>

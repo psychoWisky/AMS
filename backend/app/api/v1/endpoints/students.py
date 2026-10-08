@@ -71,7 +71,10 @@ class StudentUpdate(BaseModel):
     gender: Optional[str] = None
     blood_group: Optional[str] = None
     father_name: Optional[str] = Field(None, max_length=200)
-    abc_id: Optional[str] = Field(None, max_length=50)
+    # ABC ID is a student-only, student-viewable-only identifier: Super Admin
+    # (and no other role) may view or edit it through this endpoint — only
+    # the student themselves, via their own self-service profile (PATCH
+    # /auth/me), may see or set it.
     address: Optional[str] = None
     admission_year: Optional[int] = Field(None, ge=1950, le=2100)
     program_id: Optional[UUID] = None
@@ -94,7 +97,7 @@ class StudentUpdate(BaseModel):
             raise ValueError("This field is required and cannot be blank.")
         return v.strip()
 
-    @field_validator("middle_name", "father_name", "abc_id", "address", mode="before")
+    @field_validator("middle_name", "father_name", "address", mode="before")
     @classmethod
     def _optional_text(cls, v):
         return blank_to_none(v)
@@ -139,7 +142,6 @@ def _student_dict(u: User, latest_semester: Optional[str] = None, college_names:
         "gender": u.gender,
         "blood_group": u.blood_group,
         "father_name": u.father_name,
-        "abc_id": u.abc_id,
         "address": u.address,
         "admission_year": u.admission_year,
         "program_id": str(u.program_id) if u.program_id else None,
@@ -230,7 +232,10 @@ async def list_students(
         that semester (independent of the assigned Academic Year). `IN
         (subquery)` is used, so a student with many matching records still
         appears once.
-    `q` searches name, email, roll number and ABC ID."""
+    `q` searches name, email and roll number. ABC ID is never searched or
+    returned here — it is a student-only, student-viewable-only identifier
+    (see auth.py's `update_my_profile`/`_user_dict`); not even Super Admin
+    sees it through this endpoint."""
     conditions = [student_user_clause()]
     if department_id:
         conditions.append(User.department_id == department_id)
@@ -252,7 +257,7 @@ async def list_students(
         like = f"%{q.strip()}%"
         conditions.append(or_(
             func.concat_ws(" ", User.first_name, User.middle_name, User.last_name).ilike(like),
-            User.email.ilike(like), User.student_roll.ilike(like), User.abc_id.ilike(like),
+            User.email.ilike(like), User.student_roll.ilike(like),
         ))
 
     total = (await db.execute(select(func.count()).select_from(User).where(*conditions))).scalar_one()

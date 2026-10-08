@@ -16,8 +16,12 @@ import { ChangePasswordModal } from "@/components/ui/change-password-modal";
 // state keyed by user.id, PATCH /auth/me on save) WITHOUT modifying that
 // page or its student-specific behavior at all. Only the fields Section 32
 // explicitly named are exposed here (DOB/Gender/Blood Group/Father's Name/
-// Address/ABC ID/Mobile) — Department/College/Designation/Role remain
-// admin-only, read-only display, never editable by the user themselves.
+// Address/Mobile) — Department/College/Designation/Role remain admin-only,
+// read-only display, never editable by the user themselves. ABC ID is
+// deliberately NOT included on this page: it is a student-only,
+// student-viewable-only identifier (this page is staff-only — see
+// lib/navigation.ts), and the backend now rejects it from a non-student
+// caller even if sent.
 export default function MyProfilePage() {
   const user = useUser();
   if (!user) return <div className="flex items-center justify-center py-24 text-gray-600"><Loader2 className="animate-spin mr-2" />Loading…</div>;
@@ -30,7 +34,7 @@ function ProfileForm({ user }: { user: NonNullable<ReturnType<typeof useUser>> }
   const [form, setForm] = useState(() => ({
     date_of_birth: user.date_of_birth ?? "", gender: user.gender ?? "",
     blood_group: user.blood_group ?? "", mobile: user.mobile ?? "", father_name: user.father_name ?? "",
-    abc_id: user.abc_id ?? "", address: user.address ?? "",
+    address: user.address ?? "",
   }));
   const [showChangePw, setShowChangePw] = useState(false);
 
@@ -41,7 +45,6 @@ function ProfileForm({ user }: { user: NonNullable<ReturnType<typeof useUser>> }
       blood_group: form.blood_group || undefined,
       mobile: form.mobile || undefined,
       father_name: form.father_name || undefined,
-      abc_id: form.abc_id || undefined,
       address: form.address || undefined,
     }),
     onSuccess: (res) => {
@@ -104,7 +107,6 @@ function ProfileForm({ user }: { user: NonNullable<ReturnType<typeof useUser>> }
           {selectField("Blood Group", "blood_group", ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"], false)}
           {field("Mobile No.", "mobile")}
           {field("Father's Name", "father_name")}
-          {field("ABC ID", "abc_id")}
         </div>
         <div className="mt-4">
           <label className="block text-base font-semibold text-gray-700 mb-1">Address</label>
