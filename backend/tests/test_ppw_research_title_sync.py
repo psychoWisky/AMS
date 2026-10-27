@@ -26,6 +26,7 @@ Run with:
 """
 import asyncio
 import hashlib
+import io
 import sys
 import uuid
 
@@ -50,6 +51,7 @@ U: dict[str, uuid.UUID] = {}
 TOK: dict[str, str] = {}
 C: dict[str, uuid.UUID] = {}
 S: dict = {}
+P: dict[str, uuid.UUID] = {}
 
 
 def record(name: str, ok: bool, detail: str = "") -> None:
@@ -97,6 +99,14 @@ async def _committee_title(committee_id: uuid.UUID) -> str | None:
     async with AsyncSessionLocal() as db:
         c = await db.get(AdvisoryCommittee, committee_id)
         return c.research_title
+
+
+def _extract_pdf_text(data: bytes) -> str:
+    """A generated PDF's text lives in compressed content streams — a raw byte/latin-1 substring
+    search over the file will almost never find it. Use pypdf's real text extraction instead."""
+    from pypdf import PdfReader
+    reader = PdfReader(io.BytesIO(data))
+    return "\n".join(p.extract_text() or "" for p in reader.pages)
 
 
 async def _run(name, fn):
@@ -227,6 +237,7 @@ async def t_scenario_a_empty_committee_title_filled_by_ppw():
     await _fill_and_submit_ppw("stu_b", ppw_id, "New PPW Research Title (Scenario A)")
     title = await _committee_title(uuid.UUID(C["stu_b"]))
     assert title == "New PPW Research Title (Scenario A)", title
+    P["stu_b"] = ppw_id  # reused by t_generated_document_has_correct_institutional_address below
 
 
 # ── Scenario B: existing Advisory Committee title overwritten by PPW title ──
@@ -272,6 +283,25 @@ async def t_scenario_d_other_students_committees_untouched():
     assert title_c == "Initial Research Title", "stu_c's committee (no PPW ever submitted for it) must be untouched"
 
 
+# ── Regression: generated PPW PDF must use AVFU's real address, never the ───
+# historical "AAU, Jorhat" branding that was found hardcoded in the frontend
+# preview (frontend/app/(app)/ppw/page.tsx) but never reached this endpoint.
+
+async def t_generated_document_has_correct_institutional_address():
+    """Reuses stu_b's already-submitted PPW (Scenario A) rather than creating new
+    test data. Exercises the real `GET /ppw/{id}/document` endpoint end-to-end
+    (Jinja2 template -> Playwright/Chromium -> PDF bytes) and extracts actual
+    PDF text, not just source code, to guard against the address regressing."""
+    r = await _call("GET", f"/ppw/{P['stu_b']}/document", TOK["stu_b"])
+    assert r.status_code == 200 and r.headers["content-type"] == "application/pdf", r.text
+    body_text = _extract_pdf_text(r.content)
+    assert "khanapara" in body_text.lower() and "781022" in body_text, \
+        "generated PPW PDF must contain AVFU's real address (Khanapara - 781022)"
+    assert "jorhat" not in body_text.lower(), "the historical AAU/Jorhat address must never appear in a generated PPW document"
+    assert "785013" not in body_text and "785 013" not in body_text, "AAU's Jorhat PIN code must never appear in a generated PPW document"
+    assert "aau" not in body_text.lower().replace("assam veterinary", ""), "no AAU branding may leak into a generated AVFU document"
+
+
 async def main() -> None:
     await _setup()
     try:
@@ -284,6 +314,7 @@ async def main() -> None:
             "Scenario B: existing Advisory Committee title OVERWRITTEN by PPW submission": t_scenario_b_existing_committee_title_overwritten_by_ppw,
             "Scenario C: draft PPW edits do not sync; only submission does": t_scenario_c_draft_edits_do_not_sync_only_submission_does,
             "Scenario D: other students' committees remain untouched": t_scenario_d_other_students_committees_untouched,
+            "Generated PPW PDF has AVFU's correct address, no AAU/Jorhat branding": t_generated_document_has_correct_institutional_address,
         }
         for name, fn in cases.items():
             await _run(name, fn)

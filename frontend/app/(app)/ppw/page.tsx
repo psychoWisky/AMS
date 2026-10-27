@@ -446,7 +446,7 @@ function PpwEditor({ ppw }: { ppw: Ppw }) {
             <p>Academic Regulation Form No.PG-11</p>
             <p>Video Clause: 2.06.04</p>
           </div>
-          <p>To,<br />The Director, Post Graduate Studies,<br />AAU, Jorhat-785013</p>
+          <p>To,<br />The Director, Post Graduate Studies,<br />AVFU, Khanapara - 781022</p>
           <p className="mt-4">
             This is to submit the Proposed Programme of Work of <strong>{ppw.header.student_name}</strong>
             {ppw.header.student_roll && <> (Roll No. {ppw.header.student_roll})</>}, a{" "}
