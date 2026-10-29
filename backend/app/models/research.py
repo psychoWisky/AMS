@@ -27,6 +27,15 @@ class AdvisoryCommittee(Base):
     research_title: Mapped[str | None] = mapped_column(String(500))
     research_area: Mapped[str | None]  = mapped_column(String(200))
     status: Mapped[str]             = mapped_column(String(30), default="major_advisor_pending")
+    # VESTIGIAL, this revision (post-DPGS-approval committee-change task):
+    # its only writer, `PATCH /committees/{id}/lock`, was removed (it checked
+    # a `status` value — `"hod_approved"` — nothing has set since the
+    # Incharge Academic Cell/DPGS task, so it was already permanently
+    # unreachable), and its only reader (`add_member`'s `if c.is_locked`
+    # guard) was removed with it. Left in place rather than dropped via a
+    # migration — see `research.py`'s comment at the removed endpoint's old
+    # location for the full rationale. `_committee_dict` still reports it
+    # (harmlessly, always `False` going forward) for backward API compatibility.
     is_locked: Mapped[bool]         = mapped_column(Boolean, default=False)
     formed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Mandatory-remark revert tracking (BUSINESS_LOGIC.md C.8.4/Rule 1) — preserved,

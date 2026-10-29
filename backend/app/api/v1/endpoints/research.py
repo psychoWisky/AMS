@@ -29,10 +29,13 @@ student is `is_active`. This is an explicit, documented assumption, not a
 confirmed business rule — record any correction to it in BUSINESS_LOGIC.md's
 Open Questions, not silently in code.
 """
+import logging
+import urllib.parse
+from pathlib import Path
 from typing import Optional, List
 from uuid import UUID
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
@@ -56,6 +59,7 @@ from app.models.progress_report import ProgressReport, ProgressReportApprovalCyc
 from app.core.student_scope import resolve_student_department_id as _student_department_id
 
 router = APIRouter(prefix="/research", tags=["Research"])
+logger = logging.getLogger(__name__)
 
 _ADMIN_ROLES = (UserRole.SUPER_ADMIN,)
 # Incharge Academic Cell / DPGS task (this revision) — global VIEW access
@@ -112,6 +116,23 @@ _STAGE_LABELS = {
     "dpgs_approved": "DPGS Approved (Final)",
     "reverted": "Reverted",
 }
+
+# Official Advisory Committee document (this revision) — display labels for
+# the generated PDF, deliberately mirroring the existing, already-confirmed
+# frontend vocabulary (`COMMITTEE_ROLE_LABELS`/`LEVEL_LABELS`,
+# frontend/lib/utils.ts) rather than inventing new wording. `LEVEL_LABELS`
+# there is itself a confirmed UI-only rename (PG -> "Masters" display text;
+# the stored `Program.level` value is never touched) — reused here for the
+# same document-facing purpose, never written back to the database.
+_COMMITTEE_DOCUMENT_ROLE_LABELS = {
+    "major_advisor": "Major Advisor",
+    "member_major": "Member Major",
+    "member_minor": "Member Minor",
+    "supporting": "Supporting",
+    "member_of_others": "Member of Others",
+    "co_major_advisor": "Co-Major Advisor",
+}
+_PROGRAM_LEVEL_DOCUMENT_LABELS = {"UG": "UG", "PG": "Masters", "PhD": "PhD"}
 
 
 class CommitteeIn(BaseModel):
@@ -256,6 +277,57 @@ async def _authorize_manage_members(committee: AdvisoryCommittee, user: User, db
     if ma and ma.faculty_id == user.id and ma.accepted is True:
         return
     raise HTTPException(403, "Only this committee's accepted Major Advisor (or an administrator) can manage its other members.")
+
+
+# Post-DPGS-approval committee-change task (this revision) — AVFU confirmed
+# an Advisory Committee remains editable even after `dpgs_approved`: the
+# Major Advisor may still add/remove/replace a member, and an authorized HOD
+# may still replace the Major Advisor, in both cases restarting the HOD ->
+# Incharge Academic Cell -> DPGS chain. `dpgs_approved` is therefore now a
+# MODIFIABLE status, not a terminal lock — reused here as the new entry
+# point into the SAME membership-management/reassignment endpoints that
+# already existed, rather than inventing a parallel "revision" workflow.
+# `reverted` is included because `remove_member`'s pre-existing, documented
+# use case (removing a member who declined at Stage 3) already runs while
+# the committee is in that exact status. `hod_approved` is included because
+# it is a WIDELY used legacy/fixture status value across this repository's
+# own test suite (`test_progress_report.py`, `test_comprehensive_exam.py`,
+# `test_synopsis.py`, `test_cleanup_production_db.py` — confirmed by a
+# repository-wide search, not assumed) representing "this committee is
+# already fully approved," predating the Incharge Academic Cell/DPGS task
+# that introduced `dpgs_approved` as the real terminal status; it must be
+# treated identically to `dpgs_approved` here so committee modification
+# behaves consistently regardless of which "approved" status label a given
+# committee happens to carry. `major_advisor_pending`, `incharge_pending`
+# and `dpgs_pending` are deliberately EXCLUDED — while a revision is already
+# awaiting the new Major Advisor's response, or is with Incharge Academic
+# Cell/DPGS for re-review, a second concurrent membership change is blocked
+# by this same status gate (see module docstring's concurrency note) rather
+# than by a separate version counter.
+_MEMBER_MODIFIABLE_STATUSES = ("member_selection", "members_pending", "hod_pending", "dpgs_approved", "hod_approved", "reverted")
+
+
+def _recompute_committee_member_stage(all_members: list[CommitteeMember]) -> str:
+    """Single source of truth for the non-Major-Advisor-member completeness
+    check, used by every place that adds/removes a member or records a
+    Major Advisor's acceptance (`add_member`, `remove_member`,
+    `major_advisor_response`'s accept branch). Three-way, not a simple
+    boolean: an EMPTY list is `member_selection` (nothing to accept yet — the
+    normal state right after a Major Advisor's own first acceptance, with no
+    other members added), a NON-empty list with at least one member whose
+    `accepted` is not `True` is `members_pending` (something still needs a
+    response), and a NON-empty, fully `accepted is True` list is
+    `hod_pending` — ready for the next approval stage regardless of how it
+    got there: first-time formation, a post-DPGS-approval member change
+    (where only the newly added/remaining members matter), or a replaced
+    Major Advisor whose OTHER members were already accepted and are left
+    untouched (the confirmed requirement: no member re-acceptance for a
+    Major-Advisor-only change)."""
+    if not all_members:
+        return "member_selection"
+    if all(m.accepted is True for m in all_members):
+        return "hod_pending"
+    return "members_pending"
 
 
 async def _authorize_committee_view(committee: AdvisoryCommittee, user: User, db: AsyncSession) -> None:
@@ -548,9 +620,24 @@ async def major_advisor_response(
     now = datetime.now(timezone.utc)
     if body.accepted:
         ma.accepted = True; ma.accepted_at = now
-        c.status = "member_selection"
+        # Post-DPGS-approval Major Advisor change task (this revision) —
+        # reuses the SAME 3-way recompute as add_member/remove_member rather
+        # than unconditionally landing on "member_selection": a FIRST-time
+        # Major Advisor acceptance has no other members yet (empty list ->
+        # still correctly "member_selection", unchanged), but a REPLACEMENT
+        # Major Advisor's committee already has its other members intact and
+        # accepted — this lets it skip straight to "hod_pending" without
+        # asking already-accepted members to re-accept, matching the
+        # confirmed requirement (no member re-acceptance for a Major-Advisor-
+        # only change). The HOD must still separately, explicitly approve —
+        # reaching "hod_pending" here is not itself an approval.
+        others = await db.execute(select(CommitteeMember).where(
+            CommitteeMember.committee_id == committee_id, CommitteeMember.role != "major_advisor",
+        ))
+        c.status = _recompute_committee_member_stage(others.scalars().all())
+        c.revert_remark = None; c.reverted_at = None
         await db.commit()
-        return {"message": "Major Advisor role accepted. You may now select other committee members."}
+        return {"message": "Major Advisor role accepted.", "stage": c.status}
 
     if not body.remark:
         raise HTTPException(400, "A remark is required when declining.")
@@ -584,7 +671,17 @@ async def reassign_major_advisor(
     # Major Advisor decline, `status == "reverted"`), never a replacement of it.
     declined_flow = c.status == "reverted" and ma and ma.accepted is False
     returned_from_higher_revert = c.status == "hod_pending" and c.reverted_at is not None
-    if not (declined_flow or returned_from_higher_revert):
+    # Post-DPGS-approval Major Advisor change task (this revision) — the ONLY
+    # new trigger added here: an authorized HOD may replace the Major Advisor
+    # of an already fully approved committee (`dpgs_approved`, or the legacy
+    # `hod_approved` fixture convention — see `_MEMBER_MODIFIABLE_STATUSES`'s
+    # comment for why both are treated identically). Setting status to
+    # `major_advisor_pending` below (unchanged for every trigger) means the
+    # HOD's initiation here does NOT itself count as approval of the revised
+    # committee — the new Major Advisor must still accept, and the HOD must
+    # still separately, explicitly approve via `hod_approval` afterwards.
+    post_approval_change = c.status in ("dpgs_approved", "hod_approved")
+    if not (declined_flow or returned_from_higher_revert or post_approval_change):
         raise HTTPException(400, "This committee is not awaiting Major Advisor reassignment.")
     student_department_id = await _student_department_id(c.student_id, db)
     await _validate_faculty_department_eligibility("major_advisor", body.major_advisor_id, student_department_id, db)
@@ -656,11 +753,10 @@ async def add_member(
     await _assert_no_external_examiner_under_approval(c.student_id, db, "add a committee member", "the committee can be changed")
     await _assert_no_thesis_under_approval(c.student_id, db, "add a committee member", "the committee can be changed")
     await _assert_no_progress_report_under_approval(c.student_id, db, "add a committee member", "the committee can be changed")
-    if c.status not in ("member_selection", "members_pending"):
-        raise HTTPException(400, "Members can only be added while the committee is in member-selection stage.")
+    if c.status not in _MEMBER_MODIFIABLE_STATUSES:
+        raise HTTPException(400, "Members can only be added while the committee is in member-selection stage, awaiting HOD approval, or after DPGS final approval (which reopens the approval chain).")
     if body.role not in _MEMBER_ROLES:
         raise HTTPException(400, f"Role must be one of: {', '.join(_MEMBER_ROLES)}.")
-    if c.is_locked: raise HTTPException(400, "Committee is locked.")
 
     # Shape must match the role — the MemberIn validator only enforces "exactly one
     # of internal/external", not which one a given ROLE requires.
@@ -698,13 +794,22 @@ async def add_member(
     # member happens to be the last one still needing a response (e.g. an
     # external member, always pre-accepted, added after every internal member
     # already accepted), the committee must not be stranded in members_pending.
+    # Post-DPGS-approval member-change task (this revision) — reuses the
+    # shared 3-way recompute (`_recompute_committee_member_stage`) so adding a
+    # member to an ALREADY-`dpgs_approved` committee correctly reopens the
+    # chain: the new member is never pre-accepted (internal) or is
+    # pre-accepted (external), and the recompute decides `members_pending` vs
+    # `hod_pending` the same way it always has. Any stale revert remark from
+    # a prior cycle is cleared once the Major Advisor acts — mirrors
+    # `remove_member`'s existing, unconditional clear below for consistency
+    # between these two sibling endpoints.
     others = await db.execute(select(CommitteeMember).where(
         CommitteeMember.committee_id == committee_id, CommitteeMember.role != "major_advisor",
     ))
-    all_members = others.scalars().all()
-    c.status = "hod_pending" if all_members and all(x.accepted is True for x in all_members) else "members_pending"
+    c.status = _recompute_committee_member_stage(others.scalars().all())
+    c.revert_remark = None; c.reverted_at = None
     await db.commit()
-    return {"message": "Member added."}
+    return {"message": "Member added.", "stage": c.status}
 
 
 @router.delete("/committees/{committee_id}/members/{member_id}", status_code=204)
@@ -715,7 +820,14 @@ async def remove_member(
     )),
 ):
     """Corrective action after a member decline (Stage 3 revert) — lets the Major
-    Advisor remove the declined member and add a replacement via add_member."""
+    Advisor remove the declined member and add a replacement via add_member.
+    Post-DPGS-approval member-change task (this revision) — also the
+    endpoint for removing a member WITHOUT replacement from an
+    already-`dpgs_approved` committee, which restarts the approval chain at
+    HOD approval (see `_recompute_committee_member_stage` below: the
+    remaining members are all still `accepted is True` from before, so the
+    recompute lands directly on `hod_pending`, with no acceptance step
+    needed since nothing new was added)."""
     c = await db.get(AdvisoryCommittee, committee_id)
     if not c: raise HTTPException(404, "Committee not found.")
     await _authorize_manage_members(c, user, db)
@@ -723,6 +835,8 @@ async def remove_member(
     await _assert_no_external_examiner_under_approval(c.student_id, db, "remove a committee member", "the committee can be changed")
     await _assert_no_thesis_under_approval(c.student_id, db, "remove a committee member", "the committee can be changed")
     await _assert_no_progress_report_under_approval(c.student_id, db, "remove a committee member", "the committee can be changed")
+    if c.status not in _MEMBER_MODIFIABLE_STATUSES:
+        raise HTTPException(400, "Members can only be removed while the committee is in member-selection stage, awaiting HOD approval, after a member decline, or after DPGS final approval (which reopens the approval chain).")
     m = await db.get(CommitteeMember, member_id)
     if not m or m.committee_id != committee_id or m.role == "major_advisor":
         raise HTTPException(404, "Member not found.")
@@ -732,10 +846,7 @@ async def remove_member(
     remaining = await db.execute(select(CommitteeMember).where(
         CommitteeMember.committee_id == committee_id, CommitteeMember.role != "major_advisor",
     ))
-    if remaining.scalars().first():
-        c.status = "members_pending"
-    else:
-        c.status = "member_selection"
+    c.status = _recompute_committee_member_stage(remaining.scalars().all())
     c.revert_remark = None; c.reverted_at = None
     await db.commit()
 
@@ -818,8 +929,12 @@ async def incharge_committee_approval(
     user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.INCHARGE_ACADEMIC_CELL)),
 ):
     """Global role — no department match (Section 25). Approval only, never
-    a signature (Advisory Committee has no downloadable document at all,
-    Section 24) — no separate signing mechanism is introduced."""
+    a signature — no separate signing/OTP mechanism is introduced (unlike
+    Course Registration/PPW's DPGS stage). Advisory Committee document task
+    (this revision): the committee now HAS a downloadable document once
+    `dpgs_approved` (see `get_committee_document` below), but this stage
+    itself still records no approver identity — the document reports the
+    workflow's recorded status, nothing new is persisted here."""
     c = await db.get(AdvisoryCommittee, committee_id)
     if not c: raise HTTPException(404, "Committee not found.")
     if c.status != "incharge_pending":
@@ -850,10 +965,13 @@ async def dpgs_committee_approval(
     committee_id: UUID, body: HodApprovalIn, db: AsyncSession = Depends(get_db),
     user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.DPGS)),
 ):
-    """Final approval — Advisory Committee has no downloadable/signable
-    document (Section 24), so unlike Course Registration/PPW's DPGS stage,
-    NO signature/approver-identity field is added here; this is a plain
-    approval-state transition, same shape as every other committee stage."""
+    """Final approval. Unlike Course Registration/PPW's DPGS stage, NO
+    signature/approver-identity field is added here; this is a plain
+    approval-state transition, same shape as every other committee stage.
+    Advisory Committee document task (this revision): reaching
+    `dpgs_approved` is what makes `GET /committees/{id}/document` start
+    serving the official document (see below) — a read-only consequence of
+    this status, not a new persisted field on this model."""
     c = await db.get(AdvisoryCommittee, committee_id)
     if not c: raise HTTPException(404, "Committee not found.")
     if c.status != "dpgs_pending":
@@ -871,6 +989,110 @@ async def dpgs_committee_approval(
     c.revert_remark = body.remark; c.reverted_at = datetime.now(timezone.utc)
     await db.commit()
     return {"message": "Committee reverted to HOD.", "stage": c.status}
+
+
+# ── Official Advisory Committee document (this revision) ────────────────────────
+# AVFU-confirmed requirement: once DPGS gives final approval, the system must
+# generate an official Advisory Committee document and make it downloadable
+# by the associated student. Reuses the exact PPW architecture (on-demand
+# Jinja2 -> Playwright/Chromium render, same `render_ppw_pdf` utility, same
+# Content-Disposition pattern) — no new PDF library, no new storage system.
+#
+# On-demand, never frozen/stored (deliberate, not a shortcut): `remove_member`
+# above has NO `c.status` gate — the committee's own accepted Major Advisor can
+# remove a member at ANY stage, including after `dpgs_approved`, and doing so
+# always resets `c.status` to `members_pending`/`member_selection` as a side
+# effect of the existing code (see `remove_member`). Re-checking
+# `c.status == "dpgs_approved"` on every request therefore already guarantees
+# the document is refused the instant the approved composition changes — no
+# separate frozen-copy/invalidation mechanism is needed to keep the document
+# honest, unlike Synopsis's frozen-PDF pattern (which exists because Synopsis
+# documents are merged with a separately-uploaded file, a different problem).
+
+_TEMPLATES_DIR = Path(__file__).resolve().parents[3] / "templates"
+_committee_jinja_env = None
+
+
+def _render_committee_document_html(context: dict) -> str:
+    """Renders the Advisory Committee document template. Jinja2 environment is
+    created lazily and cached at module level, same pattern as ppw.py."""
+    global _committee_jinja_env
+    if _committee_jinja_env is None:
+        from jinja2 import Environment, FileSystemLoader, select_autoescape
+        _committee_jinja_env = Environment(
+            loader=FileSystemLoader(str(_TEMPLATES_DIR)),
+            autoescape=select_autoescape(["html"]),
+        )
+    template = _committee_jinja_env.get_template("advisory_committee_document.html")
+    return template.render(**context)
+
+
+async def _build_committee_document_context(c: AdvisoryCommittee, db: AsyncSession) -> dict:
+    data = await _committee_dict(c, db)
+    # Major Advisor first, other members in their existing order — the
+    # `members` relationship has no `order_by`, so this is made explicit here
+    # rather than relying on incidental DB return order (sample's own layout
+    # always lists the Major Advisor first).
+    data["members"].sort(key=lambda m: 0 if m["role"] == "major_advisor" else 1)
+    for m in data["members"]:
+        m["role_label"] = _COMMITTEE_DOCUMENT_ROLE_LABELS.get(m["role"], m["role"].replace("_", " ").title())
+    major_advisor = next((m for m in data["members"] if m["role"] == "major_advisor"), None)
+
+    from app.utils.pdf import get_logo_data_uri
+    return {
+        "committee": data,
+        "program_level_label": _PROGRAM_LEVEL_DOCUMENT_LABELS.get(data["program_level"] or "", None),
+        "major_advisor_name": major_advisor["faculty_name"] if major_advisor else None,
+        "logo_data_uri": get_logo_data_uri(),
+        "generated_at": datetime.now(timezone.utc),
+    }
+
+
+@router.get("/committees/{committee_id}/document")
+async def get_committee_document(
+    committee_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user),
+):
+    """Official Advisory Committee document as a PDF — reuses `_authorize_committee_view`
+    unchanged (the same viewer rules as GET /committees/student/{id}: a student
+    sees only their own committee, HOD only their own department, Faculty only
+    a committee they belong to, Super Admin/Incharge Academic Cell/DPGS see
+    all). Only ever served once the committee has reached DPGS final
+    approval — every other stage (pending, reverted) is refused with 400, so
+    no partial/unapproved composition is ever exposed as an official document."""
+    result = await db.execute(
+        select(AdvisoryCommittee).options(*_COMMITTEE_LOAD_OPTIONS).where(AdvisoryCommittee.id == committee_id)
+    )
+    c = result.scalar_one_or_none()
+    if not c:
+        raise HTTPException(404, "Committee not found.")
+    await _authorize_committee_view(c, user, db)
+    if c.status != "dpgs_approved":
+        raise HTTPException(400, "The Advisory Committee document is only available after DPGS final approval.")
+
+    context = await _build_committee_document_context(c, db)
+    html = _render_committee_document_html(context)
+
+    from starlette.concurrency import run_in_threadpool
+    from app.utils.pdf import render_ppw_pdf, ChromiumUnavailable, ChromiumRenderFailed
+    try:
+        pdf_bytes = await run_in_threadpool(render_ppw_pdf, html)
+    except ChromiumUnavailable as exc:
+        logger.error("Advisory Committee document generation unavailable (committee_id=%s): %s", committee_id, exc)
+        raise HTTPException(503, "PDF generation service is currently unavailable.")
+    except ChromiumRenderFailed as exc:
+        logger.error("Advisory Committee document render failed (committee_id=%s): %s", committee_id, exc)
+        raise HTTPException(422, "Unable to generate Advisory Committee document.")
+
+    roll_or_id = (c.student.student_roll or str(c.student_id)) if c.student else str(c.student_id)
+    safe_roll = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in roll_or_id)
+    filename = f"Advisory-Committee-{safe_roll}.pdf"
+    encoded_name = urllib.parse.quote(filename, safe="")
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"},
+    )
 
 
 # ── Listing / detail / lock (largely unchanged) ─────────────────────────────────
@@ -944,15 +1166,18 @@ async def get_advisor_capacity(faculty_id: UUID, db: AsyncSession = Depends(get_
     return {"faculty_id": str(faculty_id), "capacity": capacity, "current": current, "available": max(capacity - current, 0)}
 
 
-@router.patch("/committees/{committee_id}/lock")
-async def lock_committee(
-    committee_id: UUID, db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.SUPER_ADMIN)),
-):
-    c = await db.get(AdvisoryCommittee, committee_id)
-    if not c: raise HTTPException(404, "Committee not found.")
-    if c.status != "hod_approved":
-        raise HTTPException(400, "Only an HOD-approved committee can be locked.")
-    c.is_locked = True
-    await db.commit()
-    return {"message": "Committee locked."}
+# `PATCH /committees/{id}/lock` was REMOVED, this revision (post-DPGS-approval
+# committee-change task). It required `c.status == "hod_approved"`, a status
+# value no endpoint has set since the Incharge Academic Cell/DPGS task
+# extended the chain past HOD (HOD approval now advances to
+# `incharge_pending`, never `hod_approved` — confirmed by inspection: no
+# `c.status = "hod_approved"` assignment exists anywhere in this file). The
+# endpoint was therefore already permanently unreachable dead code — no test
+# and no frontend code ever called it (confirmed by repository-wide search) —
+# and even if it had been reachable, a PERMANENT lock would now directly
+# contradict the newly confirmed business rule that a committee remains
+# editable after `dpgs_approved`. `AdvisoryCommittee.is_locked` (the column)
+# was deliberately LEFT IN PLACE rather than dropped via a migration — see
+# the model's own field comment — since removing a column is a materially
+# higher-risk, higher-ceremony action than leaving an already-inert one, and
+# no functional requirement of this task needed the schema changed.

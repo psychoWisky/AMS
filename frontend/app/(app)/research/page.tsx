@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { useRole, useUser } from "@/stores/auth.store";
 import { toast } from "sonner";
-import { FlaskConical, Plus, Loader2, Eye, X, CheckCircle2, XCircle, UserPlus, Trash2 } from "lucide-react";
+import { FlaskConical, Plus, Loader2, Eye, X, CheckCircle2, XCircle, UserPlus, Trash2, Download } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { committeeRoleLabel, COMMITTEE_MEMBER_ROLES, COMMITTEE_EXTERNAL_ROLES } from "@/lib/utils";
 
@@ -42,6 +42,15 @@ interface CreditDetails {
   courses: { offering_id: string; course_number: string; course_title: string; course_credit: string; semester_name: string | null; academic_year: string | null; enrollment_status: string }[];
   credit_summary: { total_credit_taken: number };
 }
+
+// Post-DPGS-approval member/Major-Advisor change task (this revision) —
+// mirrors the backend's `_MEMBER_MODIFIABLE_STATUSES` (research.py) exactly:
+// a committee's membership may be changed in member-selection stage, while
+// awaiting a member response, awaiting HOD approval, after DPGS final
+// approval (which reopens the chain), or while corrected after a member
+// decline (reverted). The backend independently re-enforces this regardless
+// of what this list shows — this is UI convenience only.
+const MEMBER_MODIFIABLE_STAGES = ["member_selection", "members_pending", "hod_pending", "dpgs_approved", "hod_approved", "reverted"];
 
 const STAGE_STYLE: Record<string, string> = {
   major_advisor_pending: "bg-amber-100 text-amber-700",
@@ -206,6 +215,7 @@ function StaffCommitteeView() {
   const [showPropose, setShowPropose] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showAddMember, setShowAddMember] = useState(false);
+  const [showChangeMajorAdvisor, setShowChangeMajorAdvisor] = useState(false);
   // Research Area confirmed NOT part of the active Advisory Committee
   // creation workflow (PPW title-sync task) — removed from this form. The
   // backend's `research_area` column/field are untouched for backward
@@ -255,8 +265,9 @@ function StaffCommitteeView() {
     enabled: canPropose && !!proposeForm.student_id,
   });
 
-  // Same picker, reused for the post-decline HOD reassignment panel — keyed by
-  // the existing committee's student_id (there is still no accepted Major
+  // Same picker, reused for both the post-decline HOD reassignment panel AND
+  // the new post-DPGS-approval "Change Major Advisor" action — keyed by the
+  // existing committee's student_id (there is still no accepted Major
   // Advisor at this point, so the committee-scoped eligible-faculty endpoint
   // below cannot be used here either).
   const {
@@ -264,7 +275,7 @@ function StaffCommitteeView() {
   } = useQuery<FacultyCandidate[]>({
     queryKey: ["ams-eligible-major-advisors", selected?.student_id],
     queryFn: async () => (await api.get("/research/committees/eligible-major-advisors", { params: { student_id: selected?.student_id } })).data,
-    enabled: !!selected?.student_id && !!selected?.can_propose_major_advisor && selected.stage === "reverted",
+    enabled: !!selected?.student_id && !!selected?.can_propose_major_advisor && (selected.stage === "reverted" || selected.stage === "dpgs_approved"),
   });
 
   // Add Member modal faculty picker — role-aware (server filters by
@@ -323,7 +334,7 @@ function StaffCommitteeView() {
   const reassignMajorAdvisor = useMutation({
     mutationFn: ({ id, major_advisor_id }: { id: string; major_advisor_id: string }) =>
       api.post(`/research/committees/${id}/reassign-major-advisor`, { major_advisor_id }),
-    onSuccess: () => { toast.success("New Major Advisor proposed."); invalidateAll(); },
+    onSuccess: () => { toast.success("New Major Advisor proposed."); setShowChangeMajorAdvisor(false); invalidateAll(); },
     onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed to reassign."),
   });
 
@@ -366,9 +377,12 @@ function StaffCommitteeView() {
   });
 
   // Incharge Academic Cell / DPGS task — both are plain approval/revert
-  // actions (Section 24: Advisory Committee has no downloadable document,
-  // so neither is ever a signature). Revert returns to HOD, not the
-  // student (Section 27) — enforced server-side; this UI only reflects it.
+  // actions, never a signature (no OTP/signing mechanism exists for either
+  // stage). Revert returns to HOD, not the student (Section 27) — enforced
+  // server-side; this UI only reflects it. Advisory Committee document task
+  // (this revision): reaching dpgs_approved now also unlocks the download
+  // action below (downloadCommitteeDocument) — the document is served
+  // on-demand from the committee's current recorded state.
   const inchargeApproval = useMutation({
     mutationFn: ({ id, approved, remark }: { id: string; approved: boolean; remark?: string }) =>
       api.patch(`/research/committees/${id}/incharge-approval`, { approved, remark }),
@@ -381,6 +395,39 @@ function StaffCommitteeView() {
       api.patch(`/research/committees/${id}/dpgs-approval`, { approved, remark }),
     onSuccess: (_, { approved }) => { toast.success(approved ? "Committee given final approval." : "Committee reverted to HOD."); invalidateAll(); },
     onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed to record decision."),
+  });
+
+  // Advisory Committee document task — downloads the official, server-rendered
+  // document (same Playwright/Chromium pipeline and blob-download pattern as
+  // PPW's downloadDocument above). Only ever offered once stage === "dpgs_approved"
+  // (see the render block below); the backend independently re-checks this on
+  // every request regardless of what the UI shows.
+  const downloadCommitteeDocument = useMutation({
+    mutationFn: async () => {
+      if (!selected) return;
+      const res = await api.get(`/research/committees/${selected.id}/document`, { responseType: "blob" });
+      const blobUrl = window.URL.createObjectURL(res.data);
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      const safeRoll = (selected.student_roll ?? selected.id).replace(/[^a-zA-Z0-9_-]/g, "-");
+      link.download = `Advisory-Committee-${safeRoll}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(blobUrl);
+    },
+    onSuccess: () => toast.success("Advisory Committee document downloaded."),
+    onError: async (e: unknown) => {
+      const err = e as { response?: { data?: Blob; status?: number } };
+      let message = "Failed to generate the Advisory Committee document.";
+      if (err.response?.data instanceof Blob) {
+        try {
+          const parsed = JSON.parse(await err.response.data.text());
+          if (parsed?.detail) message = parsed.detail;
+        } catch { /* non-JSON blob body — keep generic message */ }
+      }
+      toast.error(message);
+    },
   });
 
   const myMajorAdvisorRow = selected?.members.find((m) => m.role === "major_advisor" && m.faculty_id === currentUser?.id);
@@ -423,7 +470,7 @@ function StaffCommitteeView() {
                   <td className="px-4 py-3 text-gray-700">{c.college_name ?? "—"}</td>
                   <td className="px-4 py-3"><StatusBadge stage={c.stage} label={c.status_label} /></td>
                   <td className="px-4 py-3">
-                    <button onClick={() => setSelectedId(c.student_id)}
+                    <button onClick={() => { setSelectedId(c.student_id); setShowChangeMajorAdvisor(false); }}
                       className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-semibold text-[#0D6E6E] border border-[#0D6E6E] rounded-lg hover:bg-[#E6F4F4]">
                       <Eye size={13} /> View Details
                     </button>
@@ -555,7 +602,7 @@ function StaffCommitteeView() {
                   <div>
                     <div className="flex items-center justify-between mb-2">
                       <h4 className="text-base font-bold text-gray-900">Advisory Members</h4>
-                      {selected.can_manage_members && (selected.stage === "member_selection" || selected.stage === "members_pending") && (
+                      {selected.can_manage_members && MEMBER_MODIFIABLE_STAGES.includes(selected.stage) && (
                         <button onClick={() => setShowAddMember(true)}
                           className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-semibold text-[#0D6E6E] border border-[#0D6E6E] rounded-lg hover:bg-[#E6F4F4]">
                           <UserPlus size={14} /> Add Member
@@ -568,7 +615,7 @@ function StaffCommitteeView() {
                       ) : (
                         <table className="w-full text-sm">
                           <thead className="bg-gray-50 border-b border-gray-200">
-                            <tr>{["Name", "Designation", "Department / Institute", "Advisory Role", "Status", ...(selected.can_manage_members ? ["Action"] : [])].map((h) => (
+                            <tr>{["Name", "Designation", "Department / Institute", "Advisory Role", "Status", ...(selected.can_manage_members && MEMBER_MODIFIABLE_STAGES.includes(selected.stage) ? ["Action"] : [])].map((h) => (
                               <th key={h} className="text-left px-4 py-2.5 font-semibold text-gray-700">{h}</th>
                             ))}</tr>
                           </thead>
@@ -597,7 +644,7 @@ function StaffCommitteeView() {
                                     )}
                                     {m.accepted === null && !isMine && <span className="text-amber-600 text-sm font-semibold">Pending</span>}
                                   </td>
-                                  {selected.can_manage_members && (
+                                  {selected.can_manage_members && MEMBER_MODIFIABLE_STAGES.includes(selected.stage) && (
                                     <td className="px-4 py-2.5">
                                       {m.role !== "major_advisor" && (
                                         <button onClick={() => removeMember.mutate(m.id)} className="p-1 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded"><Trash2 size={14} /></button>
@@ -660,8 +707,9 @@ function StaffCommitteeView() {
                   )}
 
                   {/* DPGS stage — final approval, still never a signature
-                      (Advisory Committee has no downloadable document at
-                      all, Section 24 — unlike Course Registration/PPW). */}
+                      (no OTP/signing mechanism was added, unlike Course
+                      Registration/PPW's DPGS stage). Reaching dpgs_approved
+                      now unlocks the official document download below. */}
                   {selected.stage === "dpgs_pending" && isDpgsLike && (
                     <div className="bg-teal-50 border border-teal-200 rounded-xl p-4">
                       <p className="text-sm font-semibold text-teal-900 mb-3">Approved by Incharge Academic Cell. Awaiting DPGS final approval.</p>
@@ -687,8 +735,36 @@ function StaffCommitteeView() {
                   )}
 
                   {selected.stage === "dpgs_approved" && (
-                    <div className="bg-green-50 border border-green-200 rounded-xl p-4 text-sm font-semibold text-green-800">
-                      Advisory Committee given final approval by DPGS.
+                    <div className="bg-green-50 border border-green-200 rounded-xl p-4">
+                      <p className="text-sm font-semibold text-green-800 mb-3">Advisory Committee given final approval by DPGS.</p>
+                      <div className="flex flex-wrap gap-3">
+                        <button onClick={() => downloadCommitteeDocument.mutate()} disabled={downloadCommitteeDocument.isPending}
+                          className="flex items-center gap-1.5 px-4 py-2 bg-green-600 text-white text-sm font-semibold rounded-lg hover:bg-green-700 disabled:opacity-60">
+                          {downloadCommitteeDocument.isPending ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+                          {downloadCommitteeDocument.isPending ? "Generating…" : "Download Advisory Committee Order"}
+                        </button>
+                        {/* Post-DPGS-approval Major Advisor change task (this revision) —
+                            an authorized HOD may still change the Major Advisor here; doing
+                            so moves the committee off dpgs_approved immediately, which also
+                            hides the download action above until the revised committee is
+                            re-approved (the backend independently re-enforces this). */}
+                        {selected.can_propose_major_advisor && (
+                          <button onClick={() => setShowChangeMajorAdvisor((v) => !v)}
+                            className="flex items-center gap-1.5 px-4 py-2 border border-green-700 text-green-800 text-sm font-semibold rounded-lg hover:bg-green-100">
+                            <UserPlus size={14} /> Change Major Advisor
+                          </button>
+                        )}
+                      </div>
+                      {selected.can_propose_major_advisor && showChangeMajorAdvisor && (
+                        <div className="mt-3">
+                          <ReassignPanel
+                            facultyOptions={reassignCandidates}
+                            onSubmit={(major_advisor_id) => reassignMajorAdvisor.mutate({ id: selected.id, major_advisor_id })}
+                            pending={reassignMajorAdvisor.isPending}
+                            message="Propose a new Major Advisor. This reopens the approval chain — HOD, Incharge Academic Cell and DPGS must all re-approve before the document is downloadable again."
+                          />
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -812,11 +888,11 @@ function StaffCommitteeView() {
   );
 }
 
-function ReassignPanel({ facultyOptions, onSubmit, pending }: { facultyOptions: FacultyCandidate[]; onSubmit: (facultyId: string) => void; pending: boolean }) {
+function ReassignPanel({ facultyOptions, onSubmit, pending, message }: { facultyOptions: FacultyCandidate[]; onSubmit: (facultyId: string) => void; pending: boolean; message?: string }) {
   const [id, setId] = useState("");
   return (
     <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
-      <p className="text-sm font-semibold text-blue-900 mb-3">The proposed Major Advisor declined. Propose a different Major Advisor.</p>
+      <p className="text-sm font-semibold text-blue-900 mb-3">{message ?? "The proposed Major Advisor declined. Propose a different Major Advisor."}</p>
       <div className="flex gap-2">
         <select value={id} onChange={(e) => setId(e.target.value)}
           className="flex-1 border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
