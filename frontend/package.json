@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "check:ppw-address": "node scripts/check-ppw-preview-address.mjs"
+    "check:ppw-address": "node scripts/check-ppw-preview-address.mjs",
+    "check:research-student-download": "node scripts/check-research-student-download.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.100.14",

@@ -100,6 +100,41 @@ function StudentCommitteeView() {
     retry: false,
   });
 
+  // Bug fix (this revision) — the download action existed only in
+  // StaffCommitteeView below; students were routed to this SEPARATE
+  // component and never saw it at all, regardless of committee stage. Same
+  // endpoint, same blob-download pattern, same dpgs_approved gate as the
+  // staff view's downloadCommitteeDocument — the backend independently
+  // re-checks this on every request (and that the committee belongs to the
+  // caller) regardless of what this condition shows.
+  const downloadDocument = useMutation({
+    mutationFn: async () => {
+      if (!committee) return;
+      const res = await api.get(`/research/committees/${committee.id}/document`, { responseType: "blob" });
+      const blobUrl = window.URL.createObjectURL(res.data);
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      const safeRoll = (committee.student_roll ?? committee.id).replace(/[^a-zA-Z0-9_-]/g, "-");
+      link.download = `Advisory-Committee-${safeRoll}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(blobUrl);
+    },
+    onSuccess: () => toast.success("Advisory Committee document downloaded."),
+    onError: async (e: unknown) => {
+      const err = e as { response?: { data?: Blob; status?: number } };
+      let message = "Failed to generate the Advisory Committee document.";
+      if (err.response?.data instanceof Blob) {
+        try {
+          const parsed = JSON.parse(await err.response.data.text());
+          if (parsed?.detail) message = parsed.detail;
+        } catch { /* non-JSON blob body — keep generic message */ }
+      }
+      toast.error(message);
+    },
+  });
+
   if (isLoading) return <div className="flex items-center justify-center py-24 text-gray-600"><Loader2 className="animate-spin mr-2" />Loading…</div>;
 
   return (
@@ -126,6 +161,15 @@ function StudentCommitteeView() {
               <div><p className="text-gray-500">Student Session</p><p className="font-semibold">{committee.student_session ?? "—"}</p></div>
             </div>
             {committee.stage === "reverted" && <div className="mt-3"><RevertNotice remark={committee.revert_remark} /></div>}
+            {committee.stage === "dpgs_approved" && (
+              <div className="mt-3">
+                <button onClick={() => downloadDocument.mutate()} disabled={downloadDocument.isPending}
+                  className="flex items-center gap-1.5 px-4 py-2 bg-green-600 text-white text-sm font-semibold rounded-lg hover:bg-green-700 disabled:opacity-60">
+                  {downloadDocument.isPending ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+                  {downloadDocument.isPending ? "Generating…" : "Download Advisory Committee Order"}
+                </button>
+              </div>
+            )}
           </div>
 
           <div className="bg-white rounded-2xl border border-gray-200 p-5">
