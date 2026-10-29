@@ -470,7 +470,15 @@ async def _committee_dict(c: AdvisoryCommittee, db: AsyncSession) -> dict:
         "program_name": program.name if program else None,
         "program_level": program.level if program else None,
         "department_name": department.name if department else None,
-        "college_name": department.stream if department else None,  # BUSINESS_LOGIC.md Open Question 28 — "College" not confirmed mapped; department.stream used as the closest existing analogue, flagged not asserted equivalent
+        # College-name bug fix (this revision) — was `department.stream`
+        # (a short classification tag, e.g. "veterinary" -> displayed as
+        # "Veterinary"), never the actual configured College name; now reads
+        # `student.college.name` instead, the SAME canonical source every
+        # other document/profile context-builder in this codebase already
+        # uses (comprehensive_exam.py, synopsis.py, thesis.py,
+        # external_examiner.py, orientation.py, auth.py — confirmed by
+        # repository-wide search, not a newly invented mapping).
+        "college_name": student.college.name if student and student.college else None,
         "research_title": c.research_title, "research_area": c.research_area,
         "stage": c.status,
         "status_label": _STAGE_LABELS.get(c.status, c.status),
@@ -507,6 +515,11 @@ _COMMITTEE_LOAD_OPTIONS = (
     # Programme<->Department many-to-many redesign — student.department is
     # loaded directly (User.department_id), not via student.program.department.
     selectinload(AdvisoryCommittee.student).selectinload(User.department),
+    # College-name bug fix (this revision) — `_committee_dict` now reads the
+    # student's actual `College.name` (via `User.college_id`) instead of
+    # `Department.stream`; must be eager-loaded or accessing it lazily in
+    # this async session raises MissingGreenlet.
+    selectinload(AdvisoryCommittee.student).selectinload(User.college),
     selectinload(AdvisoryCommittee.members).selectinload(CommitteeMember.faculty).selectinload(User.department),
 )
 

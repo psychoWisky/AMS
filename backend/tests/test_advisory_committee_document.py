@@ -36,7 +36,7 @@ from app.core.security import create_access_token
 from app.db.base import AsyncSessionLocal
 from app.main import app
 from app.models.research import AdvisoryCommittee, CommitteeMember
-from app.models.user import Department, RefreshToken, User, UserRole, UserRoleAssignment
+from app.models.user import College, Department, RefreshToken, User, UserRole, UserRoleAssignment
 
 _TAG = uuid.uuid4().hex[:6]
 _PFX = "zztest_acd_"
@@ -70,11 +70,12 @@ async def _session(user_id) -> str:
     return create_access_token(str(user_id), {"sid": str(rt)})
 
 
-async def _mk_user(key, role, dept, *, designation=None, roll=None) -> None:
+async def _mk_user(key, role, dept, *, designation=None, roll=None, college=None) -> None:
     async with AsyncSessionLocal() as db:
         u = User(
             email=f"{_PFX}{key}_{_TAG}@avfu.ac.in", first_name="ZZTEST", last_name=f"ACD{key.upper()}",
             designation=designation, role=role, department_id=dept.id if dept else None,
+            college_id=college.id if college else None,
             student_roll=roll, mobile="9876543210", gender="Male", is_active=True, is_verified=True,
         )
         db.add(u)
@@ -133,9 +134,16 @@ async def _setup() -> None:
         depts = (await db.execute(select(Department).where(Department.code != "LPM").order_by(Department.code).limit(2))).scalars().all()
         assert len(depts) >= 2, "need at least 2 existing Department rows in the dev DB"
         S["D1"], S["D2"] = depts
+        # College-name bug fix regression — need at least 2 real, distinct
+        # College rows (Super Admin master data) to prove the PDF shows the
+        # actual CONFIGURED college per student, not a shared/hardcoded value.
+        colleges = (await db.execute(select(College).order_by(College.code))).scalars().all()
+        assert len(colleges) >= 2, "need at least 2 existing College rows in the dev DB"
+        S["COLLEGE_A"], S["COLLEGE_B"] = colleges[0], colleges[1]
         await db.commit()
 
     d1, d2 = S["D1"], S["D2"]
+    college_a, college_b = S["COLLEGE_A"], S["COLLEGE_B"]
     await _mk_user("hod", UserRole.HOD, d1, designation="Professor")
     await _mk_user("ma", UserRole.FACULTY, d1, designation="Professor")
     # member_minor deliberately has NO designation set — exercises the
@@ -149,6 +157,11 @@ async def _setup() -> None:
     await _mk_user("doc1", UserRole.STUDENT, d1, roll=f"ZZACD-doc1-{_TAG}")
     await _mk_user("doc2", UserRole.STUDENT, d1, roll=f"ZZACD-doc2-{_TAG}")
     await _mk_user("doc3", UserRole.STUDENT, d1, roll=f"ZZACD-doc3-{_TAG}")
+    # College-name bug fix regression — two students, each assigned to a
+    # DIFFERENT real College, to prove the PDF reads each student's own
+    # configured college rather than a shared/hardcoded string.
+    await _mk_user("college_stu_a", UserRole.STUDENT, d1, roll=f"ZZACD-cola-{_TAG}", college=college_a)
+    await _mk_user("college_stu_b", UserRole.STUDENT, d1, roll=f"ZZACD-colb-{_TAG}", college=college_b)
 
 
 async def _teardown() -> None:
@@ -319,6 +332,39 @@ async def t_missing_optional_designation_does_not_break_generation():
         "sanity check only — real assertion is that generation above did not raise/500"
 
 
+# ── College-name bug fix regression ──────────────────────────────────────────
+# The PDF previously showed `Department.stream` (e.g. "Veterinary") instead of
+# the actual Super-Admin-configured `College.name` (e.g. "College of
+# Veterinary Science"). Two students, each on a DIFFERENT real College, prove
+# the fix reads each student's own configured college — not a shared,
+# hardcoded, or merely-less-wrong string.
+
+async def t_pdf_shows_the_full_configured_college_name_not_the_department_stream():
+    college_a, college_b = S["COLLEGE_A"], S["COLLEGE_B"]
+    cid_a = await _mk_fixture_committee("college_stu_a", "dpgs_approved")
+    cid_b = await _mk_fixture_committee("college_stu_b", "dpgs_approved")
+
+    r_a = await _call("GET", f"/research/committees/{cid_a}/document", TOK["college_stu_a"])
+    assert r_a.status_code == 200, r_a.text
+    text_a = _extract_pdf_text(r_a.content)
+
+    r_b = await _call("GET", f"/research/committees/{cid_b}/document", TOK["college_stu_b"])
+    assert r_b.status_code == 200, r_b.text
+    text_b = _extract_pdf_text(r_b.content)
+
+    assert college_a.name in text_a, f"PDF must show the full configured College name {college_a.name!r}, not a shortened value"
+    assert college_b.name in text_b, f"PDF must show the full configured College name {college_b.name!r}, not a shortened value"
+    # Not the same college, and not swapped/shared between the two students.
+    assert college_b.name not in text_a, "student A's PDF must not show student B's college"
+    assert college_a.name not in text_b, "student B's PDF must not show student A's college"
+    # The historical bug value (Department.stream, e.g. "Veterinary") must
+    # never appear ALONE where the full college name belongs — the full name
+    # itself may legitimately contain that word ("College of Veterinary
+    # Science"), so this checks the WRONG short-only rendering is gone by
+    # confirming the actual full string is present (asserted above) rather
+    # than asserting the word's absence, which would be a false positive.
+
+
 async def main() -> None:
     await _setup()
     try:
@@ -340,6 +386,7 @@ async def main() -> None:
             "11c: Faculty not on the committee cannot download": t_faculty_not_on_committee_cannot_download,
             "11d: unknown committee id is 404": t_unknown_committee_id_is_404,
             "12: missing optional data does not break generation": t_missing_optional_designation_does_not_break_generation,
+            "College-name fix: PDF shows the full configured College name per student, not Department.stream": t_pdf_shows_the_full_configured_college_name_not_the_department_stream,
         }
         for name, fn in cases.items():
             await _run(name, fn)
