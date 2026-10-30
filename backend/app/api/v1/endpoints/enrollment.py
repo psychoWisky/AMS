@@ -1455,6 +1455,7 @@ async def offering_enrollments(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_roles(
         UserRole.SUPER_ADMIN, UserRole.HOD, UserRole.FACULTY,
+        UserRole.DPGS, UserRole.INCHARGE_ACADEMIC_CELL,
     )),
 ):
     # Research Course task: a FACULTY member with no OfferingFaculty row for
@@ -1466,17 +1467,34 @@ async def offering_enrollments(
     # offering-wide visibility is unchanged for SUPER_ADMIN/HOD/an actually-
     # assigned OfferingFaculty member.
     restrict_to_own_students = False
-    try:
-        await _authorize_offering_management(offering_id, user, db)
-    except HTTPException:
-        if user.active_role != UserRole.FACULTY:
-            raise
-        research_link = await db.execute(select(StudentEnrollment.id).where(
-            StudentEnrollment.offering_id == offering_id, StudentEnrollment.instructor_id == user.id,
-        ).limit(1))
-        if not research_link.scalar_one_or_none():
-            raise
-        restrict_to_own_students = True
+    # Course Students task (this revision) — DPGS/Incharge Academic Cell get a
+    # SEPARATE, read-only, global (no department check) branch, deliberately
+    # NEVER routed through `_authorize_offering_management`. That function is
+    # also used by the WRITE endpoints `PATCH /enrollment/{id}` and
+    # `POST /offering/{id}/bulk-approve` — adding either role to it would
+    # silently grant them individual-enrollment approve/revert/bulk-approve
+    # power, which is explicitly out of scope for this feature. This branch
+    # only ever reads; it never authorizes a mutation. Mirrors the same
+    # 404-for-nonexistent-offering convention `_authorize_offering_management`
+    # itself uses, independently.
+    force_approved_only = False
+    if user.active_role in (UserRole.DPGS, UserRole.INCHARGE_ACADEMIC_CELL):
+        offering = await db.get(CourseOffering, offering_id)
+        if not offering:
+            raise HTTPException(404, "Offering not found.")
+        force_approved_only = True
+    else:
+        try:
+            await _authorize_offering_management(offering_id, user, db)
+        except HTTPException:
+            if user.active_role != UserRole.FACULTY:
+                raise
+            research_link = await db.execute(select(StudentEnrollment.id).where(
+                StudentEnrollment.offering_id == offering_id, StudentEnrollment.instructor_id == user.id,
+            ).limit(1))
+            if not research_link.scalar_one_or_none():
+                raise
+            restrict_to_own_students = True
     # MissingGreenlet fix (this revision): `_enroll_dict()` below reads
     # `e.withdrawal_requests` for every row — that relationship was never
     # eager-loaded here, so accessing it triggered an implicit lazy load,
@@ -1501,7 +1519,15 @@ async def offering_enrollments(
         # MissingGreenlet-avoidance reasoning as above.
         selectinload(StudentEnrollment.offering).selectinload(CourseOffering.department),
     ).where(StudentEnrollment.offering_id == offering_id)
-    if status: q = q.where(StudentEnrollment.status == status)
+    # Course Students task (this revision) — for DPGS/Incharge Academic Cell
+    # this endpoint IS the "enrolled students" roster, never a general
+    # multi-status enrollment list (unlike its other callers — e.g.
+    # course-request/page.tsx intentionally requests every status). Hard-pin
+    # to "approved" server-side regardless of any client-supplied `status`,
+    # so the roster can never be widened to pending/withdrawn/rejected rows
+    # by a crafted or mistaken query parameter.
+    effective_status = "approved" if force_approved_only else status
+    if effective_status: q = q.where(StudentEnrollment.status == effective_status)
     if restrict_to_own_students: q = q.where(StudentEnrollment.instructor_id == user.id)
     result = await db.execute(q.order_by(StudentEnrollment.enrolled_at))
     return [_enroll_dict(e) for e in result.scalars().all()]

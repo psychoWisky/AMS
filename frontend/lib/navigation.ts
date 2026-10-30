@@ -27,6 +27,15 @@ export const NAV: NavItem[] = [
   // endpoints and this route are UNCHANGED — Super Admin/HOD still need
   // them for Course Management exactly as before.
   { label: "Courses",         icon: BookOpen,        href: "/courses",      roles: ["super_admin","hod"] },
+  // Course Students task (this revision, BUSINESS_LOGIC.md Section L.5 /
+  // STUDENT_SIDE_IMPLEMENTATION_PLAN.md CR-7) — browse offerings and view
+  // their enrolled-student roster. DPGS/Incharge Academic Cell get global,
+  // cross-college/cross-department read access (backend: `GET /enrollment/
+  // offering/{id}` now authorizes them via a dedicated read-only branch,
+  // never through `_authorize_offering_management`, which still gates every
+  // write endpoint unchanged). HOD keeps its existing department-scoped
+  // access (same `_authorize_offering_management` HOD branch as before).
+  { label: "Course Students", icon: Users,           href: "/course-students", roles: ["super_admin","hod","incharge_academic_cell","dpgs"] },
   // "hod" deliberately excluded here (BUSINESS_LOGIC.md Section N.1) — HOD's
   // course-offering management already lives at Courses -> Offer Course;
   // this page is instructor-assigned "my courses" and does not apply to HOD.
