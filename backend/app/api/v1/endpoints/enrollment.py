@@ -1419,7 +1419,20 @@ async def get_registration_document(
     if not r:
         raise HTTPException(404, "Registration not found.")
     await _authorize_registration_view(r, user, db)
-    if r.stage == "teacher_pending":
+    # Download-restriction task (this revision) — a Student may download the
+    # OFFICIAL PDF only once DPGS has given final approval (`stage ==
+    # "dpgs_approved"`), even though `_authorize_registration_view` above
+    # (unchanged) already lets them VIEW/track the registration at every
+    # stage via GET /registrations/{id} and the on-screen Registration Card
+    # Preview — this endpoint is the one place that must distinguish
+    # "can see it" from "can download the signed-off document." Every other
+    # role (HOD/Major Advisor/Faculty/Incharge Academic Cell/DPGS/Super
+    # Admin) keeps the pre-existing, unchanged `teacher_pending`-only gate —
+    # they may legitimately need to preview the card before approving it.
+    if user.active_role == UserRole.STUDENT:
+        if r.stage != "dpgs_approved":
+            raise HTTPException(400, "The Registration Card is available for download once DPGS gives final approval.")
+    elif r.stage == "teacher_pending":
         raise HTTPException(400, "The Registration Card is available once every selected course has been approved by its Course Teacher.")
 
     context = await _build_registration_card_context(r, db)

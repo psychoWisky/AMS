@@ -5,7 +5,7 @@ import { api } from "@/services/api";
 import { useUser } from "@/stores/auth.store";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { ClipboardCheck, Loader2, CheckSquare, Square, X, Download, FileText } from "lucide-react";
+import { ClipboardCheck, Loader2, CheckSquare, Square, X, Download } from "lucide-react";
 import { CREDIT_TYPE_LABELS, levelLabel } from "@/lib/utils";
 
 interface Calendar { id: string; name: string; academic_year: string; }
@@ -474,16 +474,13 @@ export default function CourseRegistrationPage() {
               {currentRegistration && allApproved && !isLocked && (
                 <div className="mt-4 bg-teal-50 border border-teal-200 rounded-xl p-4">
                   <p className="text-sm font-semibold text-teal-800 mb-3">All selected courses are approved.</p>
+                  {/* Download-restriction task (this revision) — the PDF
+                      download action was REMOVED from this pre-submission
+                      block entirely: at this point the student has not even
+                      submitted the Registration Card yet, let alone reached
+                      DPGS final approval, so no download action belongs
+                      here. Only the submission action remains. */}
                   <div className="flex gap-2">
-                    <button onClick={() => downloadCard.mutate()} disabled={downloadCard.isPending}
-                      className="flex items-center gap-1.5 px-4 py-2 border border-[#0D6E6E] text-[#0D6E6E] rounded-xl text-sm font-semibold hover:bg-[#E6F4F4] disabled:opacity-60">
-                      {/* Registration Card Preview task (this revision): relabeled from
-                          "View Registration Card" — the Registration Card Preview
-                          section below now covers "viewing" the content on-screen;
-                          this button's only job is producing the official PDF file,
-                          matching PPW's own "Download PPW Document" naming. */}
-                      {downloadCard.isPending ? <Loader2 size={14} className="animate-spin" /> : <FileText size={14} />} {downloadCard.isPending ? "Generating…" : "Download PDF"}
-                    </button>
                     <button onClick={() => setConfirmCard(true)} disabled={submitCard.isPending}
                       className="px-4 py-2 bg-[#0D6E6E] text-white rounded-xl text-sm font-bold hover:bg-[#178F8F] disabled:opacity-60">
                       {submitCard.isPending ? "Submitting…" : "Submit Registration Card"}
@@ -495,10 +492,19 @@ export default function CourseRegistrationPage() {
                 <div className="mt-4 bg-blue-50 border border-blue-200 rounded-xl p-4">
                   <p className="text-sm font-semibold text-blue-800 mb-1">Registration Card Submitted</p>
                   <p className="text-sm text-blue-700 mb-3">Status: {currentRegistration?.status_label}. No further edits are possible for this registration.</p>
-                  <button onClick={() => downloadCard.mutate()} disabled={downloadCard.isPending}
-                    className="flex items-center gap-1.5 px-4 py-2 bg-[#0D6E6E] text-white rounded-xl text-sm font-bold hover:bg-[#178F8F] disabled:opacity-60">
-                    {downloadCard.isPending ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />} Download PDF
-                  </button>
+                  {/* Download-restriction task (this revision) — the download
+                      action is now shown ONLY once DPGS has given final
+                      approval; every other locked stage still shows the
+                      status line above (tracking), just without a download
+                      action. The backend independently re-enforces this
+                      regardless of what this condition shows
+                      (enrollment.py's get_registration_document). */}
+                  {currentRegistration?.stage === "dpgs_approved" && (
+                    <button onClick={() => downloadCard.mutate()} disabled={downloadCard.isPending}
+                      className="flex items-center gap-1.5 px-4 py-2 bg-[#0D6E6E] text-white rounded-xl text-sm font-bold hover:bg-[#178F8F] disabled:opacity-60">
+                      {downloadCard.isPending ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />} Download PDF
+                    </button>
+                  )}
                 </div>
               )}
             </div>
