@@ -79,6 +79,21 @@ class CourseRegistration(Base):
     # Card (stage teacher_pending/card_pending -> major_advisor_pending). Null
     # until that happens; never reset afterward (permanent audit marker).
     card_submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Manual discipline-selection task (this revision, AVFU-confirmed) — the
+    # student explicitly searches and selects each Discipline from the
+    # authoritative `Department` records; no longer inferred from selected
+    # courses' classifications (the old `_registration_dict` derivation is
+    # removed — see enrollment.py). Nullable and OPTIONAL: unlike PPW, this
+    # model never had a submission-blocking discipline requirement before
+    # this revision, and none is introduced now — only whichever of these
+    # three the student actually set is validated (existence/active-status)
+    # and shown. Deliberately NOT validated against any selected course's
+    # department — course classification (`StudentEnrollment.classification`,
+    # `app/core/classification.py`) and discipline selection are two
+    # conceptually SEPARATE concerns per this task's explicit instruction.
+    major_department_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_departments.id"))
+    minor_department_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_departments.id"))
+    supporting_department_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_departments.id"))
     created_at: Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -86,6 +101,9 @@ class CourseRegistration(Base):
 
     student: Mapped["User"] = relationship("User", foreign_keys=[student_id])
     dpgs_approver: Mapped["User | None"] = relationship("User", foreign_keys=[dpgs_approved_by])
+    major_department: Mapped["Department | None"] = relationship("Department", foreign_keys=[major_department_id])
+    minor_department: Mapped["Department | None"] = relationship("Department", foreign_keys=[minor_department_id])
+    supporting_department: Mapped["Department | None"] = relationship("Department", foreign_keys=[supporting_department_id])
     items: Mapped[list["StudentEnrollment"]] = relationship("StudentEnrollment", back_populates="registration")
 
 
@@ -182,5 +200,5 @@ class WithdrawalRequest(Base):
     decider: Mapped["User | None"] = relationship("User", foreign_keys=[decided_by])
 
 
-from app.models.user import User  # noqa: E402
+from app.models.user import User, Department  # noqa: E402
 from app.models.course import CourseOffering  # noqa: E402

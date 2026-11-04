@@ -211,20 +211,21 @@ async def t_research_area_not_required_and_still_accepted_if_sent():
 # ── PPW research_title fields required for submission ────────────────────────
 
 async def _fill_and_submit_ppw(student_key: str, ppw_id: uuid.UUID, title: str) -> None:
+    # Manual discipline-selection task (this revision) — `submit_ppw` now
+    # additionally requires the three explicitly-selected discipline ids
+    # (superseding the old course-derived minor_field/supporting_field this
+    # test used to set directly); any real, active Department satisfies the
+    # check (deliberately NOT cross-validated against the student's own
+    # department or selected courses — see ppw.py's PpwIn docstring), so
+    # S["A"] (already used to create every student in this module) is reused
+    # for all three, since this test is about Research Title sync, not
+    # discipline selection itself (see test_manual_discipline_selection.py).
     r = await _call("PATCH", f"/ppw/{ppw_id}", TOK[student_key], json={
         "field_of_investigation": "ZZTEST field", "research_title": title,
+        "major_department_id": str(S["A"].id), "minor_department_id": str(S["A"].id),
+        "supporting_department_id": str(S["A"].id),
     })
     assert r.status_code == 200, r.text
-    # minor_field/supporting_field are server-derived from selected Minor/
-    # Supporting courses (discipline-derivation task) and are NOT part of
-    # PpwIn — submission requires them non-blank too, so they are set
-    # directly here rather than through a (course-selection-dependent) API
-    # call that is unrelated to this task's scope.
-    async with AsyncSessionLocal() as db:
-        p = await db.get(Ppw, ppw_id)
-        p.minor_field = "ZZTEST minor"
-        p.supporting_field = "ZZTEST supporting"
-        await db.commit()
     r2 = await _call("PATCH", f"/ppw/{ppw_id}/submit", TOK[student_key])
     assert r2.status_code == 200, r2.text
 

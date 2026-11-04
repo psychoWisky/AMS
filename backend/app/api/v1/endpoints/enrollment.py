@@ -101,7 +101,8 @@ from app.core.student_scope import (
 # app.models.ppw) so Course Registration's classification field uses the
 # exact same controlled vocabulary, never a second/duplicated one.
 from app.core.classification import (
-    ClassificationError, LPM_DEPARTMENT_CODE, PPW_CLASSIFICATIONS, get_lpm_department_id, validate_major, validate_minor, validate_supporting,
+    ClassificationError, PPW_CLASSIFICATIONS, get_lpm_department_id, validate_major, validate_minor,
+    validate_minor_supporting_exclusion, validate_supporting, validate_supporting_has_lpm,
 )
 
 router = APIRouter(prefix="/enrollment", tags=["Enrollment"])
@@ -394,6 +395,19 @@ class WithdrawalRequestIn(BaseModel):
             raise ValueError("A reason is required to request withdrawal.")
         return v.strip()
 
+class RegistrationDisciplineIn(BaseModel):
+    """Manual discipline-selection task (this revision, AVFU-confirmed) —
+    the student explicitly searches and selects each Department record; the
+    id (never free text) is what gets stored. All three optional and
+    independently settable — `update_registration_discipline` validates each
+    supplied id references a real, active `Department` before writing it.
+    Deliberately NOT cross-checked against any selected course's department
+    (Section 3's "must remain conceptually separate from course
+    classification validation" — same reasoning as PPW's `PpwIn`)."""
+    major_department_id: Optional[UUID] = None
+    minor_department_id: Optional[UUID] = None
+    supporting_department_id: Optional[UUID] = None
+
 class WithdrawalDecisionIn(BaseModel):
     approved: bool
     remark: Optional[str] = None
@@ -557,30 +571,18 @@ async def _registration_dict(r: CourseRegistration, db: AsyncSession) -> dict:
         hod_id = await find_role_holder_in_department(UserRole.HOD, hod_dept_id, db)
         hod = await db.get(User, hod_id) if hod_id else None
 
-    # Major/Minor/Supporting discipline task (this revision) — same
-    # derivation approach as PPW's `_ppw_dict` (see its docstring): Major =
-    # the student's own department (already resolved above as `department`);
-    # Minor = the department of every "minor"-classified active item
-    # (validated single by `register_courses`, so any one of them is
-    # representative); Supporting = see below — order-independent bug fix
-    # (verification testing found that deriving from insertion order, i.e.
-    # "whichever was added second," gives the wrong answer whenever the
-    # non-LPM course happens to be added FIRST, and can become ambiguous
-    # after a remove+re-add cycle; see app/core/classification.py's
-    # docstring for the full investigation).
-    minor_items = [e for e in active if e.classification == "minor"]
-    supporting_items = [e for e in active if e.classification == "supporting"]
-    minor_discipline_name = (
-        minor_items[0].offering.department.name if minor_items and minor_items[0].offering and minor_items[0].offering.department else None
-    )
-    supporting_discipline_name = None
-    if len(supporting_items) >= 2:
-        non_lpm = [
-            e for e in supporting_items
-            if e.offering and e.offering.department and e.offering.department.code != LPM_DEPARTMENT_CODE
-        ]
-        chosen = non_lpm[0] if non_lpm else supporting_items[0]
-        supporting_discipline_name = chosen.offering.department.name if chosen.offering and chosen.offering.department else None
+    # Manual discipline-selection task (this revision, AVFU-confirmed,
+    # supersedes the prior auto-derivation approach described below) — Major/
+    # Minor/Supporting Discipline are now the student's own EXPLICITLY
+    # SELECTED Department records (`r.major_department`/`minor_department`/
+    # `supporting_department`, eager-loaded via `_REGISTRATION_LOAD_OPTIONS`),
+    # never inferred from `StudentEnrollment.classification`. Deliberately
+    # NOT cross-checked against any selected course's department (Section 3's
+    # "must remain conceptually separate from course classification
+    # validation" — same reasoning as PPW's `_ppw_dict`).
+    major_discipline_name = r.major_department.name if r.major_department else None
+    minor_discipline_name = r.minor_department.name if r.minor_department else None
+    supporting_discipline_name = r.supporting_department.name if r.supporting_department else None
 
     return {
         "id": str(r.id),
@@ -595,8 +597,11 @@ async def _registration_dict(r: CourseRegistration, db: AsyncSession) -> dict:
         "academic_year": calendar.academic_year if calendar else None,
         "major_advisor_name": major_advisor.full_name if major_advisor else None,
         "hod_name": hod.full_name if hod else None,
-        # Major/Minor/Supporting discipline task (this revision).
-        "major_discipline_name": department.name if department else None,
+        # Manual discipline-selection task (this revision).
+        "major_department_id": str(r.major_department_id) if r.major_department_id else None,
+        "minor_department_id": str(r.minor_department_id) if r.minor_department_id else None,
+        "supporting_department_id": str(r.supporting_department_id) if r.supporting_department_id else None,
+        "major_discipline_name": major_discipline_name,
         "minor_discipline_name": minor_discipline_name,
         "supporting_discipline_name": supporting_discipline_name,
         "semester_id": str(r.semester_id),
@@ -621,8 +626,6 @@ async def _registration_dict(r: CourseRegistration, db: AsyncSession) -> dict:
 
 _REGISTRATION_LOAD_OPTIONS = (
     selectinload(CourseRegistration.student).selectinload(User.program),
-    # Major/Minor/Supporting discipline task (this revision) — Major
-    # Discipline is always the student's own department.
     selectinload(CourseRegistration.student).selectinload(User.department),
     selectinload(CourseRegistration.items).selectinload(StudentEnrollment.offering).selectinload(CourseOffering.course),
     selectinload(CourseRegistration.items).selectinload(StudentEnrollment.offering).selectinload(CourseOffering.faculty_assignments).selectinload(OfferingFaculty.faculty),
@@ -630,6 +633,10 @@ _REGISTRATION_LOAD_OPTIONS = (
     selectinload(CourseRegistration.items).selectinload(StudentEnrollment.student),
     selectinload(CourseRegistration.items).selectinload(StudentEnrollment.instructor),
     selectinload(CourseRegistration.items).selectinload(StudentEnrollment.withdrawal_requests),
+    # Manual discipline-selection task (this revision).
+    selectinload(CourseRegistration.major_department),
+    selectinload(CourseRegistration.minor_department),
+    selectinload(CourseRegistration.supporting_department),
 )
 
 
@@ -884,11 +891,18 @@ async def register_courses(
         existing_minor_dept_id = next(
             (e.offering.department_id for e in existing_active if e.classification == "minor" and e.offering), None,
         )
-        existing_supporting_dept_ids = [
-            e.offering.department_id for e in sorted(
-                (x for x in existing_active if x.classification == "supporting" and x.offering), key=lambda x: x.enrolled_at,
-            )
-        ]
+        # Minor–Supporting mutual-exclusion task (this revision) — tracked by
+        # Course.id (never offering id/department), both against PRE-EXISTING
+        # selections and against every PREVIOUSLY-PROCESSED item earlier in
+        # THIS SAME request (updated incrementally in the loop below), so a
+        # single batch naming the same course as both Minor and Supporting is
+        # rejected exactly like doing it in two separate calls would be.
+        existing_minor_course_ids = {
+            e.offering.course_id for e in existing_active if e.classification == "minor" and e.offering
+        }
+        existing_supporting_course_ids = {
+            e.offering.course_id for e in existing_active if e.classification == "supporting" and e.offering
+        }
         lpm_department_id: Optional[UUID] = None
         try:
             for oid in body.offering_ids:
@@ -900,15 +914,19 @@ async def register_courses(
                     validate_major(offering.department_id, student_department_id)
                 elif classification == "minor":
                     validate_minor(offering.department_id, student_department_id, existing_minor_dept_id)
+                    validate_minor_supporting_exclusion(
+                        offering.course_id, "minor", existing_minor_course_ids, existing_supporting_course_ids,
+                    )
                     existing_minor_dept_id = offering.department_id
+                    existing_minor_course_ids = existing_minor_course_ids | {offering.course_id}
                 elif classification == "supporting":
                     if lpm_department_id is None:
                         lpm_department_id = await get_lpm_department_id(db)
-                    validate_supporting(
-                        offering.department_id, lpm_department_id, student_department_id,
-                        existing_minor_dept_id, existing_supporting_dept_ids,
+                    validate_supporting(offering.department_id, lpm_department_id, student_department_id, existing_minor_dept_id)
+                    validate_minor_supporting_exclusion(
+                        offering.course_id, "supporting", existing_minor_course_ids, existing_supporting_course_ids,
                     )
-                    existing_supporting_dept_ids = existing_supporting_dept_ids + [offering.department_id]
+                    existing_supporting_course_ids = existing_supporting_course_ids | {offering.course_id}
                 # research/seminar/compulsory: no department restriction — unchanged.
         except ClassificationError as exc:
             raise HTTPException(400, str(exc))
@@ -1233,6 +1251,36 @@ async def get_registration(registration_id: UUID, db: AsyncSession = Depends(get
     return await _registration_dict(r, db)
 
 
+@router.patch("/registrations/{registration_id}/discipline")
+async def update_registration_discipline(
+    registration_id: UUID, body: RegistrationDisciplineIn, db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(UserRole.STUDENT)),
+):
+    """Manual discipline-selection task (this revision) — the one and only
+    way a student sets their explicitly-selected Major/Minor/Supporting
+    Discipline on a Course Registration. Mirrors PPW's `update_ppw`
+    validation pattern exactly (each supplied id must reference a real,
+    active `Department`, or `400`). Gated to `_EDITABLE_STAGES`, the same
+    window the student can still edit course selections in — once a
+    registration leaves that window, nothing about it is student-editable."""
+    r = await db.get(CourseRegistration, registration_id)
+    if not r or r.student_id != user.id:
+        raise HTTPException(404, "Registration not found.")
+    if r.stage not in _EDITABLE_STAGES:
+        raise HTTPException(400, "This registration has already been submitted and cannot be modified.")
+
+    updates = body.model_dump(exclude_none=True)
+    for field in ("major_department_id", "minor_department_id", "supporting_department_id"):
+        if field in updates:
+            dept = await db.get(Department, updates[field])
+            if not dept or not dept.is_active:
+                raise HTTPException(400, f"{field.replace('_', ' ').title()} does not reference a valid, active department.")
+    for k, v in updates.items():
+        setattr(r, k, v)
+    await db.commit()
+    return {"message": "Registration updated."}
+
+
 # ── Registration Card: student submission (the lock point) ──────────────────
 
 @router.post("/registrations/{registration_id}/submit")
@@ -1262,6 +1310,25 @@ async def submit_registration_card(
         raise HTTPException(400, "Add at least one course before submitting the Registration Card.")
     if not all(i.status == "approved" for i in items):
         raise HTTPException(400, "All selected courses must be approved by their Course Teacher before submitting the Registration Card.")
+
+    # Expanded-selection task (this revision) — the "at least one Supporting
+    # selection must be from LPM" rule is checked HERE, once, at the
+    # completion checkpoint (never per-add — see classification.py's
+    # docstring), against the FULL semester-scoped set (matching every other
+    # Supporting/credit computation in this file, e.g. `_semester_active_
+    # credits`/`_registration_dict`) so a legacy, non-registration-linked
+    # Supporting row still counts. A student with zero Supporting selections
+    # is unaffected (Supporting remains optional).
+    all_active = await _semester_scoped_enrollments(r.student_id, r.semester_id, db)
+    supporting_dept_ids = [
+        e.offering.department_id for e in all_active
+        if e.status != "withdrawn" and e.classification == "supporting" and e.offering
+    ]
+    lpm_department_id = await get_lpm_department_id(db)
+    try:
+        validate_supporting_has_lpm(supporting_dept_ids, lpm_department_id)
+    except ClassificationError as exc:
+        raise HTTPException(400, str(exc))
 
     r.stage = "major_advisor_pending"
     r.card_submitted_at = datetime.now(timezone.utc)
@@ -1304,12 +1371,12 @@ async def _build_registration_card_context(r: CourseRegistration, db: AsyncSessi
     instruction not to force PPW's taxonomy onto this table's grouping — left
     completely unchanged by the discipline task below.
 
-    Major/Minor/Supporting discipline task (this revision): `context["registration"]`
+    Manual discipline-selection task (this revision): `context["registration"]`
     IS `_registration_dict(r, db)`'s own return value, which already carries
     `major_discipline_name`/`minor_discipline_name`/`supporting_discipline_name`
-    (derived from the student's own department and the classified selections'
-    departments — never client-supplied text) — the template reads them
-    straight off `registration.*`, no separate computation needed here."""
+    (the student's own explicitly-selected Department records — never
+    inferred from course selections) — the template reads them straight off
+    `registration.*`, no separate computation needed here."""
     student = await db.get(User, r.student_id)
     program = await db.get(Program, student.program_id) if student and student.program_id else None
     department = await db.get(Department, student.department_id) if student and student.department_id else None

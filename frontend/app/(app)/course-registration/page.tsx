@@ -71,8 +71,13 @@ interface Registration {
   program_name: string | null; program_level: string | null; department_name: string | null;
   semester_name: string | null; academic_year: string | null;
   major_advisor_name: string | null; hod_name: string | null; student_mobile: string | null;
-  // Major/Minor/Supporting discipline task (this revision) — backend-
-  // derived (see `_registration_dict`'s docstring), never client text.
+  // Manual discipline-selection task (this revision) — the student
+  // explicitly searches and selects each Department record; these ids are
+  // what gets stored/submitted (see enrollment.py's RegistrationDisciplineIn
+  // docstring). The `_name` fields are read-only display derived from the
+  // stored id, never the other way around.
+  major_department_id: string | null; minor_department_id: string | null;
+  supporting_department_id: string | null;
   major_discipline_name: string | null; minor_discipline_name: string | null;
   supporting_discipline_name: string | null;
 }
@@ -124,6 +129,130 @@ function WithdrawalReasonModal({ onSubmit, onCancel, isPending }: { onSubmit: (r
   );
 }
 
+// Manual discipline-selection task (this revision) — searchable dropdown
+// following this codebase's established inline pattern (see courses/page.tsx's
+// faculty-search dropdown, and ppw/page.tsx's identical copy of this same
+// component — this codebase copy-pastes this pattern per-page rather than
+// sharing a generic component). Selecting an option stores its `id`; typing
+// without picking an option clears the stored id, so a free-typed,
+// unselected value can never be submitted.
+function DisciplineSelect({
+  label, value, onChange, departments, disabled, initialLabel, isLoading, isError,
+}: {
+  label: string; value: string; onChange: (id: string) => void;
+  departments: DepartmentOpt[]; disabled: boolean; initialLabel: string | null;
+  isLoading: boolean; isError: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const selected = departments.find((d) => d.id === value);
+  const displayValue = search !== "" ? search : (selected ? selected.name : initialLabel ?? "");
+  const filtered = departments.filter((d) => d.name.toLowerCase().includes(search.trim().toLowerCase()));
+
+  return (
+    <div className="relative">
+      <label className="block text-sm text-gray-500 mb-1">{label}</label>
+      <input
+        value={displayValue}
+        disabled={disabled}
+        onChange={(e) => { setSearch(e.target.value); onChange(""); }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        placeholder="Search department…"
+        className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm font-semibold text-gray-800 focus:outline-none focus:ring-2 focus:ring-[#0D6E6E] disabled:bg-gray-50 disabled:text-gray-600 disabled:border-transparent disabled:px-0"
+      />
+      {open && !disabled && (
+        <div className="absolute z-10 mt-1 w-full max-h-48 overflow-y-auto border border-gray-200 rounded-lg bg-white shadow-lg">
+          {isLoading ? (
+            <p className="text-sm text-gray-500 p-3">Loading departments…</p>
+          ) : isError ? (
+            <p className="text-sm text-red-600 p-3">Failed to load departments.</p>
+          ) : filtered.length === 0 ? (
+            <p className="text-sm text-gray-500 p-3">No matching departments.</p>
+          ) : filtered.slice(0, 30).map((d) => (
+            <button key={d.id} type="button" onMouseDown={(e) => e.preventDefault()}
+              onClick={() => { onChange(d.id); setSearch(""); setOpen(false); }}
+              className="w-full text-left px-3 py-2 text-sm hover:bg-[#E6F4F4] border-b border-gray-50 last:border-0">
+              {d.name}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Manual discipline-selection task (this revision) — isolated into its own
+// component (keyed by registration id+stage at the call site) so its form
+// state can be derived once via useState's lazy initializer, matching
+// ppw/page.tsx's PpwEditor pattern, rather than synced in an effect every
+// time `currentRegistration` is refetched.
+function RegistrationDisciplineSection({
+  registration, departments, departmentsLoading, departmentsError, isLocked,
+}: {
+  registration: Registration; departments: DepartmentOpt[];
+  departmentsLoading: boolean; departmentsError: boolean; isLocked: boolean;
+}) {
+  const qc = useQueryClient();
+  const [form, setForm] = useState(() => ({
+    major_department_id: registration.major_department_id ?? "",
+    minor_department_id: registration.minor_department_id ?? "",
+    supporting_department_id: registration.supporting_department_id ?? "",
+  }));
+
+  const save = useMutation({
+    // Only non-empty ids are sent — the backend's own `exclude_none=True`
+    // means omitting a field simply leaves its currently-stored value
+    // untouched (same convention as PPW's `update_ppw`).
+    mutationFn: () => {
+      const body: Record<string, string> = {};
+      (["major_department_id", "minor_department_id", "supporting_department_id"] as const).forEach((k) => {
+        if (form[k]) body[k] = form[k];
+      });
+      return api.patch(`/enrollment/registrations/${registration.id}/discipline`, body);
+    },
+    onSuccess: () => { toast.success("Discipline saved."); qc.invalidateQueries({ queryKey: ["ams-my-registrations"] }); },
+    onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed to save discipline."),
+  });
+
+  return (
+    <div className="mt-4 pt-4 border-t border-gray-100">
+      <h3 className="text-sm font-bold text-gray-700 mb-3">Discipline</h3>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {isLocked ? (
+          ([
+            ["Major Discipline", registration.major_discipline_name],
+            ["Minor Discipline", registration.minor_discipline_name],
+            ["Supporting Discipline", registration.supporting_discipline_name],
+          ] as const).map(([label, value]) => (
+            <div key={label}>
+              <p className="text-sm text-gray-500">{label}</p>
+              <p className="font-semibold text-gray-800">{value ?? "—"}</p>
+            </div>
+          ))
+        ) : (
+          ([
+            ["Major Discipline", "major_department_id", registration.major_discipline_name],
+            ["Minor Discipline", "minor_department_id", registration.minor_discipline_name],
+            ["Supporting Discipline", "supporting_department_id", registration.supporting_discipline_name],
+          ] as const).map(([label, key, initialLabel]) => (
+            <DisciplineSelect key={key} label={label} value={form[key]}
+              onChange={(id) => setForm((f) => ({ ...f, [key]: id }))}
+              departments={departments} disabled={isLocked} initialLabel={initialLabel}
+              isLoading={departmentsLoading} isError={departmentsError} />
+          ))
+        )}
+      </div>
+      {!isLocked && (
+        <button onClick={() => save.mutate()} disabled={save.isPending}
+          className="mt-3 px-4 py-2 bg-[#0D6E6E] text-white rounded-xl text-sm font-bold hover:bg-[#178F8F] disabled:opacity-60">
+          {save.isPending ? "Saving…" : "Save Discipline"}
+        </button>
+      )}
+    </div>
+  );
+}
+
 export default function CourseRegistrationPage() {
   const user = useUser();
   const qc = useQueryClient();
@@ -165,7 +294,7 @@ export default function CourseRegistrationPage() {
 
   // Department filter master data — the existing Department master-data
   // endpoint, not a new concept.
-  const { data: departments = [] } = useQuery<DepartmentOpt[]>({
+  const { data: departments = [], isLoading: departmentsLoading, isError: departmentsError } = useQuery<DepartmentOpt[]>({
     queryKey: ["ams-departments"],
     queryFn: async () => (await api.get("/departments")).data,
   });
@@ -462,6 +591,21 @@ export default function CourseRegistrationPage() {
                   </div>
                 ))}
               </div>
+
+              {/* Manual discipline-selection task (this revision) — requires
+                  an actual `currentRegistration` (needs a real id to PATCH
+                  against), same gating as the Registration Card banner
+                  below. Keyed by id+stage so its own form state (unlike the
+                  rest of this page, held in a child component) resets
+                  cleanly whenever the registration identity/lock state
+                  changes, matching ppw/page.tsx's PpwEditor pattern. */}
+              {currentRegistration && (
+                <RegistrationDisciplineSection
+                  key={`${currentRegistration.id}-${currentRegistration.stage}`}
+                  registration={currentRegistration} departments={departments}
+                  departmentsLoading={departmentsLoading} departmentsError={departmentsError}
+                  isLocked={isLocked} />
+              )}
 
               {/* Registration Card banner — appears once every currently-
                   selected course has been Course-Teacher approved, and

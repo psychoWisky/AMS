@@ -68,9 +68,31 @@ class Ppw(Base):
     # ppw.py's submit_ppw), consistent with "draft" meaning genuinely
     # incomplete-allowed until the student is ready to lock it.
     field_of_investigation: Mapped[str | None] = mapped_column(Text)
+    # VESTIGIAL, this revision (manual discipline-selection task): these two
+    # were a DERIVED DISPLAY STRING, auto-overwritten from the student's
+    # course classifications on every course add/remove
+    # (`_recompute_ppw_discipline_fields`, now unused/removed — see
+    # ppw.py). No longer written to by any code going forward; left in
+    # place, UNCHANGED, as a historical record of what was shown before this
+    # revision — never backfilled, never read by the submission gate or any
+    # template anymore (see `minor_department_id`/`supporting_department_id`
+    # below, the new authoritative, explicitly-selected values).
     minor_field: Mapped[str | None] = mapped_column(Text)
     supporting_field: Mapped[str | None] = mapped_column(Text)
     research_title: Mapped[str | None] = mapped_column(Text)
+    # Manual discipline-selection task (this revision, AVFU-confirmed) — the
+    # student explicitly searches and selects each Discipline from the
+    # authoritative `Department` records; no longer inferred from selected
+    # courses. Nullable: a draft may be saved incrementally with these still
+    # unset; required only at submit time (`submit_ppw`), mirroring the
+    # pre-existing `field_of_investigation`/`research_title` pattern.
+    # Deliberately NOT validated against any selected course's department —
+    # course classification (Major/Minor/Supporting on `PpwCourse`,
+    # `app/core/classification.py`) and discipline selection are two
+    # conceptually SEPARATE concerns per this task's explicit instruction.
+    major_department_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_departments.id"))
+    minor_department_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_departments.id"))
+    supporting_department_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_departments.id"))
     # Phase 2 (this task) extends the Phase 1 draft -> submitted lifecycle into:
     # draft -> major_advisor_pending -> committee_pending -> hod_pending ->
     # hod_approved, with a "reverted" state reachable from any of the three
@@ -87,6 +109,9 @@ class Ppw(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     student: Mapped["User"] = relationship("User", foreign_keys=[student_id])
+    major_department: Mapped["Department | None"] = relationship("Department", foreign_keys=[major_department_id])
+    minor_department: Mapped["Department | None"] = relationship("Department", foreign_keys=[minor_department_id])
+    supporting_department: Mapped["Department | None"] = relationship("Department", foreign_keys=[supporting_department_id])
     courses: Mapped[list["PpwCourse"]] = relationship("PpwCourse", back_populates="ppw", cascade="all, delete-orphan")
     approval_cycles: Mapped[list["PpwApprovalCycle"]] = relationship(
         "PpwApprovalCycle", back_populates="ppw", cascade="all, delete-orphan", order_by="PpwApprovalCycle.cycle_number",
@@ -217,6 +242,6 @@ class PpwSignature(Base):
     user: Mapped["User"] = relationship("User", foreign_keys=[user_id])
 
 
-from app.models.user import User  # noqa: E402
+from app.models.user import User, Department  # noqa: E402
 from app.models.course import Course  # noqa: E402
 from app.models.research import CommitteeMember  # noqa: E402

@@ -391,20 +391,29 @@ async def _require_my_stage(s: Synopsis, user: User, db: AsyncSession) -> Synops
 
 async def _student_block(student: User, db: AsyncSession) -> dict:
     """Everything the Synopsis shows about the student, read from the canonical sources and never
-    typed by the student: name/roll from `User`, programme from `User.program`, Major discipline
-    from the student's own department, Minor/Supporting discipline from the student's PPW (the
-    existing PPW derivation), College from `User.college_id` (no Orientation fallback)."""
+    typed by the student: name/roll from `User`, programme from `User.program`, Major/Minor/
+    Supporting discipline from the student's PPW — the manual discipline-selection task's
+    explicitly-saved values (this revision; supersedes the prior PPW-derivation approach for
+    Minor/Supporting, and fixes Major, which used to be hardcoded to the student's own department
+    and never actually read from the PPW at all), College from `User.college_id` (no Orientation
+    fallback).
+
+    Manual discipline-selection task (this revision) — Major falls back to the student's own
+    department only when the PPW hasn't had a Major Discipline explicitly selected yet (e.g. an
+    older PPW predating this task, or a PPW still in progress), so no existing Synopsis document's
+    display regresses to blank; once a Major is explicitly selected, that value is shown instead."""
     ppw = (await db.execute(select(Ppw).options(*_PPW_LOAD_OPTIONS).where(Ppw.student_id == student.id))).scalar_one_or_none()
-    minor = supporting = None
+    major = minor = supporting = None
     if ppw:
         derived = _ppw_dict(ppw)
+        major = derived["major_discipline_name"]
         minor, supporting = derived["minor_discipline_name"], derived["supporting_discipline_name"]
     return {
         "student_name": student.full_name,
         "student_roll": student.student_roll,
         "program_name": student.program.name if student.program else None,
         "program_level": student.program.level if student.program else None,
-        "major_discipline": student.department.name if student.department else None,
+        "major_discipline": major or (student.department.name if student.department else None),
         "minor_discipline": minor,
         "supporting_discipline": supporting,
         "college_name": student.college.name if student.college else None,

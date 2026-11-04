@@ -36,12 +36,14 @@ interface HodApproval {
 }
 interface Ppw {
   id: string; status: string;
-  field_of_investigation: string | null; minor_field: string | null;
-  supporting_field: string | null; research_title: string | null;
-  // Discipline-derivation task (this revision) — backend-derived, never
-  // client-editable (see ppw.py's PpwIn docstring): Major = the student's
-  // own department; Minor/Supporting = the department of the actually
-  // selected Minor/2nd-Supporting course.
+  field_of_investigation: string | null; research_title: string | null;
+  // Manual discipline-selection task (this revision) — the student
+  // explicitly searches and selects each Department record; these ids are
+  // what gets stored/submitted (see ppw.py's PpwIn docstring). The `_name`
+  // fields below are read-only display derived from the stored id, never
+  // the other way around.
+  major_department_id: string | null; minor_department_id: string | null;
+  supporting_department_id: string | null;
   major_discipline_name: string | null; minor_discipline_name: string | null;
   supporting_discipline_name: string | null;
   submitted_at: string | null;
@@ -65,6 +67,61 @@ const STATUS_LABELS: Record<string, string> = {
   committee_pending: "Awaiting Advisory Committee Approval", hod_pending: "Awaiting HOD Approval",
   hod_approved: "Approved by HOD", reverted: "Reverted — Needs Correction",
 };
+
+interface Department { id: string; name: string; code: string; }
+
+// Manual discipline-selection task (this revision) — searchable dropdown
+// following this codebase's established inline pattern (see courses/page.tsx's
+// faculty-search dropdown: text input + onFocus/onBlur with a delay to allow
+// the click + a filtered absolute list), rather than inventing a new shared
+// component. Selecting an option stores its `id` (via `onChange`); typing
+// without picking an option clears the stored id (`onChange("")`) so a
+// free-typed, unselected value can never be submitted.
+function DisciplineSelect({
+  label, value, onChange, departments, disabled, initialLabel, isLoading, isError,
+}: {
+  label: string; value: string; onChange: (id: string) => void;
+  departments: Department[]; disabled: boolean; initialLabel: string | null;
+  isLoading: boolean; isError: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const selected = departments.find((d) => d.id === value);
+  const displayValue = search !== "" ? search : (selected ? selected.name : initialLabel ?? "");
+  const filtered = departments.filter((d) => d.name.toLowerCase().includes(search.trim().toLowerCase()));
+
+  return (
+    <div className="relative">
+      <label className="block text-sm text-gray-500 mb-1">{label}</label>
+      <input
+        value={displayValue}
+        disabled={disabled}
+        onChange={(e) => { setSearch(e.target.value); onChange(""); }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        placeholder="Search department…"
+        className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm font-semibold text-gray-800 focus:outline-none focus:ring-2 focus:ring-[#0D6E6E] disabled:bg-gray-50 disabled:text-gray-600 disabled:border-transparent disabled:px-0"
+      />
+      {open && !disabled && (
+        <div className="absolute z-10 mt-1 w-full max-h-48 overflow-y-auto border border-gray-200 rounded-lg bg-white shadow-lg">
+          {isLoading ? (
+            <p className="text-sm text-gray-500 p-3">Loading departments…</p>
+          ) : isError ? (
+            <p className="text-sm text-red-600 p-3">Failed to load departments.</p>
+          ) : filtered.length === 0 ? (
+            <p className="text-sm text-gray-500 p-3">No matching departments.</p>
+          ) : filtered.slice(0, 30).map((d) => (
+            <button key={d.id} type="button" onMouseDown={(e) => e.preventDefault()}
+              onClick={() => { onChange(d.id); setSearch(""); setOpen(false); }}
+              className="w-full text-left px-3 py-2 text-sm hover:bg-[#E6F4F4] border-b border-gray-50 last:border-0">
+              {d.name}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function SignatureBadge({ status }: { status: string }) {
   if (status === "approved") return <span className="inline-flex items-center gap-1 text-green-700 text-sm font-semibold"><CheckCircle2 size={15} /> Approved</span>;
@@ -124,7 +181,7 @@ function PpwEditor({ ppw }: { ppw: Ppw }) {
   // a client-supplied department — see ppw.py's docstring.
   const [departmentFilter, setDepartmentFilter] = useState("");
 
-  const { data: departments = [] } = useQuery<{ id: string; name: string; code: string }[]>({
+  const { data: departments = [], isLoading: departmentsLoading, isError: departmentsError } = useQuery<Department[]>({
     queryKey: ["ams-departments"],
     queryFn: async () => (await api.get("/departments")).data,
   });
@@ -156,10 +213,27 @@ function PpwEditor({ ppw }: { ppw: Ppw }) {
   const [form, setForm] = useState(() => ({
     field_of_investigation: ppw.field_of_investigation ?? "",
     research_title: ppw.research_title ?? "",
+    major_department_id: ppw.major_department_id ?? "",
+    minor_department_id: ppw.minor_department_id ?? "",
+    supporting_department_id: ppw.supporting_department_id ?? "",
   }));
 
   const saveDraft = useMutation({
-    mutationFn: () => api.patch(`/ppw/${ppw.id}`, form),
+    // Manual discipline-selection task (this revision) — the three
+    // discipline-id fields are only included when actually set (an empty
+    // string means "not selected / unchanged", never sent as a value the
+    // backend would try to parse as a UUID); `update_ppw`'s own
+    // `exclude_none=True` means omitting a field here simply leaves its
+    // currently-stored value untouched, matching the pre-existing
+    // field_of_investigation/research_title behavior.
+    mutationFn: () => {
+      const { major_department_id, minor_department_id, supporting_department_id, ...rest } = form;
+      const body: Record<string, string> = { ...rest };
+      if (major_department_id) body.major_department_id = major_department_id;
+      if (minor_department_id) body.minor_department_id = minor_department_id;
+      if (supporting_department_id) body.supporting_department_id = supporting_department_id;
+      return api.patch(`/ppw/${ppw.id}`, body);
+    },
     onSuccess: () => { toast.success("Draft saved."); qc.invalidateQueries({ queryKey: ["ams-my-ppw"] }); },
     onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed to save."),
   });
@@ -293,22 +367,36 @@ function PpwEditor({ ppw }: { ppw: Ppw }) {
           ))}
         </div>
 
-        {/* Discipline-derivation task (this revision): Major/Minor/Supporting
-            Discipline are now read-only, derived directly from the student's
-            own department and the actual selected Minor/Supporting courses
-            below — never free text the student can type independently of
-            what they actually selected. */}
+        {/* Manual discipline-selection task (this revision, AVFU-confirmed):
+            the student independently searches and selects each Discipline
+            from the authoritative Department records — never inferred from
+            the courses selected below (which remain governed by their own,
+            separate classification rules). While locked (not draft), the
+            explicitly-saved value is shown read-only. */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4 pt-4 border-t border-gray-100">
-          {([
-            ["Major Discipline", ppw.major_discipline_name],
-            ["Minor Discipline", ppw.minor_discipline_name],
-            ["Supporting Discipline", ppw.supporting_discipline_name],
-          ] as const).map(([label, value]) => (
-            <div key={label}>
-              <p className="text-sm text-gray-500">{label}</p>
-              <p className="font-semibold text-gray-800">{value ?? "—"}</p>
-            </div>
-          ))}
+          {isDraft ? (
+            ([
+              ["Major Discipline *", "major_department_id", ppw.major_discipline_name],
+              ["Minor Discipline *", "minor_department_id", ppw.minor_discipline_name],
+              ["Supporting Discipline *", "supporting_department_id", ppw.supporting_discipline_name],
+            ] as const).map(([label, key, initialLabel]) => (
+              <DisciplineSelect key={key} label={label} value={form[key]}
+                onChange={(id) => setForm((f) => ({ ...f, [key]: id }))}
+                departments={departments} disabled={!isDraft} initialLabel={initialLabel}
+                isLoading={departmentsLoading} isError={departmentsError} />
+            ))
+          ) : (
+            ([
+              ["Major Discipline", ppw.major_discipline_name],
+              ["Minor Discipline", ppw.minor_discipline_name],
+              ["Supporting Discipline", ppw.supporting_discipline_name],
+            ] as const).map(([label, value]) => (
+              <div key={label}>
+                <p className="text-sm text-gray-500">{label}</p>
+                <p className="font-semibold text-gray-800">{value ?? "—"}</p>
+              </div>
+            ))
+          )}
         </div>
       </section>
 
@@ -457,8 +545,9 @@ function PpwEditor({ ppw }: { ppw: Ppw }) {
           <table className="w-full my-4 text-sm">
             <tbody>
               <tr><td className="py-1 font-semibold w-56">Field of Investigation</td><td>{ppw.field_of_investigation || "—"}</td></tr>
-              <tr><td className="py-1 font-semibold">Minor Field</td><td>{ppw.minor_field || "—"}</td></tr>
-              <tr><td className="py-1 font-semibold">Supporting Field</td><td>{ppw.supporting_field || "—"}</td></tr>
+              <tr><td className="py-1 font-semibold">Major Discipline</td><td>{ppw.major_discipline_name || "—"}</td></tr>
+              <tr><td className="py-1 font-semibold">Minor Discipline</td><td>{ppw.minor_discipline_name || "—"}</td></tr>
+              <tr><td className="py-1 font-semibold">Supporting Discipline</td><td>{ppw.supporting_discipline_name || "—"}</td></tr>
               <tr><td className="py-1 font-semibold">Research Title</td><td>{ppw.research_title || "—"}</td></tr>
             </tbody>
           </table>

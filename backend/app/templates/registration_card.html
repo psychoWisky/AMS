@@ -86,13 +86,11 @@
       <td style="font-weight:600;">Department</td><td>{{ department_name or "—" }}</td>
       <td style="font-weight:600;">Major Advisor</td><td>{{ major_advisor_name or "—" }}</td>
     </tr>
-    <!-- Major/Minor/Supporting discipline task (this revision): these three
-         are backend-derived (student's own department for Major; the
-         department of the actually-selected Minor/Supporting offerings for
-         the other two) — never arbitrary client text. Rows only render when
-         the student has an applicable classified selection, so a
-         registration with no Major/Minor/Supporting selections at all
-         renders exactly as before this task. -->
+    <!-- Manual discipline-selection task (this revision): these three are
+         the student's own EXPLICITLY SELECTED Department records (never
+         inferred from course selections, never arbitrary client text).
+         Rows only render when at least one has been selected, so a
+         registration with none selected yet renders exactly as before. -->
     {% if registration.major_discipline_name or registration.minor_discipline_name or registration.supporting_discipline_name %}
     <tr>
       <td style="font-weight:600;">Major Discipline</td><td>{{ registration.major_discipline_name or "—" }}</td>
