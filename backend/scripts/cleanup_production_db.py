@@ -25,7 +25,7 @@ script happened to keep it:
      (role=SUPER_ADMIN, department_id=NULL) and never cascade-deleted by any
      of the organizational-data deletions below.
   3. ALL current `ams_roles` master-data rows (the cosmetic "Administration
-     -> Roles" screen data) — every one of the 11 roles the application
+     -> Roles" screen data) — every one of the 14 roles the application
      actually defines today. None are deleted, per AVFU's explicit
      instruction, even though (see below) this table is not itself read by
      any authorization check.
@@ -76,9 +76,13 @@ AMS schema and is now dangerously stale. Confirmed by direct inspection of
     FACULTY, STUDENT, REGISTRAR, EXAMINER, RESEARCH_SUPERVISOR) and tried to
     hard-delete the `ams_roles` rows for ACADEMIC_ADMIN/REGISTRAR/EXAMINER/
     RESEARCH_SUPERVISOR. Today's real enum (`app/models/user.py::UserRole`)
-    has 11 DIFFERENT members: SUPER_ADMIN, VICE_CHANCELLOR, DPGS,
-    INCHARGE_ACADEMIC_CELL, REGISTRAR, HOD, FACULTY, STUDENT,
-    EXTERNAL_EXAMINER, LIBRARIAN, CONTROLLER_OF_EXAMINATION.
+    has 14 DIFFERENT members: SUPER_ADMIN, VICE_CHANCELLOR, DPGS,
+    INCHARGE_ACADEMIC_CELL_PG_VETERINARY, INCHARGE_ACADEMIC_CELL_UG_VETERINARY,
+    INCHARGE_ACADEMIC_CELL_PG_FISHERY, INCHARGE_ACADEMIC_CELL_UG_FISHERY,
+    REGISTRAR, HOD, FACULTY, STUDENT, EXTERNAL_EXAMINER, LIBRARIAN,
+    CONTROLLER_OF_EXAMINATION (Incharge Academic Cell scope-split task —
+    the single old INCHARGE_ACADEMIC_CELL role was replaced by 4 scoped
+    variants; see that migration, `0047_incharge_scope_split`).
     ACADEMIC_ADMIN/EXAMINER/RESEARCH_SUPERVISOR were removed entirely by
     migration `0015_remove_legacy_roles` and no longer exist as `ams_roles`
     rows either. **`REGISTRAR` is NOT the old dummy role** — migration
@@ -98,7 +102,7 @@ AMS schema and is now dangerously stale. Confirmed by direct inspection of
     "Administration -> Roles" screen, and `require_roles()` checks
     `user.active_role` (resolved from `UserRoleAssignment`/the `UserRole`
     enum) directly. The correct action for `ams_roles` today is simply:
-    leave all 11 rows alone. There is no "unwanted legacy role" left to
+    leave all 14 rows alone. There is no "unwanted legacy role" left to
     remove — that cleanup already happened, permanently, via `0015`.
 
 Full classification of every one of the 58 tables, the exact deletion order,
@@ -219,7 +223,9 @@ REQUIRED_SUPERADMIN_ROLE = "SUPER_ADMIN"
 # preserved; none are deleted. This list exists only so the printed plan can
 # show it was actually checked against the live enum, not assumed.
 CURRENT_SYSTEM_ROLES = (
-    "SUPER_ADMIN", "VICE_CHANCELLOR", "DPGS", "INCHARGE_ACADEMIC_CELL",
+    "SUPER_ADMIN", "VICE_CHANCELLOR", "DPGS",
+    "INCHARGE_ACADEMIC_CELL_PG_VETERINARY", "INCHARGE_ACADEMIC_CELL_UG_VETERINARY",
+    "INCHARGE_ACADEMIC_CELL_PG_FISHERY", "INCHARGE_ACADEMIC_CELL_UG_FISHERY",
     "REGISTRAR", "HOD", "FACULTY", "STUDENT", "EXTERNAL_EXAMINER",
     "LIBRARIAN", "CONTROLLER_OF_EXAMINATION",
 )

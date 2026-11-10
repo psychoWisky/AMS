@@ -134,7 +134,9 @@ async def _setup() -> None:
     settings.ENVIRONMENT = "development"
     async with AsyncSessionLocal() as db:
         holders = (await db.execute(text(
-            "select count(*) from ams_user_role_assignments where role in ('INCHARGE_ACADEMIC_CELL','DPGS')"
+            "select count(*) from ams_user_role_assignments where role in "
+            "('INCHARGE_ACADEMIC_CELL_PG_VETERINARY','INCHARGE_ACADEMIC_CELL_UG_VETERINARY',"
+            "'INCHARGE_ACADEMIC_CELL_PG_FISHERY','INCHARGE_ACADEMIC_CELL_UG_FISHERY','DPGS')"
         ))).scalar_one()
         if holders:
             print("STOP: a real Incharge Academic Cell / DPGS holder exists (single-holder roles); refusing to run.")
@@ -161,7 +163,9 @@ async def _setup() -> None:
     await _mk_user("hod1", UserRole.HOD, d1)
     await _mk_user("ma1", UserRole.FACULTY, d1)
     await _mk_user("teacher1", UserRole.FACULTY, d1)
-    await _mk_user("incharge", UserRole.INCHARGE_ACADEMIC_CELL, None)
+    # Incharge Academic Cell scope-split task (this revision) — s1/s2 both
+    # use `program=pg` (MVSc, Veterinary).
+    await _mk_user("incharge", UserRole.INCHARGE_ACADEMIC_CELL_PG_VETERINARY, None)
     await _mk_user("dpgs", UserRole.DPGS, None)
     await _mk_user("super_admin_probe", UserRole.SUPER_ADMIN, None)
     await _mk_user("s1", UserRole.STUDENT, d1, program=pg, college=college, roll=f"ZZRCD-s1-{_TAG}")

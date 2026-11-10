@@ -16,9 +16,10 @@ import openpyxl
 from app.db.base import get_db
 from app.core.security import verify_password, hash_password, create_access_token, create_refresh_token, decode_token
 from app.core.dependencies import (
-    get_current_user, require_roles, is_profile_complete, get_missing_profile_fields,
+    get_current_user, require_roles, require_incharge_academic_cell, is_profile_complete, get_missing_profile_fields,
     get_assigned_roles, get_assigned_role_assignments, pick_default_assignment, staff_user_clause,
 )
+from app.core.student_scope import INCHARGE_SCOPE_ROLES, incharge_scopes_held
 from app.core import profile_fields as pf
 from app.core.config import settings
 from app.core.email import enqueue_email
@@ -55,11 +56,14 @@ _FACULTY_TITLES = ("Dr.", "Mr", "Mrs", "Miss")
 # "conflicts with a single-holder role" message instead of naming the
 # current holder like the other two single-holder roles do.
 _SINGLE_HOLDER_ROLES = (
-    UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS, UserRole.VICE_CHANCELLOR, UserRole.REGISTRAR,
+    *INCHARGE_SCOPE_ROLES, UserRole.DPGS, UserRole.VICE_CHANCELLOR, UserRole.REGISTRAR,
     UserRole.CONTROLLER_OF_EXAMINATION,
 )
 _ROLE_DISPLAY_NAMES = {
-    UserRole.INCHARGE_ACADEMIC_CELL: "Incharge Academic Cell",
+    UserRole.INCHARGE_ACADEMIC_CELL_PG_VETERINARY: "Incharge Academic Cell (PG – Veterinary)",
+    UserRole.INCHARGE_ACADEMIC_CELL_UG_VETERINARY: "Incharge Academic Cell (UG – Veterinary)",
+    UserRole.INCHARGE_ACADEMIC_CELL_PG_FISHERY: "Incharge Academic Cell (PG – Fishery)",
+    UserRole.INCHARGE_ACADEMIC_CELL_UG_FISHERY: "Incharge Academic Cell (UG – Fishery)",
     UserRole.DPGS: "DPGS",
     UserRole.VICE_CHANCELLOR: "Vice Chancellor",
     UserRole.REGISTRAR: "Registrar",
@@ -862,12 +866,12 @@ async def list_users(
     role: Optional[str] = None,
     department_id: Optional[UUID] = None,
     db: AsyncSession = Depends(get_db),
-    # Incharge Academic Cell / DPGS task (Section 10/32) — both are global,
-    # read-only here (view users across every department, same as Super
-    # Admin's existing unrestricted access below); they gain NO user-
-    # management capability from this alone (create/update/role-assignment
-    # endpoints remain SUPER_ADMIN-only, untouched by this task).
-    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HOD, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS, UserRole.VICE_CHANCELLOR)),
+    # DPGS/VC remain global, read-only here (Section 10/32), unchanged. The
+    # 4 scoped Incharge Academic Cell roles are additionally narrowed below
+    # (Incharge Academic Cell scope-split task, this revision) — they gain
+    # NO user-management capability from this alone either way
+    # (create/update/role-assignment endpoints remain SUPER_ADMIN-only).
+    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HOD, *INCHARGE_SCOPE_ROLES, UserRole.DPGS, UserRole.VICE_CHANCELLOR)),
     # External Examiner Selection task — VC gains this SAME read-only, unrestricted-scope access
     # (its own VC dashboard's faculty listing), never any user-management capability.
 ):
@@ -914,8 +918,23 @@ async def list_users(
     if condition is not None:
         q = q.where(condition)
     result = await db.execute(q.order_by(User.first_name))
+    rows = result.scalars().all()
+    # Incharge Academic Cell scope-split task (this revision) — the staff
+    # directory has no Programme concept to scope by (staff aren't students),
+    # so this narrows by FACULTY (Veterinary/Fishery) only, via each staff
+    # member's own `department.stream` — empirically reliable for real
+    # academic departments (confirmed zero cross-contamination against the
+    # production data), unlike `Program.faculty`'s reasoning elsewhere. A
+    # staff member with no department at all (a global role, or the dual-
+    # stream administrative department) is never shown to a scoped Incharge
+    # viewer — deliberately conservative, since neither case can be matched
+    # to a single faculty. This is a judgment call, not an AVFU-specified
+    # rule — flagged in this revision's final report for confirmation.
+    if user.active_role in INCHARGE_SCOPE_ROLES:
+        held_faculties = {faculty for _, faculty in incharge_scopes_held(user)}
+        rows = [u for u in rows if u.department and u.department.stream in held_faculties]
     users_out = []
-    for u in result.scalars().all():
+    for u in rows:
         assignments = sorted(u.role_assignments, key=lambda a: (a.role.value, a.department.name if a.department else ""))
         if is_hod:
             # A HOD sees a colleague's assignments in their own department (and
@@ -948,7 +967,7 @@ async def list_users(
 #
 # Department rules per role, enforced below (Section 2.2-2.5):
 #   HOD / FACULTY              — department_id REQUIRED, must be a real Department.
-#   DPGS / INCHARGE_ACADEMIC_CELL / SUPER_ADMIN / STUDENT — department_id must be NULL.
+#   DPGS / the 4 INCHARGE_ACADEMIC_CELL_* scopes / SUPER_ADMIN / STUDENT — department_id must be NULL.
 _DEPARTMENT_REQUIRED_ROLES = (UserRole.HOD, UserRole.FACULTY)
 
 
@@ -1438,7 +1457,7 @@ async def _validate_user_bulk_rows(
     # in this all-or-nothing bulk path, and Section 53's "no automatic
     # office-holder seeding" is safest served by requiring these two specific
     # roles to always go through the single-user assignment endpoints.
-    allowed_roles = set(UserRole) - {UserRole.SUPER_ADMIN, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS}
+    allowed_roles = set(UserRole) - {UserRole.SUPER_ADMIN, *INCHARGE_SCOPE_ROLES, UserRole.DPGS}
 
     hod_department_label = department_names.get(force_department_id) if force_department_id else None
 

@@ -29,7 +29,10 @@ from app.core.dependencies import get_current_user, require_roles, student_user_
 from app.core.document_render import pdf_response, render_template
 from app.core.grading_calc import compute_gpa, format_gpa
 from app.core.result_service import cgpa_for, ordered_results
-from app.core.student_scope import resolve_student_department_id
+from app.core.student_scope import (
+    resolve_student_department_id, INCHARGE_SCOPE_ROLES, incharge_scopes_held,
+    incharge_can_access_program, resolve_student_program,
+)
 from app.db.base import get_db
 from app.models.academic import Semester
 from app.models.course import Course, CourseOffering
@@ -138,8 +141,14 @@ async def _authorize_student_scope(db: AsyncSession, student_id: UUID, user: Use
         if student_id == user.id and published:
             return
     elif published:
-        if role in (UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS):
+        if role == UserRole.DPGS:
             return
+        if role in INCHARGE_SCOPE_ROLES:
+            # Incharge Academic Cell scope-split task (this revision,
+            # AVFU-confirmed) — published results must be scoped.
+            student_program = await resolve_student_program(student_id, db)
+            if incharge_can_access_program(incharge_scopes_held(user), student_program):
+                return
         if role == UserRole.HOD:
             dept = await resolve_student_department_id(student_id, db)
             if dept and user.active_department_id and dept == user.active_department_id:

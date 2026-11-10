@@ -31,14 +31,19 @@ from app.models.enrollment import StudentEnrollment
 from app.models.research import AdvisoryCommittee, CommitteeMember
 # Programme<->Department many-to-many redesign — single shared implementation
 # in app/core/student_scope.py.
-from app.core.student_scope import resolve_student_department_id
+from app.core.student_scope import (
+    resolve_student_department_id, INCHARGE_SCOPE_ROLES, incharge_scopes_held,
+    incharge_can_access_program, resolve_student_program,
+)
 
 router = APIRouter(prefix="/credit-details", tags=["Student Credit Details"])
 
-# Incharge Academic Cell / DPGS task (Section 34) — both are global,
-# read-only here, same as Super Admin (this file has no mutation endpoints
-# at all — view-only credit details, so no ownership concern to preserve).
-_ADMIN_ROLES = (UserRole.SUPER_ADMIN, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS, UserRole.VICE_CHANCELLOR)  # VC: read-only dashboard (this file has no mutation endpoint at all)
+# DPGS/VC remain global, read-only here, same as Super Admin (unchanged).
+# Incharge Academic Cell scope-split task (this revision, AVFU-confirmed) —
+# the 4 scoped roles are deliberately NOT in this unconditional tuple
+# anymore; see `_authorize_student_credit_view`, which scopes them
+# separately — credit details must be scoped, not globally readable.
+_ADMIN_ROLES = (UserRole.SUPER_ADMIN, UserRole.DPGS, UserRole.VICE_CHANCELLOR)  # VC: read-only dashboard (this file has no mutation endpoint at all)
 
 
 # ── Authorization ────────────────────────────────────────────────────────────
@@ -50,6 +55,11 @@ _ADMIN_ROLES = (UserRole.SUPER_ADMIN, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.
 async def _authorize_student_credit_view(student_id: UUID, user: User, db: AsyncSession) -> None:
     if user.active_role in _ADMIN_ROLES:
         return
+    if user.active_role in INCHARGE_SCOPE_ROLES:
+        student_program = await resolve_student_program(student_id, db)
+        if incharge_can_access_program(incharge_scopes_held(user), student_program):
+            return
+        raise HTTPException(403, "You can only view credit details for students within your assigned scope.")
     if user.active_role == UserRole.STUDENT:
         if student_id == user.id:
             return

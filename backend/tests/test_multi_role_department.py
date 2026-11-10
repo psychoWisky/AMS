@@ -285,12 +285,12 @@ async def test_hod_faculty_require_department():
 
 
 async def test_global_roles_reject_department():
-    name = "add_user_role: DPGS/INCHARGE_ACADEMIC_CELL/STUDENT with a department -> 400 (never invent a department for a global role)"
+    name = "add_user_role: DPGS/INCHARGE_ACADEMIC_CELL_PG_VETERINARY/STUDENT with a department -> 400 (never invent a department for a global role)"
     user_id = await _create_test_user("globaldept")
     try:
         r1 = await _add_role(user_id, "dpgs", _DEPT_A)
         assert r1.status_code == 400, r1.text
-        r2 = await _add_role(user_id, "incharge_academic_cell", _DEPT_A)
+        r2 = await _add_role(user_id, "incharge_academic_cell_pg_veterinary", _DEPT_A)
         assert r2.status_code == 400, r2.text
         r3 = await _add_role(user_id, "student", _DEPT_A)
         assert r3.status_code == 400, r3.text

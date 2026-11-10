@@ -3,6 +3,10 @@ import {
   BarChart3, FlaskConical, Bell, GraduationCap, FileText, ClipboardCheck, IdCard, UserCog, ShieldCheck, FileSpreadsheet, ScrollText, UserSearch, LayoutGrid, GitBranch, TrendingUp,
   type LucideIcon,
 } from "lucide-react";
+// Incharge Academic Cell scope-split task (this revision) — the single
+// `incharge_academic_cell` role string used throughout this file's `roles`
+// arrays is replaced by this shared 4-item list (see lib/utils.ts).
+import { INCHARGE_ROLES } from "./utils";
 
 export const DASHBOARD_ROUTE = "/dashboard";
 
@@ -35,7 +39,7 @@ export const NAV: NavItem[] = [
   // never through `_authorize_offering_management`, which still gates every
   // write endpoint unchanged). HOD keeps its existing department-scoped
   // access (same `_authorize_offering_management` HOD branch as before).
-  { label: "Course Students", icon: Users,           href: "/course-students", roles: ["super_admin","hod","incharge_academic_cell","dpgs"] },
+  { label: "Course Students", icon: Users,           href: "/course-students", roles: ["super_admin","hod",...INCHARGE_ROLES,"dpgs"] },
   // "hod" deliberately excluded here (BUSINESS_LOGIC.md Section N.1) — HOD's
   // course-offering management already lives at Courses -> Offer Course;
   // this page is instructor-assigned "my courses" and does not apply to HOD.
@@ -63,14 +67,14 @@ export const NAV: NavItem[] = [
   // roles that approve Course Registration Cards after HOD (Section 12);
   // this page hosts their approval queue exactly like it already does for
   // HOD/Faculty.
-  { label: "Course Request",  icon: ClipboardList,   href: "/course-request", roles: ["super_admin","hod","faculty","incharge_academic_cell","dpgs"] },
-  { label: "Academic Progress",icon: GraduationCap,  href: "/academic-progress", roles: ["super_admin","hod","faculty","student","incharge_academic_cell","dpgs"] },
+  { label: "Course Request",  icon: ClipboardList,   href: "/course-request", roles: ["super_admin","hod","faculty",...INCHARGE_ROLES,"dpgs"] },
+  { label: "Academic Progress",icon: GraduationCap,  href: "/academic-progress", roles: ["super_admin","hod","faculty","student",...INCHARGE_ROLES,"dpgs"] },
   // Gradesheet/Result task — the course-wise Gradesheet: instructors manage their assigned
   // courses' gradesheets; HOD / Incharge Academic Cell / DPGS / Controller of Examination review,
   // approve (= sign) or revert them. Super Admin is deliberately NOT a workflow actor here (the
   // backend allows it read-only by id only). Result Compilation is the CoE's own page; Result
   // Tracking / Result Management are the student's own pages.
-  { label: "Gradesheet",      icon: BarChart3,       href: "/grading",      roles: ["faculty","hod","incharge_academic_cell","dpgs","controller_of_examination"] },
+  { label: "Gradesheet",      icon: BarChart3,       href: "/grading",      roles: ["faculty","hod",...INCHARGE_ROLES,"dpgs","controller_of_examination"] },
   { label: "Result Compilation", icon: ClipboardCheck, href: "/result-compilation", roles: ["controller_of_examination"] },
   { label: "Result Tracking", icon: TrendingUp,      href: "/result-tracking",   roles: ["student"] },
   { label: "Result Management", icon: FileText,      href: "/result-management", roles: ["student"] },
@@ -87,7 +91,7 @@ export const NAV: NavItem[] = [
   // the route (/research), page component, and API endpoints are unchanged.
   // Incharge Academic Cell / DPGS task — both approve committees after HOD
   // (Section 23/25/26), global (no department restriction).
-  { label: "Advisory Committee", icon: FlaskConical,  href: "/research",     roles: ["super_admin","hod","faculty","student","incharge_academic_cell","dpgs"] },
+  { label: "Advisory Committee", icon: FlaskConical,  href: "/research",     roles: ["super_admin","hod","faculty","student",...INCHARGE_ROLES,"dpgs"] },
   // See "Admit Card" comment above — same hiding task, same mechanism.
   { label: "Admissions",      icon: ClipboardCheck,  href: "/admissions",   roles: ["super_admin"], hidden: true },
   { label: "Orientation",     icon: ClipboardCheck,  href: "/orientation",  roles: ["super_admin"] },
@@ -99,11 +103,11 @@ export const NAV: NavItem[] = [
   // self-complete DOB/Gender/Blood Group/Father's Name/Address/ABC ID/Mobile
   // later, exactly as AVFU asked. Deliberately excludes "student" — that
   // role already has its own, unchanged "Student Management" page above.
-  { label: "My Profile",       icon: IdCard,         href: "/my-profile", roles: ["super_admin","hod","faculty","incharge_academic_cell","dpgs"] },
+  { label: "My Profile",       icon: IdCard,         href: "/my-profile", roles: ["super_admin","hod","faculty",...INCHARGE_ROLES,"dpgs"] },
   { label: "PPW",              icon: FileSpreadsheet, href: "/ppw",          roles: ["student"] },
   // Incharge Academic Cell / DPGS task — both approve PPWs after HOD
   // (Section 19/20), global (no department restriction).
-  { label: "PPW Approvals",   icon: ClipboardCheck,  href: "/ppw/approvals", roles: ["hod","faculty","incharge_academic_cell","dpgs"] },
+  { label: "PPW Approvals",   icon: ClipboardCheck,  href: "/ppw/approvals", roles: ["hod","faculty",...INCHARGE_ROLES,"dpgs"] },
   // Synopsis (First Synopsis) — the student's own page, and the approver inbox for every role that appears in the
   // approval chain. Both are UX gates only; each backend endpoint authorizes independently from the active session.
   { label: "Synopsis",         icon: ScrollText,      href: "/synopsis",     roles: ["student"] },
@@ -111,14 +115,14 @@ export const NAV: NavItem[] = [
   // the student has zero access to this module, by confirmed requirement), the shared approver
   // inbox, and the Vice Chancellor's own read-only institutional dashboard.
   { label: "External Examiners", icon: UserSearch,    href: "/external-examiners", roles: ["faculty"] },
-  { label: "Examiner Approvals", icon: ClipboardCheck, href: "/external-examiners/approvals", roles: ["hod","faculty","incharge_academic_cell","dpgs","vice_chancellor"] },
+  { label: "Examiner Approvals", icon: ClipboardCheck, href: "/external-examiners/approvals", roles: ["hod","faculty",...INCHARGE_ROLES,"dpgs","vice_chancellor"] },
   { label: "VC Dashboard",     icon: LayoutGrid,      href: "/vc-dashboard", roles: ["vice_chancellor"] },
-  { label: "Synopsis Approvals", icon: ClipboardCheck, href: "/synopsis/approvals", roles: ["hod","faculty","incharge_academic_cell","dpgs"] },
+  { label: "Synopsis Approvals", icon: ClipboardCheck, href: "/synopsis/approvals", roles: ["hod","faculty",...INCHARGE_ROLES,"dpgs"] },
   // Initial Thesis Management — the student's own page (create/track their ONE Initial
   // Thesis) and the shared approver inbox for every role in the confirmed approval chain
   // (Major Advisor/HOD/Librarian/Incharge Academic Cell/DPGS). Final Thesis is out of scope.
   { label: "Thesis Management", icon: FileText,        href: "/thesis",        roles: ["student"] },
-  { label: "Thesis Approvals",  icon: ClipboardCheck,  href: "/thesis/approvals", roles: ["hod","faculty","librarian","incharge_academic_cell","dpgs"] },
+  { label: "Thesis Approvals",  icon: ClipboardCheck,  href: "/thesis/approvals", roles: ["hod","faculty","librarian",...INCHARGE_ROLES,"dpgs"] },
   // Thesis Seminar Certificate (PG 25) — a distinct, pre-submission workflow (Sections 8-17 of
   // the confirmed rules), not part of the post-submission approval chain above. HOD records the
   // seminar outcome for their own department; Faculty sign as Advisory Committee members. HOD
@@ -128,7 +132,7 @@ export const NAV: NavItem[] = [
   // Certificate) — Major Advisor/Committee (faculty, possibly also HOD holding a committee
   // seat), HOD final-department approval, and (new for Final Thesis) Incharge Academic Cell /
   // DPGS, who never had an Initial-Thesis-PG25 equivalent screen.
-  { label: "Final Thesis Approvals", icon: ClipboardList, href: "/thesis/final-approvals", roles: ["hod","faculty","incharge_academic_cell","dpgs"] },
+  { label: "Final Thesis Approvals", icon: ClipboardList, href: "/thesis/final-approvals", roles: ["hod","faculty",...INCHARGE_ROLES,"dpgs"] },
   { label: "My Evaluations",   icon: ClipboardCheck,  href: "/thesis/evaluations", roles: ["external_examiner"] },
   // Student Migration — the student's own page (create/track their applications; at most one
   // active at a time, backend-enforced) and the single Registrar's approval inbox. No other
@@ -140,11 +144,11 @@ export const NAV: NavItem[] = [
   // confirmed chain (Major Advisor/Committee Member = Faculty, HOD, Incharge Academic
   // Cell, DPGS). Distinct from "/academic-progress", which is unrelated Credit Details.
   { label: "Progress Report",      icon: ClipboardList, href: "/progress-report",     roles: ["student"] },
-  { label: "Progress Report Approvals", icon: ClipboardCheck, href: "/progress-report/approvals", roles: ["hod","faculty","incharge_academic_cell","dpgs"] },
+  { label: "Progress Report Approvals", icon: ClipboardCheck, href: "/progress-report/approvals", roles: ["hod","faculty",...INCHARGE_ROLES,"dpgs"] },
   // Comprehensive Examination — one page serves the student's own application and every
   // approver role in the confirmed chain (Major Advisor/HOD/Incharge Academic Cell/DPGS), plus
   // the Vice Chancellor for the PhD External Panel's final selection stage.
-  { label: "Comprehensive Exam", icon: ClipboardCheck, href: "/comprehensive-exam", roles: ["student","hod","faculty","incharge_academic_cell","dpgs","vice_chancellor"] },
+  { label: "Comprehensive Exam", icon: ClipboardCheck, href: "/comprehensive-exam", roles: ["student","hod","faculty",...INCHARGE_ROLES,"dpgs","vice_chancellor"] },
   { label: "Users",           icon: Users,           href: "/users",        roles: ["super_admin"] },
   // Super Admin's global student management (all students, filters, full profile edit).
   // Distinct from "/student-management", which is a student's OWN profile page.

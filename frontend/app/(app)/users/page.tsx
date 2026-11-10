@@ -5,7 +5,7 @@ import { api } from "@/services/api";
 import { useRole } from "@/stores/auth.store";
 import { toast } from "sonner";
 import { Users, Plus, Search, Loader2, Pencil, KeyRound, Upload, ShieldCheck } from "lucide-react";
-import { ROLES, ADMIN_ROLES, levelLabel } from "@/lib/utils";
+import { ROLES, ADMIN_ROLES, levelLabel, INCHARGE_ROLES } from "@/lib/utils";
 import { ChangePasswordModal } from "@/components/ui/change-password-modal";
 import { UserBulkUploadModal } from "@/components/ui/user-bulk-upload-modal";
 
@@ -59,7 +59,13 @@ function assignmentLabel(a: RoleAssignmentRow): string {
 // exclusivity — see auth.py's add_user_role — this UI does not need its
 // own separate copy of that rule, it just surfaces whatever the backend
 // rejects).
-const GLOBAL_ROLE_OPTIONS = ["super_admin", "vice_chancellor", "dpgs", "incharge_academic_cell", "registrar", "controller_of_examination", "librarian", "student"];
+// Incharge Academic Cell scope-split task (this revision) — the single
+// `incharge_academic_cell` option is replaced by the 4 scoped roles; each
+// stays a plain flat dropdown entry here (no new department/scope picker
+// needed — a Super Admin assigns one or more of the 4 the same way any
+// other global role is assigned, and may add more than one to the same
+// user for multi-scope holding).
+const GLOBAL_ROLE_OPTIONS = ["super_admin", "vice_chancellor", "dpgs", ...INCHARGE_ROLES, "registrar", "controller_of_examination", "librarian", "student"];
 const DEPARTMENT_ROLE_OPTIONS = ["hod", "faculty"];
 
 // Issue 4 fix: a single named constant for the Add User form's blank state,

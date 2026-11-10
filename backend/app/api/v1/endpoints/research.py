@@ -42,12 +42,12 @@ from sqlalchemy.orm import selectinload
 from pydantic import BaseModel, model_validator
 
 from app.db.base import get_db
-from app.core.dependencies import get_current_user, require_roles, student_user_clause
+from app.core.dependencies import get_current_user, require_roles, require_incharge_academic_cell, student_user_clause
 from app.core.faculty_scope import (
     faculty_has_department, faculty_has_other_department, faculty_department_ids,
     faculty_department_names, list_faculty_with_departments,
 )
-from app.models.user import User, UserRole, Department
+from app.models.user import User, UserRole, Department, Program
 from app.models.research import AdvisoryCommittee, CommitteeMember
 from app.models.synopsis import Synopsis, SynopsisApprovalCycle
 from app.models.external_examiner import ExternalExaminerSelection, ExternalExaminerApprovalCycle
@@ -56,7 +56,11 @@ from app.models.progress_report import ProgressReport, ProgressReportApprovalCyc
 # Programme<->Department many-to-many redesign — single shared implementation
 # in app/core/student_scope.py, re-exported under this file's existing
 # private name (also imported from here by ppw.py, unchanged).
-from app.core.student_scope import resolve_student_department_id as _student_department_id
+from app.core.student_scope import (
+    resolve_student_department_id as _student_department_id,
+    INCHARGE_SCOPE_ROLES, incharge_scopes_held, incharge_can_access_program, resolve_student_program,
+    incharge_scope_clause,
+)
 
 router = APIRouter(prefix="/research", tags=["Research"])
 logger = logging.getLogger(__name__)
@@ -69,7 +73,7 @@ _ADMIN_ROLES = (UserRole.SUPER_ADMIN,)
 # `can_manage_members` — global roles must never gain Major-Advisor/member
 # ownership merely because they can see everything (Section 29's explicit
 # "do not bypass Major Advisor ownership").
-_GLOBAL_VIEW_ROLES = (UserRole.SUPER_ADMIN, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS)
+_GLOBAL_VIEW_ROLES = (UserRole.SUPER_ADMIN, UserRole.DPGS)
 
 # The 5 confirmed PG/PhD Research Committee member types (BUSINESS_LOGIC.md M.5,
 # Rule 29), PLUS `co_major_advisor` — now confirmed OPTIONAL and selectable
@@ -333,6 +337,11 @@ def _recompute_committee_member_stage(all_members: list[CommitteeMember]) -> str
 async def _authorize_committee_view(committee: AdvisoryCommittee, user: User, db: AsyncSession) -> None:
     if user.active_role in _GLOBAL_VIEW_ROLES:
         return
+    if user.active_role in INCHARGE_SCOPE_ROLES:
+        student_program = await resolve_student_program(committee.student_id, db)
+        if incharge_can_access_program(incharge_scopes_held(user), student_program):
+            return
+        raise HTTPException(403, "You can only view committees within your assigned scope.")
     if user.active_role == UserRole.HOD:
         dept_id = await _student_department_id(committee.student_id, db)
         if dept_id and user.active_department_id and dept_id == user.active_department_id:
@@ -939,17 +948,25 @@ async def hod_approval(
 @router.patch("/committees/{committee_id}/incharge-approval")
 async def incharge_committee_approval(
     committee_id: UUID, body: HodApprovalIn, db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.INCHARGE_ACADEMIC_CELL)),
+    user: User = Depends(require_incharge_academic_cell(UserRole.SUPER_ADMIN)),
 ):
-    """Global role — no department match (Section 25). Approval only, never
-    a signature — no separate signing/OTP mechanism is introduced (unlike
-    Course Registration/PPW's DPGS stage). Advisory Committee document task
-    (this revision): the committee now HAS a downloadable document once
-    `dpgs_approved` (see `get_committee_document` below), but this stage
-    itself still records no approver identity — the document reports the
-    workflow's recorded status, nothing new is persisted here."""
+    """Incharge Academic Cell scope-split task (this revision) — SUPER_ADMIN
+    keeps unconditional access; an Incharge holder may act ONLY on a
+    committee whose student is within the UNION of scopes they hold
+    (superseding Section 25's old "no department match" global rule).
+    Approval only, never a signature — no separate signing/OTP mechanism is
+    introduced (unlike Course Registration/PPW's DPGS stage). Advisory
+    Committee document task (this revision): the committee now HAS a
+    downloadable document once `dpgs_approved` (see `get_committee_document`
+    below), but this stage itself still records no approver identity — the
+    document reports the workflow's recorded status, nothing new is
+    persisted here."""
     c = await db.get(AdvisoryCommittee, committee_id)
     if not c: raise HTTPException(404, "Committee not found.")
+    if user.active_role in INCHARGE_SCOPE_ROLES:
+        student_program = await resolve_student_program(c.student_id, db)
+        if not incharge_can_access_program(incharge_scopes_held(user), student_program):
+            raise HTTPException(403, "This committee is outside your assigned scope.")
     if c.status != "incharge_pending":
         raise HTTPException(400, "This committee is not awaiting Incharge Academic Cell approval.")
 
@@ -1116,6 +1133,13 @@ async def list_committees(db: AsyncSession = Depends(get_db), user: User = Depen
 
     if user.active_role in _GLOBAL_VIEW_ROLES:
         pass
+    elif user.active_role in INCHARGE_SCOPE_ROLES:
+        # Incharge Academic Cell scope-split task (this revision).
+        q = (
+            q.join(User, AdvisoryCommittee.student_id == User.id)
+             .join(Program, User.program_id == Program.id)
+             .where(incharge_scope_clause(incharge_scopes_held(user)))
+        )
     elif user.active_role == UserRole.HOD:
         if not user.active_department_id:
             return []

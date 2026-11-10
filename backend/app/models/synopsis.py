@@ -157,7 +157,7 @@ class SynopsisApprovalStage(Base):
     assignee_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id"))
     approver_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_users.id"))
     status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
-    acted_role: Mapped[str | None] = mapped_column(String(30))
+    acted_role: Mapped[str | None] = mapped_column(String(50))
     acted_department_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ams_departments.id"))
     acted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     remark: Mapped[str | None] = mapped_column(Text)

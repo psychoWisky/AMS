@@ -113,7 +113,7 @@ async def _create_schema() -> None:
 async def _seed_role_and_designation_master_data() -> None:
     from app.db.base import AsyncSessionLocal
     from app.models.user import Role, Designation
-    roles = ["SUPER_ADMIN", "VICE_CHANCELLOR", "DPGS", "INCHARGE_ACADEMIC_CELL", "REGISTRAR",
+    roles = ["SUPER_ADMIN", "VICE_CHANCELLOR", "DPGS", "INCHARGE_ACADEMIC_CELL_PG_VETERINARY", "INCHARGE_ACADEMIC_CELL_UG_VETERINARY", "INCHARGE_ACADEMIC_CELL_PG_FISHERY", "INCHARGE_ACADEMIC_CELL_UG_FISHERY", "REGISTRAR",
              "HOD", "FACULTY", "STUDENT", "EXTERNAL_EXAMINER", "LIBRARIAN", "CONTROLLER_OF_EXAMINATION"]
     async with AsyncSessionLocal() as db:
         for code in roles:
@@ -447,7 +447,7 @@ async def t_full_cleanup_preserves_superadmin_and_roles_and_removes_operational_
 
     counts = await _counts()
     assert counts["ams_users"] == 1, counts
-    assert counts["ams_roles"] == 11, "no role definitions must be deleted"
+    assert counts["ams_roles"] == 14, "no role definitions must be deleted"
     for t in ("ams_designations", "ams_courses",
               "ams_departments", "ams_colleges", "ams_programs", "ams_program_departments",
               "ams_college_programs", "ams_department_colleges", "ams_course_availability",
@@ -491,7 +491,7 @@ async def t_organizational_data_removed_superadmin_and_roles_intact():
     department-linked and must NOT be preserved while departments/colleges/
     programmes and their relationship tables are wiped — every one of them,
     and every M:N link table between them, must be fully empty — while the
-    Super Admin and all 11 role definitions remain completely intact."""
+    Super Admin and all 14 role definitions remain completely intact."""
     conn = await asyncpg.connect(_TEST_DATABASE_URL.replace("postgresql+asyncpg", "postgresql"))
     try:
         for t in ("ams_courses", "ams_course_availability", "ams_departments", "ams_colleges",
@@ -501,10 +501,10 @@ async def t_organizational_data_removed_superadmin_and_roles_intact():
             assert n == 0, f"{t} must be fully empty (organizational/master data is not preserved), found {n} row(s)"
 
         role_count = await conn.fetchval("SELECT COUNT(*) FROM ams_roles")
-        assert role_count == 11, f"all 11 current role definitions must remain, found {role_count}"
+        assert role_count == 14, f"all 14 current role definitions must remain, found {role_count}"
         role_codes = {r["code"] for r in await conn.fetch("SELECT code FROM ams_roles")}
         assert role_codes == {
-            "SUPER_ADMIN", "VICE_CHANCELLOR", "DPGS", "INCHARGE_ACADEMIC_CELL", "REGISTRAR",
+            "SUPER_ADMIN", "VICE_CHANCELLOR", "DPGS", "INCHARGE_ACADEMIC_CELL_PG_VETERINARY", "INCHARGE_ACADEMIC_CELL_UG_VETERINARY", "INCHARGE_ACADEMIC_CELL_PG_FISHERY", "INCHARGE_ACADEMIC_CELL_UG_FISHERY", "REGISTRAR",
             "HOD", "FACULTY", "STUDENT", "EXTERNAL_EXAMINER", "LIBRARIAN", "CONTROLLER_OF_EXAMINATION",
         }
 
@@ -561,7 +561,7 @@ async def t_repeated_invocation_is_safe_and_predictable():
     assert r2.returncode == 0, r2.stdout + r2.stderr
     assert "CLEANUP COMPLETE" in r2.stdout
     counts = await _counts()
-    assert counts["ams_users"] == 1 and counts["ams_roles"] == 11
+    assert counts["ams_users"] == 1 and counts["ams_roles"] == 14
 
 
 async def t_wrong_confirmation_phrase_aborts():
@@ -606,7 +606,7 @@ async def main() -> None:
             "ABORT: ambiguous (duplicate) Super Admin blocks the run, changes nothing": t_ambiguous_superadmin_aborts_safely,
             "ABORT: missing Super Admin blocks the run": t_missing_superadmin_aborts_safely,
             "CLEANUP: Super Admin preserved byte-for-byte; roles preserved; EVERY organizational/operational table emptied (courses/designations included)": t_full_cleanup_preserves_superadmin_and_roles_and_removes_operational_data,
-            "ORGANIZATIONAL DATA: courses/departments/colleges/programmes/link-tables all removed; Super Admin + all 11 roles intact": t_organizational_data_removed_superadmin_and_roles_intact,
+            "ORGANIZATIONAL DATA: courses/departments/colleges/programmes/link-tables all removed; Super Admin + all 14 roles intact": t_organizational_data_removed_superadmin_and_roles_intact,
             "FK INTEGRITY: Super Admin's own FKs are NULL (never dangling); role assignment survives the organizational cleanup, not cascade-deleted": t_superadmin_foreign_keys_valid_after_organizational_cleanup,
             "IDEMPOTENT: a second full run against an already-cleaned database is a safe no-op": t_repeated_invocation_is_safe_and_predictable,
             "ABORT: wrong confirmation phrase never applies the cleanup": t_wrong_confirmation_phrase_aborts,

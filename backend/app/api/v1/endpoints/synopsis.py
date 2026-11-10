@@ -50,7 +50,10 @@ from app.api.v1.endpoints.ppw import _PPW_LOAD_OPTIONS, _ppw_dict
 from app.core.config import settings
 from app.core.dependencies import get_current_user, require_roles
 from app.core.email import send_email
-from app.core.student_scope import resolve_student_department_id
+from app.core.student_scope import (
+    resolve_student_department_id, INCHARGE_SCOPE_ROLES, incharge_scopes_held,
+    incharge_can_access_program, resolve_student_program,
+)
 from app.db.base import get_db
 from app.models.audit import AuditLog
 from app.models.ppw import Ppw
@@ -68,7 +71,7 @@ router = APIRouter(prefix="/synopsis", tags=["Synopsis"])
 UNIVERSITY_NAME = "Assam Veterinary And Fishery University"
 _PG_LEVELS = ("PG", "PhD")
 _EDITABLE_STATUSES = ("draft", "reverted")
-_APPROVER_ROLES = (UserRole.FACULTY, UserRole.HOD, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS)
+_APPROVER_ROLES = (UserRole.FACULTY, UserRole.HOD, *INCHARGE_SCOPE_ROLES, UserRole.DPGS)
 # A committee stage belongs to a PERSON (their Advisory Committee membership); they may act on it
 # while their active session role is a faculty-type role. Global roles / Student / Super Admin may not.
 _COMMITTEE_ACTING_ROLES = (UserRole.FACULTY, UserRole.HOD)
@@ -101,7 +104,19 @@ _ADVISORY_LABELS = {
     "member": "Member",
 }
 _ADVISORY_ORDER = ["co_major_advisor", "member_major", "member_minor", "supporting", "member_of_others", "member"]
-_ROLE_DISPLAY = {"hod": "HOD", "faculty": "Faculty", "incharge_academic_cell": "Incharge Academic Cell", "dpgs": "DPGS", "super_admin": "Super Admin"}
+_ROLE_DISPLAY = {
+    "hod": "HOD", "faculty": "Faculty", "dpgs": "DPGS", "super_admin": "Super Admin",
+    # Incharge Academic Cell scope-split task (this revision) — `acted_role`
+    # stores the caller's FULL `active_role.value` at the moment they acted
+    # (see the `stage.acted_role = user.active_role.value` call sites), so
+    # every one of the 4 scoped values must map to the same display label —
+    # the student-facing "who acted" display never needs to distinguish
+    # WHICH Incharge scope, only that it was Incharge Academic Cell.
+    "incharge_academic_cell_pg_veterinary": "Incharge Academic Cell",
+    "incharge_academic_cell_ug_veterinary": "Incharge Academic Cell",
+    "incharge_academic_cell_pg_fishery": "Incharge Academic Cell",
+    "incharge_academic_cell_ug_fishery": "Incharge Academic Cell",
+}
 _MAX_BYTES = settings.MAX_FILE_SIZE_MB * 1024 * 1024
 _STORED_NAME_RE = re.compile(r"^[0-9a-f]{32}\.pdf$|^final-[0-9a-f]{32}\.pdf$")
 _ALLOWED_CONTENT_TYPES = {"", "application/pdf", "application/x-pdf", "application/octet-stream"}
@@ -297,8 +312,13 @@ async def _authorize_view(s: Synopsis, user: User, db: AsyncSession) -> None:
         raise _not_found()
     if s.status == "draft":
         raise _not_found()
-    if role in (UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS):
+    if role == UserRole.DPGS:
         return
+    if role in INCHARGE_SCOPE_ROLES:
+        student_program = await resolve_student_program(s.student_id, db)
+        if incharge_can_access_program(incharge_scopes_held(user), student_program):
+            return
+        raise _not_found()
     if role in (UserRole.FACULTY, UserRole.HOD):
         # Anyone who was ever assigned a stage on this Synopsis (past-cycle approvers keep read access).
         assigned = await db.execute(
@@ -372,8 +392,10 @@ async def _find_my_stage(s: Synopsis, user: User, db: AsyncSession) -> Optional[
                 if dept_id and dept_id == user.active_department_id:
                     return stage
         elif stage.stage_type == "incharge_academic_cell":
-            if user.active_role == UserRole.INCHARGE_ACADEMIC_CELL:
-                return stage
+            if user.active_role in INCHARGE_SCOPE_ROLES:
+                student_program = await resolve_student_program(s.student_id, db)
+                if incharge_can_access_program(incharge_scopes_held(user), student_program):
+                    return stage
         elif stage.stage_type == "dpgs":
             if user.active_role == UserRole.DPGS:
                 return stage
@@ -686,7 +708,9 @@ async def list_pending_approvals(db: AsyncSession = Depends(get_db), user: User 
             .where(SynopsisApprovalCycle.status == "active", SynopsisApprovalStage.status == "pending",
                    SynopsisApprovalStage.assignee_id == user.id)
         )).scalars().all())
-    phase = {UserRole.HOD: "hod_pending", UserRole.INCHARGE_ACADEMIC_CELL: "incharge_pending", UserRole.DPGS: "dpgs_pending"}.get(user.active_role)
+    phase = {UserRole.HOD: "hod_pending", UserRole.DPGS: "dpgs_pending"}.get(user.active_role)
+    if user.active_role in INCHARGE_SCOPE_ROLES:
+        phase = "incharge_pending"
     if phase:
         q = select(Synopsis.id).where(Synopsis.status == phase)
         if user.active_role == UserRole.HOD:

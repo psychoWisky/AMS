@@ -6,7 +6,7 @@ import { useRole, useUser } from "@/stores/auth.store";
 import { toast } from "sonner";
 import { FlaskConical, Plus, Loader2, Eye, X, CheckCircle2, XCircle, UserPlus, Trash2, Download } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { committeeRoleLabel, COMMITTEE_MEMBER_ROLES, COMMITTEE_EXTERNAL_ROLES } from "@/lib/utils";
+import { committeeRoleLabel, COMMITTEE_MEMBER_ROLES, COMMITTEE_EXTERNAL_ROLES, isIncharge } from "@/lib/utils";
 
 interface CommitteeMemberOut {
   id: string; faculty_id: string | null; is_external: boolean; faculty_name: string | null;
@@ -253,7 +253,7 @@ function StaffCommitteeView() {
   const canPropose = ["super_admin", "hod"].includes(role ?? "");
   // Incharge Academic Cell / DPGS task (this revision) — both approve
   // committees after HOD (Section 25/26), global (no department check).
-  const isInchargeLike = ["super_admin", "incharge_academic_cell"].includes(role ?? "");
+  const isInchargeLike = role === "super_admin" || isIncharge(role);
   const isDpgsLike = ["super_admin", "dpgs"].includes(role ?? "");
 
   const [showPropose, setShowPropose] = useState(false);

@@ -50,10 +50,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
-from app.core.dependencies import get_current_user, require_roles
+from app.core.dependencies import get_current_user, require_roles, require_incharge_academic_cell
 from app.core.email import enqueue_email
 from app.core.security import generate_temp_password, hash_password
-from app.core.student_scope import resolve_student_department_id
+from app.core.student_scope import (
+    resolve_student_department_id, INCHARGE_SCOPE_ROLES, incharge_scopes_held,
+    incharge_can_access_program, resolve_student_program,
+)
 # Research Course Assignment Strategy task — hooks the EXISTING VC-selection
 # success path below into the per-student Research-enrollment backfill,
 # reusing (never duplicating) the resolution helper enrollment.py's enroll()/
@@ -84,7 +87,7 @@ _EDITABLE_STATUSES = ("draft", "reverted")
 # Every stage past the Major Advisor is a signature (OTP) EXCEPT Incharge, which is
 # workflow-approval-only — identical convention to Synopsis's `_SIGNATORY_STAGES`.
 _SIGNATORY_STAGES = ("major_advisor", "hod", "dpgs", "vc")
-_APPROVER_ROLES = (UserRole.FACULTY, UserRole.HOD, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS, UserRole.VICE_CHANCELLOR)
+_APPROVER_ROLES = (UserRole.FACULTY, UserRole.HOD, *INCHARGE_SCOPE_ROLES, UserRole.DPGS, UserRole.VICE_CHANCELLOR)
 _OTP_TTL_MINUTES = 10
 
 _PHASE_FOR_STAGE = {
@@ -105,8 +108,14 @@ _STATUS_LABELS = {
     "reverted": "Reverted",
 }
 _ROLE_DISPLAY = {
-    "hod": "HOD", "faculty": "Faculty", "incharge_academic_cell": "Incharge Academic Cell",
+    "hod": "HOD", "faculty": "Faculty",
     "dpgs": "DPGS", "vice_chancellor": "Vice Chancellor", "super_admin": "Super Admin",
+    # Incharge Academic Cell scope-split task (this revision) — see
+    # synopsis.py's identical dict for why all 4 scoped values map here.
+    "incharge_academic_cell_pg_veterinary": "Incharge Academic Cell",
+    "incharge_academic_cell_ug_veterinary": "Incharge Academic Cell",
+    "incharge_academic_cell_pg_fishery": "Incharge Academic Cell",
+    "incharge_academic_cell_ug_fishery": "Incharge Academic Cell",
 }
 _STAGE_ROLE_LABELS = {
     "major_advisor": "Major Advisor", "hod": "Head of the Department",
@@ -267,8 +276,13 @@ async def _authorize_view(s: ExternalExaminerSelection, user: User, db: AsyncSes
     role = user.active_role
     if role == UserRole.SUPER_ADMIN:
         return
-    if role in (UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS, UserRole.VICE_CHANCELLOR):
+    if role in (UserRole.DPGS, UserRole.VICE_CHANCELLOR):
         return
+    if role in INCHARGE_SCOPE_ROLES:
+        student_program = await resolve_student_program(s.student_id, db)
+        if incharge_can_access_program(incharge_scopes_held(user), student_program):
+            return
+        raise _not_found()
     if role == UserRole.FACULTY:
         major = await _accepted_major_advisor(s.student_id, db)
         if major and major.faculty_id == user.id:
@@ -325,8 +339,10 @@ async def _find_my_stage(s: ExternalExaminerSelection, user: User, db: AsyncSess
                 if dept_id and dept_id == user.active_department_id:
                     return stage
         elif stage.stage_type == "incharge_academic_cell":
-            if user.active_role == UserRole.INCHARGE_ACADEMIC_CELL:
-                return stage
+            if user.active_role in INCHARGE_SCOPE_ROLES:
+                student_program = await resolve_student_program(s.student_id, db)
+                if incharge_can_access_program(incharge_scopes_held(user), student_program):
+                    return stage
         elif stage.stage_type == "dpgs":
             if user.active_role == UserRole.DPGS:
                 return stage
@@ -578,9 +594,11 @@ async def list_pending_approvals(db: AsyncSession = Depends(get_db), user: User 
                    CommitteeMember.faculty_id == user.id)
         )).scalars().all())
     phase = {
-        UserRole.HOD: "hod_pending", UserRole.INCHARGE_ACADEMIC_CELL: "incharge_pending",
+        UserRole.HOD: "hod_pending",
         UserRole.DPGS: "dpgs_pending", UserRole.VICE_CHANCELLOR: "vc_pending",
     }.get(user.active_role)
+    if user.active_role in INCHARGE_SCOPE_ROLES:
+        phase = "incharge_pending"
     if phase:
         q = select(ExternalExaminerSelection.id).where(ExternalExaminerSelection.status == phase)
         if user.active_role == UserRole.HOD:
@@ -652,7 +670,7 @@ async def get_selection(selection_id: UUID, db: AsyncSession = Depends(get_db), 
 @router.patch("/{selection_id}/proposals/{proposal_id}")
 async def edit_proposal(
     selection_id: UUID, proposal_id: UUID, body: ProposalEditIn, request: Request,
-    db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.INCHARGE_ACADEMIC_CELL)),
+    db: AsyncSession = Depends(get_db), user: User = Depends(require_incharge_academic_cell()),
 ):
     """Incharge-only correction of the six proposal fields, WHILE the selection is
     at the Incharge stage — never `slot_number`, `cycle_id`, `examiner_id`, or the

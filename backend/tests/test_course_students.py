@@ -30,7 +30,7 @@ from app.main import app
 from app.models.course import Course, CourseOffering
 from app.models.enrollment import StudentEnrollment
 from app.models.academic import AcademicCalendar, Semester
-from app.models.user import Department, RefreshToken, User, UserRole, UserRoleAssignment
+from app.models.user import Department, Program, RefreshToken, User, UserRole, UserRoleAssignment
 
 _TAG = uuid.uuid4().hex[:6]
 _PFX = "zztest_cst_"
@@ -63,11 +63,11 @@ async def _session(user_id) -> str:
     return create_access_token(str(user_id), {"sid": str(rt)})
 
 
-async def _mk_user(key, role, dept, *, roll=None) -> None:
+async def _mk_user(key, role, dept, *, roll=None, program=None) -> None:
     async with AsyncSessionLocal() as db:
         u = User(
             email=f"{_PFX}{key}_{_TAG}@avfu.ac.in", first_name="ZZTEST", last_name=f"CST{key.upper()}",
-            role=role, department_id=dept.id if dept else None,
+            role=role, department_id=dept.id if dept else None, program_id=program.id if program else None,
             student_roll=roll, mobile="9876543210", gender="Male", is_active=True, is_verified=True,
         )
         db.add(u)
@@ -83,7 +83,9 @@ async def _setup() -> None:
     settings.ENVIRONMENT = "development"
     async with AsyncSessionLocal() as db:
         holders = (await db.execute(text(
-            "select count(*) from ams_user_role_assignments where role in ('INCHARGE_ACADEMIC_CELL','DPGS')"
+            "select count(*) from ams_user_role_assignments where role in "
+            "('INCHARGE_ACADEMIC_CELL_PG_VETERINARY','INCHARGE_ACADEMIC_CELL_UG_VETERINARY',"
+            "'INCHARGE_ACADEMIC_CELL_PG_FISHERY','INCHARGE_ACADEMIC_CELL_UG_FISHERY','DPGS')"
         ))).scalar_one()
         if holders:
             print("STOP: a real Incharge Academic Cell / DPGS holder exists (single-holder roles); refusing to run.")
@@ -116,18 +118,28 @@ async def _setup() -> None:
         db.add_all([o1, o2, o_empty])
         await db.flush()
         S["OFF1"], S["OFF2"], S["OFF_EMPTY"] = o1.id, o2.id, o_empty.id
+        # Incharge Academic Cell scope-split task (this revision) — the
+        # Course Students roster is now additionally filtered per-student by
+        # Programme scope; `s2_approved` (the student whose roster row the
+        # "incharge" test user must still be able to see) needs a real
+        # Programme with a resolvable faculty for this.
+        S["PROGRAM"] = (await db.execute(select(Program).where(Program.faculty.isnot(None)).limit(1))).scalar_one()
         await db.commit()
 
-    d1, d2 = S["D1"], S["D2"]
+    d1, d2, program = S["D1"], S["D2"], S["PROGRAM"]
     await _mk_user("hod1", UserRole.HOD, d1)
     await _mk_user("hod2", UserRole.HOD, d2)
     await _mk_user("outsider_faculty", UserRole.FACULTY, d1)
     await _mk_user("super_admin_probe", UserRole.SUPER_ADMIN, None)
-    await _mk_user("incharge", UserRole.INCHARGE_ACADEMIC_CELL, None)
+    _incharge_role = {
+        "Veterinary": UserRole.INCHARGE_ACADEMIC_CELL_PG_VETERINARY,
+        "Fishery": UserRole.INCHARGE_ACADEMIC_CELL_PG_FISHERY,
+    }[program.faculty]
+    await _mk_user("incharge", _incharge_role, None)
     await _mk_user("dpgs", UserRole.DPGS, None)
 
     await _mk_user("s1_approved", UserRole.STUDENT, d1, roll=f"ZZCST-s1-{_TAG}")
-    await _mk_user("s2_approved", UserRole.STUDENT, d2, roll=f"ZZCST-s2-{_TAG}")
+    await _mk_user("s2_approved", UserRole.STUDENT, d2, roll=f"ZZCST-s2-{_TAG}", program=program)
     await _mk_user("s3_pending", UserRole.STUDENT, d1, roll=f"ZZCST-s3-{_TAG}")
     await _mk_user("s4_withdrawn", UserRole.STUDENT, d1, roll=f"ZZCST-s4-{_TAG}")
 

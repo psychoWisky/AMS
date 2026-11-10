@@ -9,6 +9,7 @@ import {
   ProposalTable, RevertNotice, SelectionStatusBadge, StageTimeline, StudentInfoCard,
   apiErrorMessage, formatDateTime, type ExaminerProposal, type SelectionDetail,
 } from "@/components/ui/external-examiner-parts";
+import { isIncharge as isInchargeRole } from "@/lib/utils";
 
 // Approver inbox for HOD / Faculty (as Major Advisor) / Incharge Academic Cell / DPGS / Vice
 // Chancellor — follows the PPW/Synopsis approvals-page pattern exactly. There is no student variant.
@@ -90,7 +91,7 @@ export default function ExternalExaminerApprovalsPage() {
   }
 
   const stage = detail?.my_pending_stage ?? null;
-  const isIncharge = role === "incharge_academic_cell";
+  const isIncharge = isInchargeRole(role);
   const isVc = role === "vice_chancellor" && stage?.stage_type === "vc";
 
   return (

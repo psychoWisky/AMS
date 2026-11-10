@@ -189,7 +189,9 @@ async def _setup() -> None:
             print("STOP: stray zztest_ras_ users already exist from a previous failed run; refusing to run.")
             sys.exit(2)
         holders = (await db.execute(text(
-            "select count(*) from ams_user_role_assignments where role in ('INCHARGE_ACADEMIC_CELL','DPGS','VICE_CHANCELLOR')"
+            "select count(*) from ams_user_role_assignments where role in "
+            "('INCHARGE_ACADEMIC_CELL_PG_VETERINARY','INCHARGE_ACADEMIC_CELL_UG_VETERINARY',"
+            "'INCHARGE_ACADEMIC_CELL_PG_FISHERY','INCHARGE_ACADEMIC_CELL_UG_FISHERY','DPGS','VICE_CHANCELLOR')"
         ))).scalar_one()
         if holders:
             print("STOP: a real Incharge Academic Cell / DPGS / Vice Chancellor holder exists (single-holder roles); refusing to run.")
@@ -236,7 +238,9 @@ async def _setup() -> None:
     await _mk_user("ma1", UserRole.FACULTY, d1)
     await _mk_user("fac_edit", UserRole.FACULTY, d1)
     await _mk_user("fac_other_dept", UserRole.FACULTY, d2)
-    await _mk_user("incharge", UserRole.INCHARGE_ACADEMIC_CELL, None)
+    # Incharge Academic Cell scope-split task (this revision) — every
+    # student fixture uses `program=pg` (MVSc, Veterinary).
+    await _mk_user("incharge", UserRole.INCHARGE_ACADEMIC_CELL_PG_VETERINARY, None)
     await _mk_user("dpgs", UserRole.DPGS, None)
     await _mk_user("vc", UserRole.VICE_CHANCELLOR, None)
 

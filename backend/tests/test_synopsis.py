@@ -220,7 +220,11 @@ async def _setup() -> None:
     synopsis_module.send_email = lambda to, subject, body: True     # never send real email
     settings.ENVIRONMENT = "development"                            # dev_otp available to the tests
     async with AsyncSessionLocal() as db:
-        holders = (await db.execute(text("select count(*) from ams_user_role_assignments where role in ('INCHARGE_ACADEMIC_CELL','DPGS')"))).scalar_one()
+        holders = (await db.execute(text(
+            "select count(*) from ams_user_role_assignments where role in "
+            "('INCHARGE_ACADEMIC_CELL_PG_VETERINARY','INCHARGE_ACADEMIC_CELL_UG_VETERINARY',"
+            "'INCHARGE_ACADEMIC_CELL_PG_FISHERY','INCHARGE_ACADEMIC_CELL_UG_FISHERY','DPGS')"
+        ))).scalar_one()
         if holders:
             print("STOP: a real Incharge Academic Cell / DPGS holder exists (single-holder roles); refusing to run.")
             sys.exit(2)
@@ -238,7 +242,9 @@ async def _setup() -> None:
     S["ADMIN"] = admin_id
     d1, d2 = S["D1"], S["D2"]
     F, H, ST = UserRole.FACULTY, UserRole.HOD, UserRole.STUDENT
-    inc, dpgs = UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS
+    # Incharge Academic Cell scope-split task (this revision) — s1..s7 all
+    # use `program=S["P"]` (MVSc, Veterinary).
+    inc, dpgs = UserRole.INCHARGE_ACADEMIC_CELL_PG_VETERINARY, UserRole.DPGS
     for k in ("s1", "s2", "s3", "s4", "s5", "s6", "s7"):
         await _mk_user(k, ST, d1, [(ST, None)], program=S["P"], college=S["COLLEGE"].id, roll=f"ZZTEST-SYN-{k}-{_TAG}")
     await _mk_user("sug", ST, d1, [(ST, None)], program=S["UG"], college=S["COLLEGE"].id, roll=f"ZZTEST-SYN-ug-{_TAG}")
@@ -274,7 +280,15 @@ async def _setup() -> None:
             db.add(c)
             await db.flush()
             courses[key] = c
-        ppw = Ppw(student_id=U["s1"], status="draft")
+        # Manual discipline-selection task (prior revision, this session) —
+        # Major/Minor/Supporting Discipline are explicitly-selected fields,
+        # no longer derived from PpwCourse rows; set directly here to match
+        # this fixture's own comment above ("Minor = D2, Supporting = LPM +
+        # D3, Major = S1's own department D1").
+        ppw = Ppw(
+            student_id=U["s1"], status="draft",
+            major_department_id=S["D1"].id, minor_department_id=S["D2"].id, supporting_department_id=S["D3"].id,
+        )
         db.add(ppw)
         await db.flush()
         db.add_all([
@@ -288,7 +302,7 @@ async def _setup() -> None:
     for k in ("s1", "s2", "s3", "s4", "s5", "s6", "s7", "sug", "ma", "co", "mm", "mn", "sp", "ot1", "ot2", "x", "hod1", "hod2", "dpgs"):
         TOK[k] = await _session(U[k])
     TOK["incfac:faculty"] = await _session(U["incfac"], A[f"incfac:{UserRole.FACULTY.value}:{d1.code}"])
-    TOK["incfac:incharge"] = await _session(U["incfac"], A[f"incfac:{UserRole.INCHARGE_ACADEMIC_CELL.value}"])
+    TOK["incfac:incharge"] = await _session(U["incfac"], A[f"incfac:{inc.value}"])
     TOK["mh:d1"] = await _session(U["mh"], A[f"mh:{UserRole.HOD.value}:{S['D1'].code}"])
     TOK["mh:d2"] = await _session(U["mh"], A[f"mh:{UserRole.HOD.value}:{S['D2'].code}"])
     S["hod1_token"] = TOK["hod1"]

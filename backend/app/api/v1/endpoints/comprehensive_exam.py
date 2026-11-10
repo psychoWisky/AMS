@@ -41,10 +41,13 @@ from starlette.concurrency import run_in_threadpool
 
 from app.api.v1.endpoints.synopsis import UNIVERSITY_NAME
 from app.core.config import settings
-from app.core.dependencies import get_current_user, require_roles
+from app.core.dependencies import get_current_user, require_roles, require_incharge_academic_cell
 from app.core.email import enqueue_email
 from app.core.major_advisor import resolve_accepted_major_advisor
-from app.core.student_scope import resolve_student_department_id
+from app.core.student_scope import (
+    resolve_student_department_id, INCHARGE_SCOPE_ROLES, incharge_scopes_held,
+    incharge_can_access_program, resolve_student_program, incharge_scope_clause,
+)
 from app.db.base import get_db
 from app.models.comprehensive_exam import (
     ComprehensiveExamApplication, ComprehensiveExamApplicationCourse, ComprehensiveExamViva,
@@ -69,7 +72,7 @@ router = APIRouter(prefix="/comprehensive-exam", tags=["Comprehensive Examinatio
 
 MAJOR_CREDITS_REQUIRED = 20
 MINOR_CREDITS_REQUIRED = 8
-_APPROVER_ROLES = (UserRole.SUPER_ADMIN, UserRole.FACULTY, UserRole.HOD, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS)
+_APPROVER_ROLES = (UserRole.SUPER_ADMIN, UserRole.FACULTY, UserRole.HOD, *INCHARGE_SCOPE_ROLES, UserRole.DPGS)
 _SUBTITLES = {"PG": "( Internal Oral Comprehensive )", "PhD": "( Pre Oral Comprehensive )"}
 _MAX_BYTES = settings.MAX_FILE_SIZE_MB * 1024 * 1024
 _ALLOWED_PDF_CONTENT_TYPES = {"", "application/pdf", "application/x-pdf", "application/octet-stream"}
@@ -281,12 +284,17 @@ async def _authorize_view_application(app_row: ComprehensiveExamApplication, use
         if await _hod_dept_matches(app_row.student_id, user, db):
             return
         raise _not_found()
-    if role in (UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS, UserRole.VICE_CHANCELLOR):
+    if role in (UserRole.DPGS, UserRole.VICE_CHANCELLOR):
         return
+    if role in INCHARGE_SCOPE_ROLES:
+        student_program = await resolve_student_program(app_row.student_id, db)
+        if incharge_can_access_program(incharge_scopes_held(user), student_program):
+            return
+        raise _not_found()
     raise _not_found()
 
 
-# ── Schemas ───────────────────────────────────────────────────────────────────────────────────
+# ── Schemas───────────────────────────────────────────────────────────────────────────────────
 
 class RevertIn(BaseModel):
     remark: str
@@ -480,8 +488,16 @@ async def list_applications(db: AsyncSession = Depends(get_db), user: User = Dep
         if not user.active_department_id:
             return []
         q = q.join(User, User.id == ComprehensiveExamApplication.student_id).where(User.department_id == user.active_department_id)
-    elif role == UserRole.INCHARGE_ACADEMIC_CELL:
-        q = q.where(ComprehensiveExamApplication.status.in_(("incharge_pending", "dpgs_pending", "approved")))
+    elif role in INCHARGE_SCOPE_ROLES:
+        # Incharge Academic Cell scope-split task (this revision) — the
+        # pre-existing status-based narrowing stays, AND'd with the new
+        # scope filter (joined through the student's own Programme).
+        q = (
+            q.where(ComprehensiveExamApplication.status.in_(("incharge_pending", "dpgs_pending", "approved")))
+             .join(User, User.id == ComprehensiveExamApplication.student_id)
+             .join(Program, User.program_id == Program.id)
+             .where(incharge_scope_clause(incharge_scopes_held(user)))
+        )
     elif role == UserRole.DPGS:
         q = q.where(ComprehensiveExamApplication.status.in_(("dpgs_pending", "approved")))
     elif role != UserRole.SUPER_ADMIN:
@@ -601,8 +617,12 @@ async def approve_application(application_id: UUID, db: AsyncSession = Depends(g
         app_row.hod_approved_at = now
         app_row.status = "incharge_pending"
     elif app_row.status == "incharge_pending":
-        if user.active_role not in (UserRole.INCHARGE_ACADEMIC_CELL, UserRole.SUPER_ADMIN):
-            raise HTTPException(403, "Insufficient permissions.")
+        if user.active_role != UserRole.SUPER_ADMIN:
+            if user.active_role not in INCHARGE_SCOPE_ROLES:
+                raise HTTPException(403, "Insufficient permissions.")
+            student_program = await resolve_student_program(app_row.student_id, db)
+            if not incharge_can_access_program(incharge_scopes_held(user), student_program):
+                raise HTTPException(403, "Insufficient permissions.")
         app_row.incharge_approved_by = user.id
         app_row.incharge_approved_at = now
         app_row.status = "dpgs_pending"
@@ -630,7 +650,11 @@ async def revert_application(application_id: UUID, body: RevertIn, db: AsyncSess
     elif app_row.status == "hod_pending":
         authorized = await _hod_dept_matches(app_row.student_id, user, db)
     elif app_row.status == "incharge_pending":
-        authorized = user.active_role in (UserRole.INCHARGE_ACADEMIC_CELL, UserRole.SUPER_ADMIN)
+        if user.active_role == UserRole.SUPER_ADMIN:
+            authorized = True
+        elif user.active_role in INCHARGE_SCOPE_ROLES:
+            student_program = await resolve_student_program(app_row.student_id, db)
+            authorized = incharge_can_access_program(incharge_scopes_held(user), student_program)
     elif app_row.status == "dpgs_pending":
         authorized = user.active_role in (UserRole.DPGS, UserRole.SUPER_ADMIN)
     if not authorized:
@@ -805,8 +829,12 @@ async def approve_viva_report(report_id: UUID, db: AsyncSession = Depends(get_db
         report.hod_approved_at = now
         report.status = "incharge_pending"
     elif report.status == "incharge_pending":
-        if user.active_role not in (UserRole.INCHARGE_ACADEMIC_CELL, UserRole.SUPER_ADMIN):
-            raise HTTPException(403, "Insufficient permissions.")
+        if user.active_role != UserRole.SUPER_ADMIN:
+            if user.active_role not in INCHARGE_SCOPE_ROLES:
+                raise HTTPException(403, "Insufficient permissions.")
+            student_program = await resolve_student_program(app_row.student_id, db)
+            if not incharge_can_access_program(incharge_scopes_held(user), student_program):
+                raise HTTPException(403, "Insufficient permissions.")
         report.incharge_approved_by = user.id
         report.incharge_approved_at = now
         report.status = "dpgs_pending"
@@ -837,7 +865,11 @@ async def revert_viva_report(report_id: UUID, body: RevertIn, db: AsyncSession =
     elif report.status == "hod_pending":
         authorized = await _hod_dept_matches(app_row.student_id, user, db)
     elif report.status == "incharge_pending":
-        authorized = user.active_role in (UserRole.INCHARGE_ACADEMIC_CELL, UserRole.SUPER_ADMIN)
+        if user.active_role == UserRole.SUPER_ADMIN:
+            authorized = True
+        elif user.active_role in INCHARGE_SCOPE_ROLES:
+            student_program = await resolve_student_program(app_row.student_id, db)
+            authorized = incharge_can_access_program(incharge_scopes_held(user), student_program)
     elif report.status == "dpgs_pending":
         authorized = user.active_role in (UserRole.DPGS, UserRole.SUPER_ADMIN)
     if not authorized:
@@ -976,7 +1008,7 @@ def _panel_current_stage(cycle: ComprehensiveExamExternalPanelCycle) -> str:
 @router.get("/external-panel/pending-approvals")
 async def list_external_panel_pending_approvals(
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(UserRole.HOD, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS, UserRole.VICE_CHANCELLOR, UserRole.SUPER_ADMIN)),
+    user: User = Depends(require_roles(UserRole.HOD, *INCHARGE_SCOPE_ROLES, UserRole.DPGS, UserRole.VICE_CHANCELLOR, UserRole.SUPER_ADMIN)),
 ):
     """"My External Panel approvals" inbox — mirrors the established
     `GET /external-examiners/pending-approvals` pattern exactly. Without this endpoint, HOD/
@@ -994,6 +1026,10 @@ async def list_external_panel_pending_approvals(
             .selectinload(ComprehensiveExamExternalPanelSelection.application)
             .selectinload(ComprehensiveExamApplication.student)
             .selectinload(User.department),
+            selectinload(ComprehensiveExamExternalPanelCycle.selection)
+            .selectinload(ComprehensiveExamExternalPanelSelection.application)
+            .selectinload(ComprehensiveExamApplication.student)
+            .selectinload(User.program),
         )
         .where(ComprehensiveExamExternalPanelCycle.status == "active")
     )
@@ -1007,8 +1043,10 @@ async def list_external_panel_pending_approvals(
                 continue
             if not await _hod_dept_matches(app_row.student_id, user, db):
                 continue
-        elif user.active_role == UserRole.INCHARGE_ACADEMIC_CELL:
+        elif user.active_role in INCHARGE_SCOPE_ROLES:
             if stage != "incharge_academic_cell":
+                continue
+            if not incharge_can_access_program(incharge_scopes_held(user), app_row.student.program if app_row.student else None):
                 continue
         elif user.active_role == UserRole.DPGS:
             if stage != "dpgs":
@@ -1063,7 +1101,7 @@ async def get_external_panel(cycle_id: UUID, db: AsyncSession = Depends(get_db),
 
 
 @router.post("/external-panel/{cycle_id}/approve")
-async def approve_external_panel(cycle_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.HOD, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS, UserRole.SUPER_ADMIN))):
+async def approve_external_panel(cycle_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.HOD, *INCHARGE_SCOPE_ROLES, UserRole.DPGS, UserRole.SUPER_ADMIN))):
     cycle = await _get_panel_cycle(cycle_id, db)
     app_row = await _get_application(cycle.selection.application_id, db)
     now = _now()
@@ -1076,8 +1114,12 @@ async def approve_external_panel(cycle_id: UUID, db: AsyncSession = Depends(get_
         cycle.hod_approved_at = now
         return await _commit_and_return(db, {"message": "HOD approved.", "stage": "hod"})
     if not cycle.incharge_approved_at:
-        if user.active_role not in (UserRole.INCHARGE_ACADEMIC_CELL, UserRole.SUPER_ADMIN):
-            raise HTTPException(403, "Insufficient permissions.")
+        if user.active_role != UserRole.SUPER_ADMIN:
+            if user.active_role not in INCHARGE_SCOPE_ROLES:
+                raise HTTPException(403, "Insufficient permissions.")
+            student_program = await resolve_student_program(app_row.student_id, db)
+            if not incharge_can_access_program(incharge_scopes_held(user), student_program):
+                raise HTTPException(403, "Insufficient permissions.")
         cycle.incharge_approved_by = user.id
         cycle.incharge_approved_at = now
         return await _commit_and_return(db, {"message": "Incharge approved.", "stage": "incharge_academic_cell"})
@@ -1096,7 +1138,7 @@ async def _commit_and_return(db: AsyncSession, payload: dict) -> dict:
 
 
 @router.post("/external-panel/{cycle_id}/revert")
-async def revert_external_panel(cycle_id: UUID, body: RevertIn, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.HOD, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS, UserRole.VICE_CHANCELLOR, UserRole.SUPER_ADMIN))):
+async def revert_external_panel(cycle_id: UUID, body: RevertIn, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.HOD, *INCHARGE_SCOPE_ROLES, UserRole.DPGS, UserRole.VICE_CHANCELLOR, UserRole.SUPER_ADMIN))):
     cycle = await _get_panel_cycle(cycle_id, db)
     app_row = await _get_application(cycle.selection.application_id, db)
     if cycle.status != "active":
@@ -1105,7 +1147,11 @@ async def revert_external_panel(cycle_id: UUID, body: RevertIn, db: AsyncSession
     if not cycle.hod_approved_at:
         authorized = await _hod_dept_matches(app_row.student_id, user, db)
     elif not cycle.incharge_approved_at:
-        authorized = user.active_role in (UserRole.INCHARGE_ACADEMIC_CELL, UserRole.SUPER_ADMIN)
+        if user.active_role == UserRole.SUPER_ADMIN:
+            authorized = True
+        elif user.active_role in INCHARGE_SCOPE_ROLES:
+            student_program = await resolve_student_program(app_row.student_id, db)
+            authorized = incharge_can_access_program(incharge_scopes_held(user), student_program)
     elif not cycle.dpgs_approved_at:
         authorized = user.active_role in (UserRole.DPGS, UserRole.SUPER_ADMIN)
     elif not cycle.vc_selection_completed_at:
@@ -1322,8 +1368,12 @@ async def approve_external_report(report_id: UUID, db: AsyncSession = Depends(ge
         report.hod_approved_at = now
         report.status = "incharge_pending"
     elif report.status == "incharge_pending":
-        if user.active_role not in (UserRole.INCHARGE_ACADEMIC_CELL, UserRole.SUPER_ADMIN):
-            raise HTTPException(403, "Insufficient permissions.")
+        if user.active_role != UserRole.SUPER_ADMIN:
+            if user.active_role not in INCHARGE_SCOPE_ROLES:
+                raise HTTPException(403, "Insufficient permissions.")
+            student_program = await resolve_student_program(app_row.student_id, db)
+            if not incharge_can_access_program(incharge_scopes_held(user), student_program):
+                raise HTTPException(403, "Insufficient permissions.")
         report.incharge_approved_by = user.id
         report.incharge_approved_at = now
         report.status = "dpgs_pending"
@@ -1352,7 +1402,11 @@ async def revert_external_report(report_id: UUID, body: RevertIn, db: AsyncSessi
     elif report.status == "hod_pending":
         authorized = await _hod_dept_matches(app_row.student_id, user, db)
     elif report.status == "incharge_pending":
-        authorized = user.active_role in (UserRole.INCHARGE_ACADEMIC_CELL, UserRole.SUPER_ADMIN)
+        if user.active_role == UserRole.SUPER_ADMIN:
+            authorized = True
+        elif user.active_role in INCHARGE_SCOPE_ROLES:
+            student_program = await resolve_student_program(app_row.student_id, db)
+            authorized = incharge_can_access_program(incharge_scopes_held(user), student_program)
     elif report.status == "dpgs_pending":
         authorized = user.active_role in (UserRole.DPGS, UserRole.SUPER_ADMIN)
     if not authorized:

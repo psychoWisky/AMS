@@ -9,6 +9,7 @@ from typing import Optional
 from app.db.base import get_db
 from app.core.security import decode_token
 from app.models.user import User, UserRole, RefreshToken, UserRoleAssignment
+from app.core.student_scope import INCHARGE_SCOPE_ROLES
 
 bearer = HTTPBearer()
 
@@ -22,7 +23,7 @@ bearer = HTTPBearer()
 # when it is still one of the user's assigned roles.
 _ROLE_PRIORITY: list[UserRole] = [
     UserRole.STUDENT, UserRole.FACULTY, UserRole.HOD,
-    UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS, UserRole.SUPER_ADMIN,
+    *INCHARGE_SCOPE_ROLES, UserRole.DPGS, UserRole.SUPER_ADMIN,
 ]
 
 
@@ -169,6 +170,19 @@ def require_roles(*roles: UserRole):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions.")
         return user
     return _check
+
+
+def require_incharge_academic_cell(*extra_roles: UserRole):
+    """Incharge Academic Cell scope-split task (this revision) — identical
+    shape to `require_roles`, pre-expanded to the 4 scoped Incharge roles so
+    call sites that used to write `require_roles(..., UserRole.
+    INCHARGE_ACADEMIC_CELL)` can write `require_incharge_academic_cell(...)`
+    with any OTHER roles that endpoint already shared the tuple with (e.g.
+    SUPER_ADMIN/DPGS), unchanged. This is still only the ENTRY gate (active_
+    role must be one of the 4) — the caller must separately apply `app.core.
+    student_scope.incharge_scopes_held`/`incharge_scope_clause` to actually
+    filter the data, exactly as before."""
+    return require_roles(*INCHARGE_SCOPE_ROLES, *extra_roles)
 
 
 def student_user_clause():

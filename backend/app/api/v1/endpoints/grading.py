@@ -37,7 +37,10 @@ from app.core.document_render import pdf_response, render_template
 from app.core.dependencies import get_current_user, require_roles
 from app.core.grading_calc import attendance_band, compute_entry_outcome, format_gpa, round2
 from app.core.result_service import cgpa_for, ordered_results
-from app.core.student_scope import resolve_student_department_id
+from app.core.student_scope import (
+    resolve_student_department_id, INCHARGE_SCOPE_ROLES, incharge_scopes_held, incharge_can_access_program,
+    resolve_student_program, programme_group,
+)
 from app.db.base import get_db
 from app.models.academic import Semester
 from app.models.course import CourseOffering, OfferingFaculty
@@ -53,13 +56,37 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/grading", tags=["Grading"])
 
 # Read-only viewing of a student's published academic results (GPA endpoint).
-_ADMIN_ROLES = (UserRole.SUPER_ADMIN, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS, UserRole.CONTROLLER_OF_EXAMINATION)
+# Incharge Academic Cell scope-split task (this revision) — the 4 scoped
+# roles are deliberately NOT in this unconditional tuple anymore; see
+# `_authorize_student_academic_view`, which scopes them separately.
+_ADMIN_ROLES = (UserRole.SUPER_ADMIN, UserRole.DPGS, UserRole.CONTROLLER_OF_EXAMINATION)
 
 _STAGE_ROLE = {
-    "hod": UserRole.HOD, "incharge": UserRole.INCHARGE_ACADEMIC_CELL,
+    "hod": UserRole.HOD,
     "dpgs": UserRole.DPGS, "coe": UserRole.CONTROLLER_OF_EXAMINATION,
 }
 _CREDIT_TYPE_LABEL = {"credit": "Credit", "non_credit": "Non-credit"}
+
+
+def _offering_incharge_scope_match(scopes: set[tuple[str, str]], offering: CourseOffering) -> bool:
+    """Incharge Academic Cell scope-split task (this revision) — a
+    Gradesheet is per-OFFERING, not per-student, and an offering isn't
+    owned by one Programme, so `Program.faculty` can't apply here. This is
+    a deliberate, narrow exception: the faculty axis comes from the
+    offering's OWN `department.stream` (empirically reliable for every real
+    academic department — confirmed zero cross-contamination against the
+    production data; only the non-teaching DPGS administrative department
+    is dual-stream, and no gradesheet is ever created against it), and the
+    programme-group axis from `course.program_level` (the same field
+    `course_level_matches` already uses elsewhere in this codebase)."""
+    course = offering.course if offering else None
+    department = offering.department if offering else None
+    if not course or not department or not department.stream:
+        return False
+    group = programme_group(course.program_level)
+    if group is None:
+        return False
+    return (group, department.stream) in scopes
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
@@ -257,7 +284,9 @@ async def _authorize_offering_view(db: AsyncSession, offering: CourseOffering, u
         return "instructor"
     if role == UserRole.HOD and _dept_matches(user, offering):
         return "reviewer"
-    if role in (UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS, UserRole.CONTROLLER_OF_EXAMINATION):
+    if role in (UserRole.DPGS, UserRole.CONTROLLER_OF_EXAMINATION):
+        return "reviewer"
+    if role in INCHARGE_SCOPE_ROLES and _offering_incharge_scope_match(incharge_scopes_held(user), offering):
         return "reviewer"
     raise HTTPException(404, "Course offering not found.")
 
@@ -276,7 +305,9 @@ async def _authorize_view(db: AsyncSession, sheet: GradeSheet, user: User) -> st
         return "instructor"
     if role == UserRole.HOD and _dept_matches(user, offering) and submitted:
         return "reviewer"
-    if role in (UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS, UserRole.CONTROLLER_OF_EXAMINATION) and submitted:
+    if role in (UserRole.DPGS, UserRole.CONTROLLER_OF_EXAMINATION) and submitted:
+        return "reviewer"
+    if role in INCHARGE_SCOPE_ROLES and submitted and _offering_incharge_scope_match(incharge_scopes_held(user), offering):
         return "reviewer"
     raise _not_found()
 
@@ -308,6 +339,11 @@ def _can_edit_data(sheet: GradeSheet, user: User) -> bool:
 def _may_act(user: User, stage: GradesheetStage, offering: CourseOffering) -> bool:
     if stage.stage_type in ("creator", "instructor"):
         return stage.assigned_user_id == user.id and user.active_role in (UserRole.FACULTY, UserRole.HOD)
+    if stage.stage_type == "incharge":
+        # Incharge Academic Cell scope-split task (this revision).
+        if user.active_role not in INCHARGE_SCOPE_ROLES:
+            return False
+        return _offering_incharge_scope_match(incharge_scopes_held(user), offering)
     role = _STAGE_ROLE.get(stage.stage_type)
     if user.active_role != role:
         return False
@@ -899,7 +935,7 @@ async def approval_history(sheet_id: UUID, db: AsyncSession = Depends(get_db), u
 async def inbox(
     scope: str = "pending", calendar_id: Optional[UUID] = None, semester_id: Optional[UUID] = None,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(UserRole.FACULTY, UserRole.HOD, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS, UserRole.CONTROLLER_OF_EXAMINATION)),
+    user: User = Depends(require_roles(UserRole.FACULTY, UserRole.HOD, *INCHARGE_SCOPE_ROLES, UserRole.DPGS, UserRole.CONTROLLER_OF_EXAMINATION)),
 ):
     """Sheets awaiting THIS caller's action (scope=pending), or — CoE only —
     finalized course-wise gradesheets (scope=finalized)."""
@@ -935,10 +971,21 @@ async def inbox(
             if user.active_department_id:
                 for s in (await db.execute(base.where(GradeSheet.status == "hod_pending", CourseOffering.department_id == user.active_department_id))).scalars().all():
                     found[s.id] = s
-        status_by_role = {UserRole.INCHARGE_ACADEMIC_CELL: "incharge_pending", UserRole.DPGS: "dpgs_pending", UserRole.CONTROLLER_OF_EXAMINATION: "coe_pending"}
+        status_by_role = {UserRole.DPGS: "dpgs_pending", UserRole.CONTROLLER_OF_EXAMINATION: "coe_pending"}
         if role in status_by_role:
             for s in (await db.execute(base.where(GradeSheet.status == status_by_role[role]))).scalars().all():
                 found[s.id] = s
+        if role in INCHARGE_SCOPE_ROLES:
+            # Incharge Academic Cell scope-split task (this revision) —
+            # offering isn't eager-loaded with `department`/`course` on this
+            # `base` query's own options in a way `_offering_incharge_scope_
+            # match` can read directly off the result rows without a second
+            # round trip, so filter the already-loaded `GradeSheet.offering`
+            # relationship (eager-loaded above) in Python.
+            scopes = incharge_scopes_held(user)
+            for s in (await db.execute(base.where(GradeSheet.status == "incharge_pending"))).scalars().all():
+                if _offering_incharge_scope_match(scopes, s.offering):
+                    found[s.id] = s
     else:
         raise HTTPException(400, "scope must be 'pending' or 'finalized'.")
     rows = sorted((_sheet_row(s) for s in found.values()), key=lambda r: r["submitted_at"] or "")
@@ -974,6 +1021,13 @@ async def _authorize_student_academic_view(student_id: UUID, user: User, db: Asy
     established relationship (shared course assignment or advisory committee)."""
     if user.active_role in _ADMIN_ROLES:
         return
+    if user.active_role in INCHARGE_SCOPE_ROLES:
+        # Incharge Academic Cell scope-split task (this revision, AVFU-
+        # confirmed) — GPA/CGPA must be scoped, not globally readable.
+        student_program = await resolve_student_program(student_id, db)
+        if incharge_can_access_program(incharge_scopes_held(user), student_program):
+            return
+        raise HTTPException(403, "You can only view academic progress for students within your assigned scope.")
     if user.active_role == UserRole.STUDENT:
         if student_id == user.id:
             return

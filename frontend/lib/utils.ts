@@ -30,11 +30,21 @@ export function formatDate(iso: string, style: "long" | "short" | "relative" = "
 // added above HOD (SUPER_ADMIN > DPGS > INCHARGE_ACADEMIC_CELL > HOD >
 // FACULTY > STUDENT), matching the backend `UserRole` enum's actual values
 // exactly (never guessed).
+//
+// Incharge Academic Cell scope-split task (this revision) — the single
+// `incharge_academic_cell` role above is REPLACED by 4 scoped variants, one
+// per (programme-group x faculty) combination AVFU confirmed. Each remains
+// GLOBAL (see `GLOBAL_ROLES` below) and single-holder, matching the backend
+// exactly; see `INCHARGE_ROLES`/`isIncharge` for the shared helper every
+// page that used to check the single old value now uses instead.
 export const ROLES = {
   super_admin: "Super Admin",
   vice_chancellor: "Vice Chancellor",
   dpgs: "DPGS",
-  incharge_academic_cell: "Incharge Academic Cell",
+  incharge_academic_cell_pg_veterinary: "Incharge Academic Cell (PG – Veterinary)",
+  incharge_academic_cell_ug_veterinary: "Incharge Academic Cell (UG – Veterinary)",
+  incharge_academic_cell_pg_fishery: "Incharge Academic Cell (PG – Fishery)",
+  incharge_academic_cell_ug_fishery: "Incharge Academic Cell (UG – Fishery)",
   hod: "Head of Department",
   faculty: "Faculty",
   student: "Student",
@@ -59,11 +69,25 @@ export const ROLES = {
 
 export const ADMIN_ROLES = ["super_admin", "hod"];
 
+// Incharge Academic Cell scope-split task (this revision) — the 4 scoped
+// role names, in one place, so every page checking "is the current user
+// SOME Incharge Academic Cell variant" (regardless of which) uses the same
+// list rather than re-deriving it. Mirrors the backend's `INCHARGE_SCOPE_
+// ROLES` (app/core/student_scope.py) exactly.
+export const INCHARGE_ROLES = [
+  "incharge_academic_cell_pg_veterinary", "incharge_academic_cell_ug_veterinary",
+  "incharge_academic_cell_pg_fishery", "incharge_academic_cell_ug_fishery",
+];
+
+export function isIncharge(role: string | null | undefined): boolean {
+  return !!role && INCHARGE_ROLES.includes(role);
+}
+
 // Incharge Academic Cell / DPGS task — the two new global roles, for pages
 // that need to grant them the same cross-department view access Super Admin
 // already has (never user-management/role-assignment powers — those remain
 // SUPER_ADMIN-only, matched by the backend exactly).
-export const GLOBAL_ROLES = ["super_admin", "vice_chancellor", "incharge_academic_cell", "dpgs"];
+export const GLOBAL_ROLES = ["super_admin", "vice_chancellor", ...INCHARGE_ROLES, "dpgs"];
 
 // Centralized labels for CommitteeMember.role (BUSINESS_LOGIC.md M.5, Rule 29 —
 // the 5 confirmed PG/PhD Research Committee member types, plus `co_major_advisor`,

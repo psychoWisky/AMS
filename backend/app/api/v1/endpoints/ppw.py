@@ -29,7 +29,7 @@ from pydantic import BaseModel, field_validator
 from app.db.base import get_db
 from app.core.config import settings
 from app.core.email import send_email
-from app.core.dependencies import get_current_user, require_roles, find_role_holder_in_department
+from app.core.dependencies import get_current_user, require_roles, require_incharge_academic_cell, find_role_holder_in_department
 from app.models.user import User, UserRole, Program, Department
 from app.models.course import Course
 from app.models.academic import AcademicCalendar, Semester
@@ -47,7 +47,10 @@ from app.api.v1.endpoints.courses import _resolve_student_scope
 from app.api.v1.endpoints.research import _student_department_id
 # PPW course-selection task — shared programme-level eligibility check
 # (see app/core/student_scope.py's docstring for why this lives there).
-from app.core.student_scope import course_level_matches
+from app.core.student_scope import (
+    course_level_matches, INCHARGE_SCOPE_ROLES, incharge_scopes_held, incharge_can_access_program,
+    resolve_student_program,
+)
 # Major/Minor/Supporting discipline validation (this task) — shared with
 # Course Registration (enrollment.py); see its docstring for the full rules.
 from app.core.classification import (
@@ -59,12 +62,13 @@ router = APIRouter(prefix="/ppw", tags=["PPW"])
 logger = logging.getLogger(__name__)
 
 _ADMIN_ROLES = (UserRole.SUPER_ADMIN,)
-# Incharge Academic Cell / DPGS task (this revision) — both are global roles
-# with unrestricted PPW view access, same as Super Admin (Section 19/20:
-# "view PPWs across departments"). Approval actions themselves are still
-# gated per-stage by `_resolve_my_stage`, never by this tuple alone.
-_GLOBAL_VIEW_ROLES = (UserRole.SUPER_ADMIN, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS)
-_APPROVER_ROLES = (UserRole.FACULTY, UserRole.HOD, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS)
+# Incharge Academic Cell scope-split task (this revision) — SUPER_ADMIN/DPGS
+# remain unconditionally global/unrestricted (unchanged). Incharge Academic
+# Cell is NO LONGER in this unconditional tuple — it is handled separately,
+# scoped to the caller's held (programme_group, faculty) scopes, in
+# `_authorize_ppw_view`/`_resolve_my_stage`/`list_pending_approvals` below.
+_GLOBAL_VIEW_ROLES = (UserRole.SUPER_ADMIN, UserRole.DPGS)
+_APPROVER_ROLES = (UserRole.FACULTY, UserRole.HOD, *INCHARGE_SCOPE_ROLES, UserRole.DPGS)
 
 # Dev/test-only OTP convenience (this task's explicit requirement) — accepted
 # ONLY when settings.ENVIRONMENT != "production" (see _is_dev_mode below).
@@ -205,9 +209,21 @@ async def _resolve_my_stage(p: Ppw, cycle: PpwApprovalCycle, user: User, db: Asy
                 if dept_id and user.active_department_id and dept_id == user.active_department_id:
                     return stage
         elif stage.stage_type == "incharge_academic_cell":
-            # Global role — no department match required (Section 19).
-            if user.active_role == UserRole.INCHARGE_ACADEMIC_CELL:
-                return stage
+            # Incharge Academic Cell scope-split task (this revision) — the
+            # caller's active role must be one of the 4 scoped variants AND
+            # the PPW's student's Programme must fall within the UNION of
+            # scopes the caller holds (not just their currently-active one —
+            # see `incharge_scopes_held`'s docstring). Fails closed via
+            # `incharge_can_access_program` when the student's Programme has
+            # no resolvable `faculty`/`level` classification.
+            if user.active_role in INCHARGE_SCOPE_ROLES:
+                # `p` here is a plain `db.get(Ppw, ...)` (no eager-loading at
+                # any of this function's 3 call sites) — resolved via the
+                # shared helper rather than `p.student.program`, which would
+                # trigger an unsupported lazy load under this async session.
+                student_program = await resolve_student_program(p.student_id, db)
+                if incharge_can_access_program(incharge_scopes_held(user), student_program):
+                    return stage
         elif stage.stage_type == "dpgs":
             if user.active_role == UserRole.DPGS:
                 return stage
@@ -224,6 +240,17 @@ async def _authorize_ppw_view(p: Ppw, user: User, db: AsyncSession) -> None:
     bare role check."""
     if user.active_role in _GLOBAL_VIEW_ROLES:
         return
+    if user.active_role in INCHARGE_SCOPE_ROLES:
+        # Incharge Academic Cell scope-split task (this revision) — scoped
+        # to the UNION of the caller's held scopes (see
+        # `incharge_scopes_held`), never the unconditional global read the
+        # single old role used to get. `p` arrives already eager-loaded with
+        # `_PPW_LOAD_OPTIONS` at every call site of this function (unlike
+        # `_resolve_my_stage`), so `p.student.program` is safe here.
+        student_program = p.student.program if p.student else None
+        if incharge_can_access_program(incharge_scopes_held(user), student_program):
+            return
+        raise HTTPException(404, "PPW not found.")
     if user.active_role == UserRole.STUDENT:
         if p.student_id == user.id:
             return
@@ -732,12 +759,16 @@ async def list_pending_approvals(
                 "department_name": department.name if department else None,
                 "program_name": program.name if program else None,
             })
-    elif user.active_role in (UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS):
-        # Incharge Academic Cell / DPGS task — global roles, so unlike HOD's
-        # branch above there is no department filter at all: every PPW
-        # currently at this caller's own stage_type, across every department.
-        stage_type = "incharge_academic_cell" if user.active_role == UserRole.INCHARGE_ACADEMIC_CELL else "dpgs"
+    elif user.active_role in (*INCHARGE_SCOPE_ROLES, UserRole.DPGS):
+        # Incharge Academic Cell scope-split task (this revision) — DPGS
+        # stays unconditionally global (unchanged). Incharge Academic Cell
+        # is additionally filtered, in Python after the fetch (inbox result
+        # sets are small), to the UNION of (programme_group, faculty) scopes
+        # the caller holds — never just whichever single scope happens to be
+        # their active role right now (see `incharge_scopes_held`).
+        stage_type = "dpgs" if user.active_role == UserRole.DPGS else "incharge_academic_cell"
         expected_status = _PHASE_FOR_STAGE_TYPE[stage_type]
+        scopes = incharge_scopes_held(user) if user.active_role in INCHARGE_SCOPE_ROLES else None
         result = await db.execute(
             select(PpwApprovalStage, PpwApprovalCycle, Ppw)
             .join(PpwApprovalCycle, PpwApprovalCycle.id == PpwApprovalStage.cycle_id)
@@ -756,6 +787,8 @@ async def list_pending_approvals(
         for stage, cycle, p in result.all():
             student = p.student
             program = student.program if student else None
+            if scopes is not None and not incharge_can_access_program(scopes, program):
+                continue
             department = student.department if student else None
             rows.append({
                 "ppw_id": str(p.id), "student_name": student.full_name if student else None,

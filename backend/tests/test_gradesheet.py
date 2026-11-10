@@ -178,7 +178,11 @@ async def _setup() -> None:
             print("STOP: stray zztest_gs_ users already exist from a previous failed run; refusing to run.")
             sys.exit(2)
         holders = (await db.execute(select(func.count()).select_from(UserRoleAssignment).where(
-            UserRoleAssignment.role.in_([UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS, UserRole.CONTROLLER_OF_EXAMINATION])))).scalar_one()
+            UserRoleAssignment.role.in_([
+                UserRole.INCHARGE_ACADEMIC_CELL_PG_VETERINARY, UserRole.INCHARGE_ACADEMIC_CELL_UG_VETERINARY,
+                UserRole.INCHARGE_ACADEMIC_CELL_PG_FISHERY, UserRole.INCHARGE_ACADEMIC_CELL_UG_FISHERY,
+                UserRole.DPGS, UserRole.CONTROLLER_OF_EXAMINATION,
+            ])))).scalar_one()
         if holders:
             print("STOP: a real Incharge/DPGS/CoE holder already exists (single-holder roles); refusing to run against it.")
             sys.exit(2)
@@ -206,7 +210,12 @@ async def _setup() -> None:
     await _mk_user("fac_c", UserRole.FACULTY, d1)      # unrelated faculty, same department
     await _mk_user("fac_d2", UserRole.FACULTY, d2)     # instructor in the other department
     await _mk_user("fac_ma", UserRole.FACULTY, d1)     # Major Advisor of s1
-    await _mk_user("incharge", UserRole.INCHARGE_ACADEMIC_CELL)
+    # Incharge Academic Cell scope-split task (this revision) — Gradesheet
+    # scoping is offering-based (Course.program_level + Department.stream,
+    # not Program.faculty — see grading.py's `_offering_incharge_scope_
+    # match` docstring); D1 is a real dev-DB department, confirmed
+    # Veterinary-stream, and every course/offering below is PG-level.
+    await _mk_user("incharge", UserRole.INCHARGE_ACADEMIC_CELL_PG_VETERINARY)
     await _mk_user("dpgs", UserRole.DPGS)
     await _mk_user("coe", UserRole.CONTROLLER_OF_EXAMINATION, assign=False)   # assigned through the real API in t_coe_role_*
     await _mk_user("coe2", UserRole.CONTROLLER_OF_EXAMINATION, assign=False)  # second candidate (must be refused)

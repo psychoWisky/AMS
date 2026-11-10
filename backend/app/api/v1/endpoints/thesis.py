@@ -50,9 +50,12 @@ from starlette.concurrency import run_in_threadpool
 
 from app.api.v1.endpoints.synopsis import UNIVERSITY_NAME
 from app.core.config import settings
-from app.core.dependencies import get_current_user, require_roles
+from app.core.dependencies import get_current_user, require_roles, require_incharge_academic_cell
 from app.core.email import send_email
-from app.core.student_scope import resolve_student_department_id
+from app.core.student_scope import (
+    resolve_student_department_id, INCHARGE_SCOPE_ROLES, incharge_scopes_held,
+    incharge_can_access_program, resolve_student_program,
+)
 from app.db.base import get_db
 from app.models.enrollment import CourseRegistration
 from app.models.external_examiner import ExternalExaminer, ExternalExaminerAssignment
@@ -74,7 +77,7 @@ router = APIRouter(prefix="/thesis", tags=["Initial Thesis"])
 
 _PG_PHD_LEVELS = ("PG", "PhD")
 _EDITABLE_STATUSES = ("draft", "reverted")
-_APPROVER_ROLES = (UserRole.FACULTY, UserRole.HOD, UserRole.LIBRARIAN, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS)
+_APPROVER_ROLES = (UserRole.FACULTY, UserRole.HOD, UserRole.LIBRARIAN, *INCHARGE_SCOPE_ROLES, UserRole.DPGS)
 _SIGNATORY_STAGES = ("major_advisor", "hod", "librarian", "dpgs", "dpgs_final")  # OTP-verified; incharge_academic_cell is workflow-only
 _REVERTIBLE_STAGES = ("major_advisor", "hod", "librarian", "incharge_academic_cell", "dpgs")  # dpgs_final has no revert path this phase
 
@@ -107,7 +110,13 @@ _STAGE_ROLE_LABELS = {
 }
 _ROLE_DISPLAY = {
     "faculty": "Faculty", "hod": "HOD", "librarian": "Librarian",
-    "incharge_academic_cell": "Incharge Academic Cell", "dpgs": "DPGS", "super_admin": "Super Admin",
+    "dpgs": "DPGS", "super_admin": "Super Admin",
+    # Incharge Academic Cell scope-split task (this revision) — see
+    # synopsis.py's identical dict for why all 4 scoped values map here.
+    "incharge_academic_cell_pg_veterinary": "Incharge Academic Cell",
+    "incharge_academic_cell_ug_veterinary": "Incharge Academic Cell",
+    "incharge_academic_cell_pg_fishery": "Incharge Academic Cell",
+    "incharge_academic_cell_ug_fishery": "Incharge Academic Cell",
 }
 # Which document types the STUDENT may upload/replace themselves via the generic upload
 # endpoint; the library plagiarism report is entered only by a Librarian (see the dedicated
@@ -516,7 +525,7 @@ async def _authorize_view(t: Thesis, user: User, db: AsyncSession) -> None:
     # members signing them, and (once each reaches its own later stage) the student's own-
     # department HOD / Incharge Academic Cell / DPGS all need to see this Thesis before the
     # normal post-submission visibility rules (below) would otherwise apply.
-    if role in (UserRole.HOD, UserRole.FACULTY, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS):
+    if role in (UserRole.HOD, UserRole.FACULTY, *INCHARGE_SCOPE_ROLES, UserRole.DPGS):
         pre_certs: list = []
         if t.thesis_type == "initial":
             c = await _get_certificate(t.id, db)
@@ -536,14 +545,21 @@ async def _authorize_view(t: Thesis, user: User, db: AsyncSession) -> None:
                 dept_id = await resolve_student_department_id(t.student_id, db)
                 if dept_id and user.active_department_id and dept_id == user.active_department_id:
                     return
-            if role == UserRole.INCHARGE_ACADEMIC_CELL and cert.status in ("incharge_pending", "dpgs_pending", "approved"):
-                return
+            if role in INCHARGE_SCOPE_ROLES and cert.status in ("incharge_pending", "dpgs_pending", "approved"):
+                student_program = await resolve_student_program(t.student_id, db)
+                if incharge_can_access_program(incharge_scopes_held(user), student_program):
+                    return
             if role == UserRole.DPGS and cert.status in ("dpgs_pending", "approved"):
                 return
     if t.status == "draft":
         raise _not_found()
-    if role in (UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS, UserRole.LIBRARIAN):
+    if role in (UserRole.DPGS, UserRole.LIBRARIAN):
         return
+    if role in INCHARGE_SCOPE_ROLES:
+        student_program = await resolve_student_program(t.student_id, db)
+        if incharge_can_access_program(incharge_scopes_held(user), student_program):
+            return
+        raise _not_found()
     if role in (UserRole.FACULTY, UserRole.HOD):
         assigned = await db.execute(
             select(ThesisApprovalStage.id)
@@ -593,8 +609,10 @@ async def _find_my_stage(t: Thesis, user: User, db: AsyncSession) -> Optional[Th
             if user.active_role == UserRole.LIBRARIAN:
                 return stage
         elif stage.stage_type == "incharge_academic_cell":
-            if user.active_role == UserRole.INCHARGE_ACADEMIC_CELL:
-                return stage
+            if user.active_role in INCHARGE_SCOPE_ROLES:
+                student_program = await resolve_student_program(t.student_id, db)
+                if incharge_can_access_program(incharge_scopes_held(user), student_program):
+                    return stage
         elif stage.stage_type in ("dpgs", "dpgs_final"):
             if user.active_role == UserRole.DPGS:
                 return stage
@@ -912,8 +930,9 @@ async def list_pending_approvals(db: AsyncSession = Depends(get_db), user: User 
         )).scalars().all())
     phase = {
         UserRole.HOD: "hod_pending", UserRole.LIBRARIAN: "librarian_pending",
-        UserRole.INCHARGE_ACADEMIC_CELL: "incharge_pending",
     }.get(user.active_role)
+    if user.active_role in INCHARGE_SCOPE_ROLES:
+        phase = "incharge_pending"
     if user.active_role == UserRole.DPGS:
         ids.update((await db.execute(select(Thesis.id).where(Thesis.status.in_(("dpgs_pending", "dpgs_final_pending"))))).scalars().all())
     elif phase:
@@ -2088,13 +2107,18 @@ async def finalcert_hod_approve(certificate_id: UUID, db: AsyncSession = Depends
 
 
 @router.post("/finalcert/{certificate_id}/incharge-approve")
-async def finalcert_incharge_approve(certificate_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.INCHARGE_ACADEMIC_CELL))):
-    """Incharge Academic Cell is a role-only, single-holder approval stage — no department/
-    committee scoping exists anywhere else in this repository for this role either. Incharge
-    NEVER appears as a named signatory on the generated PDF (Section 6/13/23 of the confirmed
-    rules) — `incharge_approved_by/at` exist purely for internal audit/authorization state."""
+async def finalcert_incharge_approve(certificate_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(require_incharge_academic_cell())):
+    """Incharge Academic Cell scope-split task (this revision) — now scoped
+    to the UNION of the caller's held scopes (superseding the old "role-
+    only, no scoping" rule). Incharge NEVER appears as a named signatory on
+    the generated PDF (Section 6/13/23 of the confirmed rules) —
+    `incharge_approved_by/at` exist purely for internal audit/authorization
+    state."""
     cert = await _get_final_certificate_by_id(certificate_id, db)
     if not cert:
+        raise HTTPException(404, "Certificate not found.")
+    student_program = await resolve_student_program(cert.thesis.student_id, db)
+    if not incharge_can_access_program(incharge_scopes_held(user), student_program):
         raise HTTPException(404, "Certificate not found.")
     if cert.status != "incharge_pending":
         raise HTTPException(400, "This certificate is not currently awaiting Incharge Academic Cell approval.")
@@ -2144,8 +2168,9 @@ async def finalcert_revert(certificate_id: UUID, body: RevertIn, db: AsyncSessio
     elif cert.status == "hod_pending" and user.active_role == UserRole.HOD:
         dept_id = await resolve_student_department_id(cert.thesis.student_id, db)
         authorized = bool(dept_id and user.active_department_id and dept_id == user.active_department_id)
-    elif cert.status == "incharge_pending" and user.active_role == UserRole.INCHARGE_ACADEMIC_CELL:
-        authorized = True
+    elif cert.status == "incharge_pending" and user.active_role in INCHARGE_SCOPE_ROLES:
+        student_program = await resolve_student_program(cert.thesis.student_id, db)
+        authorized = incharge_can_access_program(incharge_scopes_held(user), student_program)
     elif cert.status == "dpgs_pending" and user.active_role == UserRole.DPGS:
         authorized = True
     if not authorized:
@@ -2243,12 +2268,18 @@ async def finalcert_hod_inbox(kind: Optional[str] = None, db: AsyncSession = Dep
 
 
 @router.get("/finalcert/incharge")
-async def finalcert_incharge_inbox(kind: Optional[str] = None, db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(UserRole.INCHARGE_ACADEMIC_CELL))):
-    """Incharge Academic Cell's inbox — role-only (single-holder), no department scoping."""
-    q = select(FinalCertificate).options(selectinload(FinalCertificate.thesis).selectinload(Thesis.student)).where(FinalCertificate.status == "incharge_pending")
+async def finalcert_incharge_inbox(kind: Optional[str] = None, db: AsyncSession = Depends(get_db), user: User = Depends(require_incharge_academic_cell())):
+    """Incharge Academic Cell scope-split task (this revision) — scoped to
+    the UNION of the caller's held scopes (superseding the old "role-only,
+    no department scoping" rule)."""
+    q = select(FinalCertificate).options(
+        selectinload(FinalCertificate.thesis).selectinload(Thesis.student).selectinload(User.program),
+    ).where(FinalCertificate.status == "incharge_pending")
     if kind in FINAL_CERTIFICATE_KINDS:
         q = q.where(FinalCertificate.kind == kind)
     rows = (await db.execute(q)).unique().scalars().all()
+    scopes = incharge_scopes_held(user)
+    rows = [c for c in rows if incharge_can_access_program(scopes, c.thesis.student.program if c.thesis.student else None)]
     return [{
         "sl_no": i, "certificate_id": str(c.id), "kind": c.kind, "thesis_id": str(c.thesis_id),
         "student_roll": c.thesis.student.student_roll, "student_name": c.thesis.student.full_name,
@@ -2273,7 +2304,7 @@ async def finalcert_dpgs_inbox(kind: Optional[str] = None, db: AsyncSession = De
 @router.get("/finalcert/{certificate_id}")
 async def get_final_cert_detail(
     certificate_id: UUID, db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(UserRole.STUDENT, UserRole.HOD, UserRole.FACULTY, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS, UserRole.SUPER_ADMIN)),
+    user: User = Depends(require_roles(UserRole.STUDENT, UserRole.HOD, UserRole.FACULTY, *INCHARGE_SCOPE_ROLES, UserRole.DPGS, UserRole.SUPER_ADMIN)),
 ):
     cert = await _get_final_certificate_by_id(certificate_id, db)
     if not cert:
@@ -2284,8 +2315,11 @@ async def get_final_cert_detail(
     if not authorized and user.active_role == UserRole.HOD:
         dept_id = await resolve_student_department_id(cert.thesis.student_id, db)
         authorized = bool(dept_id and user.active_department_id and dept_id == user.active_department_id)
-    if not authorized and user.active_role in (UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS):
+    if not authorized and user.active_role == UserRole.DPGS:
         authorized = True
+    if not authorized and user.active_role in INCHARGE_SCOPE_ROLES:
+        student_program = await resolve_student_program(cert.thesis.student_id, db)
+        authorized = incharge_can_access_program(incharge_scopes_held(user), student_program)
     if not authorized:
         raise HTTPException(404, "Certificate not found.")
     return {

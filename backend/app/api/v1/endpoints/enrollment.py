@@ -77,7 +77,7 @@ from sqlalchemy.orm import selectinload
 from pydantic import BaseModel, field_validator
 
 from app.db.base import get_db
-from app.core.dependencies import get_current_user, require_roles, require_advisory_committee_established, find_role_holder_in_department
+from app.core.dependencies import get_current_user, require_roles, require_incharge_academic_cell, require_advisory_committee_established, find_role_holder_in_department
 from app.models.user import User, UserRole, Program, Department
 from app.models.enrollment import StudentEnrollment, CourseRegistration, WithdrawalRequest
 from app.models.course import Course, CourseOffering, OfferingFaculty
@@ -94,6 +94,8 @@ from app.core.research_assignment import resolve_selected_external_examiner
 from app.core.student_scope import (
     resolve_student_scope as _resolve_student_scope,
     resolve_student_department_id as _student_department_id,
+    INCHARGE_SCOPE_ROLES, incharge_scopes_held, incharge_can_access_program, resolve_student_program,
+    incharge_scope_clause,
 )
 # Major/Minor/Supporting discipline validation (this task) — shared with PPW
 # (ppw.py); see app/core/classification.py's docstring for the full rules.
@@ -223,8 +225,16 @@ async def _authorize_hod_registration(registration: CourseRegistration, user: Us
 
 
 async def _authorize_registration_view(registration: CourseRegistration, user: User, db: AsyncSession) -> None:
-    if user.active_role in (UserRole.SUPER_ADMIN, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS):
+    if user.active_role in (UserRole.SUPER_ADMIN, UserRole.DPGS):
         return
+    if user.active_role in INCHARGE_SCOPE_ROLES:
+        # Incharge Academic Cell scope-split task (this revision) — scoped
+        # to the UNION of the caller's held scopes, never an unconditional
+        # global read.
+        student_program = await resolve_student_program(registration.student_id, db)
+        if incharge_can_access_program(incharge_scopes_held(user), student_program):
+            return
+        raise HTTPException(403, "You can only view registrations within your assigned scope.")
     if user.active_role == UserRole.STUDENT:
         if registration.student_id == user.id:
             return
@@ -1197,8 +1207,19 @@ async def list_registrations(
     q = select(CourseRegistration).options(*_REGISTRATION_LOAD_OPTIONS)
     if user.active_role == UserRole.STUDENT:
         q = q.where(CourseRegistration.student_id == user.id)
-    elif user.active_role in (UserRole.SUPER_ADMIN, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS):
+    elif user.active_role in (UserRole.SUPER_ADMIN, UserRole.DPGS):
         pass  # unrestricted — global roles, Section 12/13
+    elif user.active_role in INCHARGE_SCOPE_ROLES:
+        # Incharge Academic Cell scope-split task (this revision) — joined
+        # through the student's own Programme and filtered to the UNION of
+        # the caller's held scopes (see `incharge_scope_clause`'s docstring
+        # for why this is a single OR'd clause, never a per-scope UNION
+        # query, so overlapping scopes can't duplicate a row).
+        q = (
+            q.join(User, CourseRegistration.student_id == User.id)
+             .join(Program, User.program_id == Program.id)
+             .where(incharge_scope_clause(incharge_scopes_held(user)))
+        )
     elif user.active_role == UserRole.HOD:
         if not user.active_department_id:
             return []
@@ -1535,7 +1556,7 @@ async def offering_enrollments(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_roles(
         UserRole.SUPER_ADMIN, UserRole.HOD, UserRole.FACULTY,
-        UserRole.DPGS, UserRole.INCHARGE_ACADEMIC_CELL,
+        UserRole.DPGS, *INCHARGE_SCOPE_ROLES,
     )),
 ):
     # Research Course task: a FACULTY member with no OfferingFaculty row for
@@ -1558,11 +1579,21 @@ async def offering_enrollments(
     # 404-for-nonexistent-offering convention `_authorize_offering_management`
     # itself uses, independently.
     force_approved_only = False
-    if user.active_role in (UserRole.DPGS, UserRole.INCHARGE_ACADEMIC_CELL):
+    # Incharge Academic Cell scope-split task (this revision) — DPGS keeps
+    # its exact, unmodified global roster access (explicit instruction: do
+    # not accidentally remove it). Incharge still gets this same "never
+    # routed through `_authorize_offering_management`" read-only branch at
+    # the OFFERING level (an offering is not owned by one Programme, so it
+    # can't be scoped-out wholesale) — the roster itself is additionally
+    # narrowed below, per-student, to the caller's held scopes.
+    incharge_scope_filter: set[tuple[str, str]] | None = None
+    if user.active_role == UserRole.DPGS or user.active_role in INCHARGE_SCOPE_ROLES:
         offering = await db.get(CourseOffering, offering_id)
         if not offering:
             raise HTTPException(404, "Offering not found.")
         force_approved_only = True
+        if user.active_role in INCHARGE_SCOPE_ROLES:
+            incharge_scope_filter = incharge_scopes_held(user)
     else:
         try:
             await _authorize_offering_management(offering_id, user, db)
@@ -1587,7 +1618,8 @@ async def offering_enrollments(
     # list). Adding the eager load here fixes it with no change to the
     # returned data shape or any other behavior.
     q = select(StudentEnrollment).options(
-        selectinload(StudentEnrollment.student), selectinload(StudentEnrollment.offering).selectinload(CourseOffering.course),
+        selectinload(StudentEnrollment.student).selectinload(User.program),
+        selectinload(StudentEnrollment.offering).selectinload(CourseOffering.course),
         selectinload(StudentEnrollment.instructor),
         selectinload(StudentEnrollment.withdrawal_requests),
         # `_enroll_dict` also now reads `offering.faculty_assignments` (the
@@ -1610,7 +1642,13 @@ async def offering_enrollments(
     if effective_status: q = q.where(StudentEnrollment.status == effective_status)
     if restrict_to_own_students: q = q.where(StudentEnrollment.instructor_id == user.id)
     result = await db.execute(q.order_by(StudentEnrollment.enrolled_at))
-    return [_enroll_dict(e) for e in result.scalars().all()]
+    rows = result.scalars().all()
+    if incharge_scope_filter is not None:
+        # Per-student filter (not a whole-offering block) — an offering
+        # isn't owned by one Programme, so individual enrolled students are
+        # the correct granularity to scope here.
+        rows = [e for e in rows if incharge_can_access_program(incharge_scope_filter, e.student.program if e.student else None)]
+    return [_enroll_dict(e) for e in rows]
 
 
 class _EnrollmentDecisionError(Exception):
@@ -1829,14 +1867,21 @@ async def hod_registration_approval(
 @router.patch("/registrations/{registration_id}/incharge-approval")
 async def incharge_registration_approval(
     registration_id: UUID, body: StageDecisionIn, db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.INCHARGE_ACADEMIC_CELL)),
+    user: User = Depends(require_incharge_academic_cell(UserRole.SUPER_ADMIN)),
 ):
-    """Global role — no department match (Section 9/13): any Incharge
-    Academic Cell holder may act on any department's registration. Approval
-    is workflow-only, never a signature (Section 13) — no approver identity
-    is persisted, mirroring the existing HOD stage's own behavior."""
+    """Incharge Academic Cell scope-split task (this revision) — SUPER_ADMIN
+    keeps unconditional access (unchanged); an Incharge holder may act ONLY
+    on a registration whose student falls within the UNION of scopes they
+    hold (see `incharge_scopes_held`) — no longer "any department's
+    registration" (Section 9/13's old global rule, now superseded). Approval
+    remains workflow-only, never a signature — no approver identity is
+    persisted, mirroring the existing HOD stage's own behavior."""
     r = await db.get(CourseRegistration, registration_id)
     if not r: raise HTTPException(404, "Registration not found.")
+    if user.active_role in INCHARGE_SCOPE_ROLES:
+        student_program = await resolve_student_program(r.student_id, db)
+        if not incharge_can_access_program(incharge_scopes_held(user), student_program):
+            raise HTTPException(403, "This registration is outside your assigned scope.")
     if r.stage != "incharge_pending":
         raise HTTPException(400, "This registration is not awaiting Incharge Academic Cell approval.")
 

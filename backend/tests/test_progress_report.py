@@ -213,7 +213,9 @@ async def _setup() -> None:
 
     async with AsyncSessionLocal() as db:
         holders = (await db.execute(text(
-            "select count(*) from ams_user_role_assignments where role in ('INCHARGE_ACADEMIC_CELL','DPGS')"
+            "select count(*) from ams_user_role_assignments where role in "
+            "('INCHARGE_ACADEMIC_CELL_PG_VETERINARY','INCHARGE_ACADEMIC_CELL_UG_VETERINARY',"
+            "'INCHARGE_ACADEMIC_CELL_PG_FISHERY','INCHARGE_ACADEMIC_CELL_UG_FISHERY','DPGS')"
         ))).scalar_one()
         if holders:
             print("STOP: a real Incharge Academic Cell / DPGS holder exists (single-holder roles); refusing to run.")
@@ -251,7 +253,9 @@ async def _setup() -> None:
     await _mk_user("ma_d2", UserRole.FACULTY, d2, title="Dr.", designation="Professor")
     await _mk_user("hod1", UserRole.HOD, d1, title="Dr.", designation="Professor")
     await _mk_user("hod2", UserRole.HOD, d2, title="Dr.", designation="Professor")
-    await _mk_user("incharge", UserRole.INCHARGE_ACADEMIC_CELL, None, title="Dr.", designation="Professor")
+    # Incharge Academic Cell scope-split task (this revision) — every
+    # student fixture below uses `program=pg` (MVSc, Veterinary).
+    await _mk_user("incharge", UserRole.INCHARGE_ACADEMIC_CELL_PG_VETERINARY, None, title="Dr.", designation="Professor")
     await _mk_user("dpgs", UserRole.DPGS, None, title="Dr.", designation="Director of PG Studies")
 
     # Students

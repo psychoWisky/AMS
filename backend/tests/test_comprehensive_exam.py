@@ -179,7 +179,25 @@ async def _setup() -> None:
     await _mk_user("mem1b", UserRole.FACULTY, d1)  # second extra member (AND-gate test)
     await _mk_user("mem2", UserRole.FACULTY, d1)
     await _mk_user("fac_unrelated", UserRole.FACULTY, d1)
-    await _mk_user("incharge", UserRole.INCHARGE_ACADEMIC_CELL, None)
+    # Incharge Academic Cell scope-split task (this revision) — `pg`/`phd`
+    # are REAL dev-DB Programmes, not test fixtures, so their `faculty`
+    # values aren't hardcoded here and may differ from each other (e.g. one
+    # Veterinary, one Fishery). "incharge" is given BOTH of the resulting
+    # scopes (PG-group covers PhD too via `programme_group`) — multi-scope
+    # holding is already fully supported — so every PG/PhD student fixture
+    # below is covered by this same test user regardless of which concrete
+    # Programmes this dev database happens to return.
+    _incharge_role_for_faculty = {
+        "Veterinary": UserRole.INCHARGE_ACADEMIC_CELL_PG_VETERINARY,
+        "Fishery": UserRole.INCHARGE_ACADEMIC_CELL_PG_FISHERY,
+    }
+    _incharge_roles = {_incharge_role_for_faculty[p.faculty] for p in (pg, phd) if p.faculty in _incharge_role_for_faculty}
+    assert _incharge_roles, "test requires the dev DB's PG/PhD Programme fixtures to have Program.faculty set"
+    await _mk_user("incharge", next(iter(_incharge_roles)), None)
+    async with AsyncSessionLocal() as db:
+        for extra_role in list(_incharge_roles)[1:]:
+            db.add(UserRoleAssignment(user_id=U["incharge"], role=extra_role, department_id=None))
+        await db.commit()
     await _mk_user("dpgs", UserRole.DPGS, None)
     await _mk_user("vc", UserRole.VICE_CHANCELLOR, None)
 

@@ -229,7 +229,9 @@ async def _setup() -> None:
 
     async with AsyncSessionLocal() as db:
         holders = (await db.execute(text(
-            "select count(*) from ams_user_role_assignments where role in ('INCHARGE_ACADEMIC_CELL','DPGS','VICE_CHANCELLOR')"
+            "select count(*) from ams_user_role_assignments where role in "
+            "('INCHARGE_ACADEMIC_CELL_PG_VETERINARY','INCHARGE_ACADEMIC_CELL_UG_VETERINARY',"
+            "'INCHARGE_ACADEMIC_CELL_PG_FISHERY','INCHARGE_ACADEMIC_CELL_UG_FISHERY','DPGS','VICE_CHANCELLOR')"
         ))).scalar_one()
         if holders:
             print("STOP: a real Incharge Academic Cell / DPGS / Vice Chancellor holder exists (single-holder roles); refusing to run.")
@@ -255,7 +257,15 @@ async def _setup() -> None:
     await _mk_user("mem_lock2", UserRole.FACULTY, d1, title="Dr.", designation="Assistant Professor")
     await _mk_user("hod1", UserRole.HOD, d1, title="Dr.", designation="Professor")
     await _mk_user("hod2", UserRole.HOD, d2, title="Dr.", designation="Professor")
-    await _mk_user("incharge", UserRole.INCHARGE_ACADEMIC_CELL, None, title="Dr.", designation="Professor")
+    # Incharge Academic Cell scope-split task (this revision) — `pg` (MVSc,
+    # Veterinary) and `phd` (PhD(F), Fishery) students BOTH need to be
+    # visible to the same "incharge" test identity across these tests, so
+    # it's given both scopes (same PG group either way, via `programme_
+    # group`; multi-scope holding is fully supported).
+    await _mk_user("incharge", UserRole.INCHARGE_ACADEMIC_CELL_PG_VETERINARY, None, title="Dr.", designation="Professor")
+    async with AsyncSessionLocal() as db:
+        db.add(UserRoleAssignment(user_id=U["incharge"], role=UserRole.INCHARGE_ACADEMIC_CELL_PG_FISHERY, department_id=None))
+        await db.commit()
     await _mk_user("dpgs", UserRole.DPGS, None, title="Dr.", designation="Director of PG Studies")
     await _mk_user("vc", UserRole.VICE_CHANCELLOR, None, title="Dr.", designation="Vice Chancellor")
     await _mk_user("vc_candidate", UserRole.FACULTY, d1, title="Dr.", designation="Professor")   # for single-holder test

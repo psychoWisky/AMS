@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { useRole } from "@/stores/auth.store";
 import { ClipboardList, Loader2, CheckCircle2, XCircle, Eye, X } from "lucide-react";
 import { apiErrorMessage } from "@/components/ui/thesis-parts";
+import { isIncharge as isInchargeRole } from "@/lib/utils";
 
 // Final Thesis's two independent generated-document workflows — Form PG-25(A) (student-
 // generated, then Major-Advisor / Committee / HOD / Incharge / DPGS approve) and the Viva Voce
@@ -44,7 +45,7 @@ export default function FinalApprovalsPage() {
   const [remark, setRemark] = useState("");
 
   const isHod = role === "hod";
-  const isIncharge = role === "incharge_academic_cell";
+  const isIncharge = isInchargeRole(role);
   const isDpgs = role === "dpgs";
   const canBeMa = role === "faculty" || role === "hod";
 

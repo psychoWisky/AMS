@@ -89,11 +89,42 @@ class UserRole(str, Enum):
     Admin; `department_id` must be NULL (outside `_DEPARTMENT_REQUIRED_ROLES`
     in auth.py, enforced automatically). Deliberately NOT added to any generic
     student-management/user-listing tuple — its authority is scoped to the
-    Gradesheet/Result modules only."""
+    Gradesheet/Result modules only.
+
+    Incharge Academic Cell scope-split task (this revision, AVFU-confirmed) —
+    the single, institution-wide `INCHARGE_ACADEMIC_CELL` role (above) is
+    REPLACED by four scoped variants, one per (programme-group x faculty)
+    combination AVFU has defined. Each of the four remains GLOBAL in the
+    sense that it is never given a `department_id` (same department-NULL
+    rule as the role it replaces — see `_DEPARTMENT_REQUIRED_ROLES` in
+    auth.py) and remains SINGLE-HOLDER (same partial-unique-index mechanism,
+    migration `0047_incharge_scope_split`, which widens
+    `uq_user_role_assignment_single_holder` to list these 4 names in place of
+    the old single one) — but each one's authority is additionally narrowed,
+    at every access point, to students/records whose `Program.faculty` and
+    programme-group (see `app.core.student_scope.programme_group` — PG and
+    PhD are the SAME group for this purpose, UG is the other) match that
+    specific variant. A user MAY hold more than one of the four
+    simultaneously (ordinary multi-role assignment, already fully supported)
+    — see `app.core.student_scope.incharge_scopes_held` for how authorization
+    code resolves the UNION of scopes a caller holds, deliberately reading
+    ALL of a user's assigned Incharge-family roles for data-filtering
+    purposes (not just whichever one happens to be their current ACTIVE
+    role) — a narrow, explicitly-documented exception to this codebase's
+    otherwise-universal "always read `active_role`, never `assigned_roles`,
+    for authorization" rule, justified because these four scopes are
+    complementary facets of one job, unlike e.g. HOD @ A vs HOD @ B, which
+    remain genuinely separate contexts a person must switch between.
+    `INCHARGE_ACADEMIC_CELL_PG_VETERINARY`/`_UG_VETERINARY`/`_PG_FISHERY`/
+    `_UG_FISHERY` — see `app.core.student_scope` for the full resolution
+    helpers used by every endpoint that used to read the single old value."""
     SUPER_ADMIN            = "super_admin"
     VICE_CHANCELLOR        = "vice_chancellor"
     DPGS                   = "dpgs"
-    INCHARGE_ACADEMIC_CELL = "incharge_academic_cell"
+    INCHARGE_ACADEMIC_CELL_PG_VETERINARY = "incharge_academic_cell_pg_veterinary"
+    INCHARGE_ACADEMIC_CELL_UG_VETERINARY = "incharge_academic_cell_ug_veterinary"
+    INCHARGE_ACADEMIC_CELL_PG_FISHERY    = "incharge_academic_cell_pg_fishery"
+    INCHARGE_ACADEMIC_CELL_UG_FISHERY    = "incharge_academic_cell_ug_fishery"
     REGISTRAR              = "registrar"
     HOD                    = "hod"
     FACULTY                = "faculty"
@@ -289,6 +320,22 @@ class Program(Base):
     name: Mapped[str]           = mapped_column(String(200), nullable=False)
     code: Mapped[str]           = mapped_column(String(20), unique=True, nullable=False)
     level: Mapped[str]          = mapped_column(String(20), nullable=False)  # UG / PG / PhD
+    # Incharge Academic Cell scope-split task (this revision, AVFU-confirmed)
+    # — the SINGLE authoritative source for a Programme's Veterinary/Fishery
+    # classification, used to resolve which of the 4 scoped Incharge Academic
+    # Cell roles (see UserRole) a student/Programme falls under. Deliberately
+    # NOT derived from `Department.stream` or any College relationship —
+    # the production investigation confirmed `ProgramDepartment`/
+    # `CollegeProgram` links are reliable for the 4 currently-active
+    # Programmes, but reading through them at every authorization call site
+    # would mean two possibly-divergent sources of truth; this column is the
+    # one place it is decided, backfilled once by migration
+    # `0047_incharge_scope_split`, and every new UG Programme must set it at
+    # creation time (never inferred). Nullable (not every future Programme is
+    # guaranteed to have one set yet) — authorization helpers (see
+    # `app.core.student_scope.resolve_programme_scope`) fail CLOSED when it
+    # is NULL, never silently defaulting to one faculty or the other.
+    faculty: Mapped[str | None] = mapped_column(String(20))  # "Veterinary" / "Fishery"
     # LEGACY — Programme<->Department many-to-many redesign (confirmed business
     # rule: one Programme may have multiple Departments, e.g. B.Tech has CSE/
     # Mechanical/Electrical, and one Department may belong to multiple
@@ -442,8 +489,10 @@ class UserRoleAssignment(Base):
         two separate rows, never one row with two departments. Holding
         HOD @ A never implies FACULTY @ A; that would need its own,
         separately-granted row.
-      * DPGS / INCHARGE_ACADEMIC_CELL / SUPER_ADMIN — institution-wide,
-        ALWAYS NULL. Never given a department, invented or otherwise.
+      * DPGS / the four INCHARGE_ACADEMIC_CELL_* scopes / SUPER_ADMIN —
+        institution-wide, ALWAYS NULL. Never given a department, invented or
+        otherwise — their scoping is by programme-group/faculty (see
+        `app.core.student_scope`), never by department.
       * STUDENT — also NULL here; a student's department continues to come
         from `User.department_id` directly (unchanged, out of scope for
         this multi-department staff model — see `core/student_scope.py`).

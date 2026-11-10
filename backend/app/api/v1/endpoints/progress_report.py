@@ -43,7 +43,10 @@ from sqlalchemy.orm import selectinload
 from app.core.config import settings
 from app.core.dependencies import get_current_user, require_roles
 from app.core.email import send_email
-from app.core.student_scope import resolve_student_department_id
+from app.core.student_scope import (
+    resolve_student_department_id, INCHARGE_SCOPE_ROLES, incharge_scopes_held,
+    incharge_can_access_program, resolve_student_program,
+)
 from app.db.base import get_db
 from app.models.academic import AcademicCalendar, Semester
 from app.models.progress_report import (
@@ -56,7 +59,7 @@ from app.utils.pdf_merge import InvalidPdf, inspect_pdf
 router = APIRouter(prefix="/progress-reports", tags=["Progress Report"])
 
 _EDITABLE_STATUSES = ("draft", "reverted")
-_APPROVER_ROLES = (UserRole.FACULTY, UserRole.HOD, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS)
+_APPROVER_ROLES = (UserRole.FACULTY, UserRole.HOD, *INCHARGE_SCOPE_ROLES, UserRole.DPGS)
 _COMMITTEE_ACTING_ROLES = (UserRole.FACULTY, UserRole.HOD)
 _SIGNATORY_STAGES = ("major_advisor", "committee_member", "hod", "dpgs")  # OTP; incharge is workflow-only
 _STAGE_ORDER = ("major_advisor", "committee_member", "hod", "incharge_academic_cell", "dpgs")
@@ -95,7 +98,15 @@ _ADVISORY_LABELS = {
     "major_advisor": "Major Advisor", "co_major_advisor": "Co-Major Advisor", "member_major": "Member Major",
     "member_minor": "Member Minor", "supporting": "Supporting", "member_of_others": "Members from Others", "member": "Member",
 }
-_ROLE_DISPLAY = {"faculty": "Faculty", "hod": "HOD", "incharge_academic_cell": "Incharge Academic Cell", "dpgs": "DPGS", "super_admin": "Super Admin"}
+_ROLE_DISPLAY = {
+    "faculty": "Faculty", "hod": "HOD", "dpgs": "DPGS", "super_admin": "Super Admin",
+    # Incharge Academic Cell scope-split task (this revision) — see
+    # synopsis.py's identical dict for why all 4 scoped values map here.
+    "incharge_academic_cell_pg_veterinary": "Incharge Academic Cell",
+    "incharge_academic_cell_ug_veterinary": "Incharge Academic Cell",
+    "incharge_academic_cell_pg_fishery": "Incharge Academic Cell",
+    "incharge_academic_cell_ug_fishery": "Incharge Academic Cell",
+}
 
 _MAX_BYTES = settings.MAX_FILE_SIZE_MB * 1024 * 1024
 _ALLOWED_PDF_CONTENT_TYPES = {"", "application/pdf", "application/x-pdf", "application/octet-stream"}
@@ -404,8 +415,13 @@ async def _authorize_view(r: ProgressReport, user: User, db: AsyncSession) -> No
         raise _not_found()
     if r.status == "draft":
         raise _not_found()
-    if role in (UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS):
+    if role == UserRole.DPGS:
         return
+    if role in INCHARGE_SCOPE_ROLES:
+        student_program = await resolve_student_program(r.student_id, db)
+        if incharge_can_access_program(incharge_scopes_held(user), student_program):
+            return
+        raise _not_found()
     if role in _COMMITTEE_ACTING_ROLES:
         assigned = await db.execute(
             select(ProgressReportApprovalStage.id)
@@ -453,8 +469,10 @@ async def _find_my_stage(r: ProgressReport, user: User, db: AsyncSession) -> Opt
                 if dept_id and dept_id == user.active_department_id:
                     return stage
         elif stage.stage_type == "incharge_academic_cell":
-            if user.active_role == UserRole.INCHARGE_ACADEMIC_CELL:
-                return stage
+            if user.active_role in INCHARGE_SCOPE_ROLES:
+                student_program = await resolve_student_program(r.student_id, db)
+                if incharge_can_access_program(incharge_scopes_held(user), student_program):
+                    return stage
         elif stage.stage_type == "dpgs":
             if user.active_role == UserRole.DPGS:
                 return stage
@@ -560,7 +578,7 @@ async def _report_dict(r: ProgressReport, viewer: User, db: AsyncSession) -> dic
         "submitted_at": _iso(r.submitted_at), "approved_at": _iso(r.approved_at),
     }
     if viewer.active_role != UserRole.STUDENT:
-        body["proceedings"] = proceedings if is_advisor_viewer or viewer.active_role in (UserRole.HOD, UserRole.INCHARGE_ACADEMIC_CELL, UserRole.DPGS, UserRole.SUPER_ADMIN) else None
+        body["proceedings"] = proceedings if is_advisor_viewer or viewer.active_role in (UserRole.HOD, *INCHARGE_SCOPE_ROLES, UserRole.DPGS, UserRole.SUPER_ADMIN) else None
         # Major Advisor fields (CORRECTED — Section 6 of the confirmed rules): read-only for every
         # non-student viewer (Major Advisor, other committee members, HOD, Incharge Academic Cell,
         # DPGS, Super Admin); genuinely ABSENT from the response for the student, never null/empty,
@@ -643,7 +661,9 @@ async def list_pending_approvals(db: AsyncSession = Depends(get_db), user: User 
             .where(ProgressReportApprovalCycle.status == "active", ProgressReportApprovalStage.status == "pending",
                    ProgressReportApprovalStage.assignee_id == user.id)
         )).scalars().all())
-    phase = {UserRole.HOD: "hod_pending", UserRole.INCHARGE_ACADEMIC_CELL: "incharge_academic_cell_pending", UserRole.DPGS: "dpgs_pending"}.get(user.active_role)
+    phase = {UserRole.HOD: "hod_pending", UserRole.DPGS: "dpgs_pending"}.get(user.active_role)
+    if user.active_role in INCHARGE_SCOPE_ROLES:
+        phase = "incharge_academic_cell_pending"
     if phase:
         q = select(ProgressReport.id).where(ProgressReport.status == phase)
         if user.active_role == UserRole.HOD:

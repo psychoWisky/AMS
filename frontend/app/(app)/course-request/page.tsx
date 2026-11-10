@@ -6,7 +6,7 @@ import { useRole } from "@/stores/auth.store";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ClipboardList, Loader2, CheckCircle2, XCircle, Eye, X } from "lucide-react";
-import { levelLabel } from "@/lib/utils";
+import { levelLabel, isIncharge } from "@/lib/utils";
 
 interface Calendar { id: string; name: string; academic_year: string; }
 interface Semester { id: string; calendar_id: string; name: string; }
@@ -101,13 +101,13 @@ function RegistrationDetailModal({ registrationId, onClose }: { registrationId: 
 export default function CourseRequestPage() {
   const role = useRole();
   const qc = useQueryClient();
-  const isFacultyLike = role === "faculty" || role === "hod" || role === "super_admin" || role === "incharge_academic_cell" || role === "dpgs";
+  const isFacultyLike = role === "faculty" || role === "hod" || role === "super_admin" || isIncharge(role) || role === "dpgs";
   const isHodLike = role === "hod" || role === "super_admin";
   // Incharge Academic Cell / DPGS task (this revision) — both are global
   // roles that approve Course Registration Cards after HOD (Section 8/12).
   // Super Admin can already see the HOD queue above for the same reason it
   // can act as HOD elsewhere — extended here identically for consistency.
-  const isInchargeLike = role === "incharge_academic_cell" || role === "super_admin";
+  const isInchargeLike = isIncharge(role) || role === "super_admin";
   const isDpgsLike = role === "dpgs" || role === "super_admin";
 
   const [calendarId, setCalendarId] = useState("");

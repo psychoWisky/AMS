@@ -33,7 +33,7 @@ from app.core.security import create_access_token
 from app.db.base import AsyncSessionLocal
 from app.main import app
 from app.models.research import AdvisoryCommittee, CommitteeMember
-from app.models.user import Department, RefreshToken, User, UserRole, UserRoleAssignment
+from app.models.user import Department, Program, RefreshToken, User, UserRole, UserRoleAssignment
 
 _TAG = uuid.uuid4().hex[:6]
 _PFX = "zztest_acr_"
@@ -68,12 +68,12 @@ async def _session(user_id) -> str:
     return create_access_token(str(user_id), {"sid": str(rt)})
 
 
-async def _mk_user(key, role, dept, *, roll=None) -> None:
+async def _mk_user(key, role, dept, *, roll=None, program=None) -> None:
     async with AsyncSessionLocal() as db:
         u = User(
             email=f"{_PFX}{key}_{_TAG}@avfu.ac.in", first_name="ZZTEST", last_name=f"ACR{key.upper()}",
             designation="Professor" if role != UserRole.STUDENT else None,
-            role=role, department_id=dept.id if dept else None,
+            role=role, department_id=dept.id if dept else None, program_id=program.id if program else None,
             student_roll=roll, mobile="9876543210", gender="Male", is_active=True, is_verified=True,
         )
         db.add(u)
@@ -140,7 +140,9 @@ async def _setup() -> None:
     settings.ENVIRONMENT = "development"
     async with AsyncSessionLocal() as db:
         holders = (await db.execute(text(
-            "select count(*) from ams_user_role_assignments where role in ('INCHARGE_ACADEMIC_CELL','DPGS')"
+            "select count(*) from ams_user_role_assignments where role in "
+            "('INCHARGE_ACADEMIC_CELL_PG_VETERINARY','INCHARGE_ACADEMIC_CELL_UG_VETERINARY',"
+            "'INCHARGE_ACADEMIC_CELL_PG_FISHERY','INCHARGE_ACADEMIC_CELL_UG_FISHERY','DPGS')"
         ))).scalar_one()
         if holders:
             print("STOP: a real Incharge Academic Cell / DPGS holder exists (single-holder roles); refusing to run.")
@@ -152,6 +154,11 @@ async def _setup() -> None:
         depts = (await db.execute(select(Department).where(Department.code != "LPM").order_by(Department.code).limit(2))).scalars().all()
         assert len(depts) >= 2, "need at least 2 existing Department rows in the dev DB"
         S["D1"], S["D2"] = depts
+        # Incharge Academic Cell scope-split task (this revision) — the
+        # "incharge" test user below is assigned the PG-Veterinary scope;
+        # every student whose committee it approves needs a real Programme
+        # resolving to that exact scope.
+        S["MVSC_PROGRAM"] = (await db.execute(select(Program).where(Program.code == "MVSc"))).scalar_one()
         await db.commit()
 
     d1, d2 = S["D1"], S["D2"]
@@ -163,12 +170,13 @@ async def _setup() -> None:
     await _mk_user("new_supporting", UserRole.FACULTY, d1)  # newly added member (Supporting — no department restriction)
     await _mk_user("new_supporting2", UserRole.FACULTY, d1)  # second member added to stu2's committee before the removal scenario
     await _mk_user("outsider_faculty", UserRole.FACULTY, d1)  # not on any committee
-    await _mk_user("incharge", UserRole.INCHARGE_ACADEMIC_CELL, None)
+    await _mk_user("incharge", UserRole.INCHARGE_ACADEMIC_CELL_PG_VETERINARY, None)
     await _mk_user("dpgs", UserRole.DPGS, None)
 
-    await _mk_user("stu1", UserRole.STUDENT, d1, roll=f"ZZACR-stu1-{_TAG}")  # member-add scenario
-    await _mk_user("stu2", UserRole.STUDENT, d1, roll=f"ZZACR-stu2-{_TAG}")  # member-removal scenario
-    await _mk_user("stu3", UserRole.STUDENT, d1, roll=f"ZZACR-stu3-{_TAG}")  # Major Advisor change scenario
+    mvsc = S["MVSC_PROGRAM"]
+    await _mk_user("stu1", UserRole.STUDENT, d1, roll=f"ZZACR-stu1-{_TAG}", program=mvsc)  # member-add scenario
+    await _mk_user("stu2", UserRole.STUDENT, d1, roll=f"ZZACR-stu2-{_TAG}", program=mvsc)  # member-removal scenario
+    await _mk_user("stu3", UserRole.STUDENT, d1, roll=f"ZZACR-stu3-{_TAG}", program=mvsc)  # Major Advisor change scenario
 
 
 async def _teardown() -> None:

@@ -36,7 +36,7 @@ from app.core.security import create_access_token
 from app.db.base import AsyncSessionLocal
 from app.main import app
 from app.models.research import AdvisoryCommittee, CommitteeMember
-from app.models.user import College, Department, RefreshToken, User, UserRole, UserRoleAssignment
+from app.models.user import College, Department, Program, RefreshToken, User, UserRole, UserRoleAssignment
 
 _TAG = uuid.uuid4().hex[:6]
 _PFX = "zztest_acd_"
@@ -70,12 +70,12 @@ async def _session(user_id) -> str:
     return create_access_token(str(user_id), {"sid": str(rt)})
 
 
-async def _mk_user(key, role, dept, *, designation=None, roll=None, college=None) -> None:
+async def _mk_user(key, role, dept, *, designation=None, roll=None, college=None, program=None) -> None:
     async with AsyncSessionLocal() as db:
         u = User(
             email=f"{_PFX}{key}_{_TAG}@avfu.ac.in", first_name="ZZTEST", last_name=f"ACD{key.upper()}",
             designation=designation, role=role, department_id=dept.id if dept else None,
-            college_id=college.id if college else None,
+            college_id=college.id if college else None, program_id=program.id if program else None,
             student_roll=roll, mobile="9876543210", gender="Male", is_active=True, is_verified=True,
         )
         db.add(u)
@@ -122,11 +122,20 @@ async def _setup() -> None:
         # index) — refuse to run if a real office holder already exists, same
         # guard as test_progress_report.py.
         holders = (await db.execute(text(
-            "select count(*) from ams_user_role_assignments where role in ('INCHARGE_ACADEMIC_CELL','DPGS')"
+            "select count(*) from ams_user_role_assignments where role in "
+            "('INCHARGE_ACADEMIC_CELL_PG_VETERINARY','INCHARGE_ACADEMIC_CELL_UG_VETERINARY',"
+            "'INCHARGE_ACADEMIC_CELL_PG_FISHERY','INCHARGE_ACADEMIC_CELL_UG_FISHERY','DPGS')"
         ))).scalar_one()
         if holders:
             print("STOP: a real Incharge Academic Cell / DPGS holder exists (single-holder roles); refusing to run.")
             sys.exit(2)
+        # Incharge Academic Cell scope-split task (this revision) — the
+        # "incharge" test user below is assigned the PG-Veterinary scope, so
+        # the one student (doc1) its approval touches needs a real Programme
+        # resolving to that exact scope (faculty='Veterinary', level in
+        # ('PG','PhD')). MVSc satisfies this in every environment this test
+        # has been run against.
+        S["MVSC_PROGRAM"] = (await db.execute(select(Program).where(Program.code == "MVSc"))).scalar_one()
         stray = (await db.execute(select(func.count()).select_from(User).where(User.email.like(f"{_PFX}%")))).scalar_one()
         if stray:
             print("STOP: stray zztest_acd_ users already exist from a previous failed run; refusing to run.")
@@ -150,11 +159,11 @@ async def _setup() -> None:
     # template's "missing optional data" handling (renders "—", never crashes).
     await _mk_user("member_minor", UserRole.FACULTY, d2, designation=None)
     await _mk_user("outsider_faculty", UserRole.FACULTY, d1, designation="Assistant Professor")  # not on any committee
-    await _mk_user("incharge", UserRole.INCHARGE_ACADEMIC_CELL, None, designation="Professor")
+    await _mk_user("incharge", UserRole.INCHARGE_ACADEMIC_CELL_PG_VETERINARY, None, designation="Professor")
     await _mk_user("dpgs", UserRole.DPGS, None, designation="Director of PG Studies")
     await _mk_user("super_admin_probe", UserRole.SUPER_ADMIN, None)  # a FRESH super admin, independent of any seeded one
 
-    await _mk_user("doc1", UserRole.STUDENT, d1, roll=f"ZZACD-doc1-{_TAG}")
+    await _mk_user("doc1", UserRole.STUDENT, d1, roll=f"ZZACD-doc1-{_TAG}", program=S["MVSC_PROGRAM"])
     await _mk_user("doc2", UserRole.STUDENT, d1, roll=f"ZZACD-doc2-{_TAG}")
     await _mk_user("doc3", UserRole.STUDENT, d1, roll=f"ZZACD-doc3-{_TAG}")
     # College-name bug fix regression — two students, each assigned to a

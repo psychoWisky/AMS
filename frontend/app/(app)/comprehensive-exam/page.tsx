@@ -10,6 +10,7 @@ import {
   PanelDetail, PanelPendingRow, PANEL_STAGE_LABELS, ExternalReportDetail, EXTERNAL_REPORT_STAGE_LABELS,
 } from "@/components/ui/comprehensive-exam-parts";
 import { ProposalTable, type ExaminerProposal } from "@/components/ui/external-examiner-parts";
+import { INCHARGE_ROLES, isIncharge } from "@/lib/utils";
 
 // Comprehensive Examination — one page serves the student (own application) and every
 // approver role (Major Advisor/HOD/Incharge Academic Cell/DPGS/Vice Chancellor), exactly like
@@ -118,7 +119,7 @@ function StudentView() {
 
 // ── Approver view (Major Advisor / HOD / Incharge / DPGS / Vice Chancellor) ───────────────
 
-const _PANEL_ROLES = ["hod", "incharge_academic_cell", "dpgs", "vice_chancellor"];
+const _PANEL_ROLES = ["hod", ...INCHARGE_ROLES, "dpgs", "vice_chancellor"];
 
 function ApproverView() {
   const role = useRole();
@@ -281,7 +282,7 @@ function DetailModal({ applicationId, onClose }: { applicationId: string; onClos
   }
 
   const isMA = role === "faculty" && detail?.ma_id === user?.id;
-  const canActOnApplication = ["hod", "incharge_academic_cell", "dpgs", "super_admin"].includes(role ?? "") || isMA;
+  const canActOnApplication = ["hod", ...INCHARGE_ROLES, "dpgs", "super_admin"].includes(role ?? "") || isMA;
   const latestViva = detail?.vivas[detail.vivas.length - 1];
 
   return (
@@ -352,7 +353,7 @@ function DetailModal({ applicationId, onClose }: { applicationId: string; onClos
                   {role === "faculty" && !isMA && detail.latest_viva_report.status === "committee_pending" && detail.latest_viva_report.signatures.some((s) => s.faculty_id === user?.id && s.status === "pending") && (
                     <button onClick={() => signReport.mutate()} disabled={signReport.isPending} className="px-3 py-1.5 bg-[#0D6E6E] text-white rounded-lg text-xs font-semibold hover:bg-[#178F8F] disabled:opacity-50">Sign</button>
                   )}
-                  {["hod_pending", "incharge_pending", "dpgs_pending"].includes(detail.latest_viva_report.status) && ["hod", "incharge_academic_cell", "dpgs", "super_admin"].includes(role ?? "") && (
+                  {["hod_pending", "incharge_pending", "dpgs_pending"].includes(detail.latest_viva_report.status) && ["hod", ...INCHARGE_ROLES, "dpgs", "super_admin"].includes(role ?? "") && (
                     <>
                       <button onClick={() => approveReport.mutate()} disabled={approveReport.isPending} className="flex items-center gap-1 px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs font-semibold hover:bg-green-700 disabled:opacity-50"><CheckCircle2 size={13} /> Approve</button>
                       <button onClick={() => setShowRevertFor({ kind: "report", id: detail.latest_viva_report!.id })} className="flex items-center gap-1 px-3 py-1.5 border border-red-300 text-red-700 rounded-lg text-xs font-semibold hover:bg-red-50"><RotateCcw size={13} /> Revert</button>
@@ -455,7 +456,7 @@ function ExternalPanelSection({
 
   const canApproveHere =
     (panel?.current_stage === "hod" && role === "hod") ||
-    (panel?.current_stage === "incharge_academic_cell" && role === "incharge_academic_cell") ||
+    (panel?.current_stage === "incharge_academic_cell" && isIncharge(role)) ||
     (panel?.current_stage === "dpgs" && role === "dpgs");
   const canRevertHere = canApproveHere || (panel?.current_stage === "vc" && role === "vice_chancellor");
   const isVcTurn = panel?.current_stage === "vc" && role === "vice_chancellor";
@@ -615,7 +616,7 @@ function ExternalReportWorkflow({
   const canRevertCommittee = report?.status === "committee_pending" && !!mySignature;
   const canApproveStage =
     (report?.status === "hod_pending" && role === "hod") ||
-    (report?.status === "incharge_pending" && role === "incharge_academic_cell") ||
+    (report?.status === "incharge_pending" && isIncharge(role)) ||
     (report?.status === "dpgs_pending" && role === "dpgs");
   const canRevertStage = canApproveStage;
 
