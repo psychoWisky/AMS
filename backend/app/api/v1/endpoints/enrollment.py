@@ -103,7 +103,7 @@ from app.core.student_scope import (
 # app.models.ppw) so Course Registration's classification field uses the
 # exact same controlled vocabulary, never a second/duplicated one.
 from app.core.classification import (
-    ClassificationError, PPW_CLASSIFICATIONS, get_lpm_department_id, validate_major, validate_minor,
+    ClassificationError, PPW_CLASSIFICATIONS, PPW_CLASSIFICATION_LABELS, get_lpm_department_id, validate_major, validate_minor,
     validate_minor_supporting_exclusion, validate_supporting, validate_supporting_has_lpm,
 )
 
@@ -1360,12 +1360,15 @@ async def submit_registration_card(
 
 # ── Registration Card: PDF document (on-demand, never stored) ───────────────
 
-_CATEGORY_LABELS = {
-    "optional": "Optional Course", "core": "Core Course", "compulsory": "Compulsory Course (CC)",
-    "research": "Research Course", "seminar": "Seminar Course", "deficiency": "Deficiency",
-    "bridge": "Bridge", "prerequisite": "Prerequisite", "mandatory_mba": "Mandatory Course (MBA)",
-    "uncategorized": "Other Course(s)",
-}
+# Registration Card course grouping (AVFU-approved): courses are grouped by the
+# student's OWN per-course selection, `StudentEnrollment.classification` —
+# never by the catalogue's `Course.category`, which describes the course type
+# and can differ per student for the same course. Exactly these four headings,
+# in this order. Labels are PPW's own (already the exact approved wording);
+# `research`/`seminar` exist in that vocabulary but are not offered by Course
+# Registration and deliberately have no card heading.
+CARD_CLASSIFICATION_ORDER = ("major", "minor", "supporting", "compulsory")
+CARD_CLASSIFICATION_LABELS = {k: PPW_CLASSIFICATION_LABELS[k] for k in CARD_CLASSIFICATION_ORDER}
 
 _TEMPLATES_DIR = Path(__file__).resolve().parents[3] / "templates"
 _reg_card_jinja_env = None  # lazily constructed, cached at module level — mirrors ppw.py's own pattern, kept file-local rather than importing ppw.py's private cache
@@ -1387,10 +1390,12 @@ async def _build_registration_card_context(r: CourseRegistration, db: AsyncSessi
     ONLY real AMS data relationships (Section 17's explicit "do not invent
     values" instruction) — any field with no confirmed source in the current
     schema (e.g. "Year" of study) is simply rendered as "—", never fabricated.
-    Course grouping uses the EXISTING `Course.category` vocabulary (already
-    used across AMS) rather than PPW's six-way classification, per explicit
-    instruction not to force PPW's taxonomy onto this table's grouping — left
-    completely unchanged by the discipline task below.
+    Course grouping uses each enrollment's own `StudentEnrollment.
+    classification` (major/minor/supporting/compulsory — see
+    `CARD_CLASSIFICATION_ORDER`), never `Course.category`. An enrollment whose
+    classification is NULL or outside those four values is a data-integrity
+    problem: card generation fails with a clear 422 rather than dropping the
+    course or inventing another heading.
 
     Manual discipline-selection task (this revision): `context["registration"]`
     IS `_registration_dict(r, db)`'s own return value, which already carries
@@ -1416,16 +1421,19 @@ async def _build_registration_card_context(r: CourseRegistration, db: AsyncSessi
     # as it was (unchanged scope) even though the on-screen Selected Courses
     # list above it now shows the wider, corrected population.
     active_items = [e for e in r.items if e.status != "withdrawn"]
-    groups: dict[str, list[dict]] = {}
-    order: list[str] = []
+    invalid = [e for e in active_items if e.classification not in CARD_CLASSIFICATION_ORDER]
+    if invalid:
+        codes = ", ".join(sorted((e.offering.course.course_number if e.offering and e.offering.course else "?") for e in invalid))
+        raise HTTPException(
+            422,
+            f"Registration Card cannot be generated: {len(invalid)} selected course(s) have no valid "
+            f"classification (Major/Minor/Supporting/Compulsory): {codes}.",
+        )
+    groups: dict[str, list[dict]] = {k: [] for k in CARD_CLASSIFICATION_ORDER}
     for e in active_items:
         o = e.offering
         c = o.course if o else None
-        cat = (c.category if c and c.category else "uncategorized")
-        if cat not in order:
-            order.append(cat)
-            groups[cat] = []
-        groups[cat].append({
+        groups[e.classification].append({
             "course_number": c.course_number if c else None,
             "course_title": c.title if c else None,
             "credit_structure": c.credit_structure if c else None,
@@ -1436,12 +1444,14 @@ async def _build_registration_card_context(r: CourseRegistration, db: AsyncSessi
 
     classifications = []
     total_credits = 0
-    for cat in order:
-        rows = groups[cat]
+    for key in CARD_CLASSIFICATION_ORDER:
+        rows = groups[key]
+        if not rows:
+            continue
         for idx, row in enumerate(rows, start=1):
             row["sl_no"] = idx
             total_credits += row["credits"]
-        classifications.append({"label": _CATEGORY_LABELS.get(cat, cat.replace("_", " ").title()), "courses": rows})
+        classifications.append({"classification": key, "label": CARD_CLASSIFICATION_LABELS[key], "courses": rows})
 
     # HOD signature status is derived the same way _authorize_hod_registration
     # resolves the student's HOD — live, never a stored/cached value. HOD is

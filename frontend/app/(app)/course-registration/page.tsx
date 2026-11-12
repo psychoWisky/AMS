@@ -82,15 +82,17 @@ interface Registration {
   supporting_discipline_name: string | null;
 }
 
-// Registration Card Preview task (this revision) — mirrors the PDF's own
-// `_CATEGORY_LABELS` (enrollment.py) exactly, so the on-screen grouping
-// headings read identically to the printed card.
-const CATEGORY_LABELS: Record<string, string> = {
-  optional: "Optional Course", core: "Core Course", compulsory: "Compulsory Course (CC)",
-  research: "Research Course", seminar: "Seminar Course", deficiency: "Deficiency",
-  bridge: "Bridge", prerequisite: "Prerequisite", mandatory_mba: "Mandatory Course (MBA)",
-  uncategorized: "Other Course(s)",
-};
+// Registration Card course grouping (AVFU-approved) — courses are grouped by
+// each enrollment's own `classification`, never by the catalogue's
+// `Course.category`. Exactly these four headings, in this order — identical to
+// the printed card (`CARD_CLASSIFICATION_ORDER`/`CARD_CLASSIFICATION_LABELS`
+// in enrollment.py).
+const CARD_CLASSIFICATIONS: { key: string; label: string }[] = [
+  { key: "major", label: "Major Courses" },
+  { key: "minor", label: "Minor Courses" },
+  { key: "supporting", label: "Supporting Courses" },
+  { key: "compulsory", label: "Compulsory Credit Courses" },
+];
 const STAGE_STYLE: Record<string, string> = {
   teacher_pending: "bg-amber-100 text-amber-700",
   card_pending: "bg-teal-100 text-teal-700",
@@ -422,16 +424,19 @@ export default function CourseRegistrationPage() {
   }, 0);
   const allApproved = activeItems.length > 0 && activeItems.every((it) => it.status === "approved");
 
-  // Registration Card Preview task (this revision) — groups `activeItems`
-  // by `category`, exactly mirroring the printed card's own grouping
-  // (`_build_registration_card_context`'s `classifications`), so the
-  // on-screen preview always matches what the PDF would show for the same
-  // data — never a second, independently-invented grouping.
-  const previewGroups = activeItems.reduce<Record<string, EnrollmentItem[]>>((acc, it) => {
-    const key = it.category ?? "uncategorized";
-    (acc[key] ??= []).push(it);
-    return acc;
-  }, {});
+  // Groups `activeItems` by `classification` in the approved heading order,
+  // mirroring the printed card (`_build_registration_card_context`) so the
+  // preview always shows the same grouping the PDF would. An item whose
+  // classification is missing/unexpected is NOT given a heading and NOT
+  // dropped silently: it is listed in `invalidClassificationItems` and
+  // surfaced as a data-integrity warning (the PDF refuses to generate for
+  // the same condition).
+  const previewGroups = CARD_CLASSIFICATIONS
+    .map(({ key, label }) => ({ key, label, rows: activeItems.filter((it) => it.classification === key) }))
+    .filter((g) => g.rows.length > 0);
+  const invalidClassificationItems = activeItems.filter(
+    (it) => !CARD_CLASSIFICATIONS.some((c) => c.key === it.classification),
+  );
 
   function invalidateAll() {
     qc.invalidateQueries({ queryKey: ["ams-my-registrations"] });
@@ -839,15 +844,22 @@ export default function CourseRegistrationPage() {
                 </table>
 
                 <p className="font-bold mt-4 mb-2">Selected Courses</p>
-                {Object.keys(previewGroups).length === 0 ? (
+                {invalidClassificationItems.length > 0 && (
+                  <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mb-2">
+                    Data problem: {invalidClassificationItems.length} selected course(s) have no valid
+                    Major/Minor/Supporting/Compulsory classification and cannot be shown on the card
+                    ({invalidClassificationItems.map((it) => it.course_number).join(", ")}). Contact administration.
+                  </p>
+                )}
+                {previewGroups.length === 0 ? (
                   <p className="text-gray-500 italic text-sm">No courses selected</p>
                 ) : (
-                  Object.entries(previewGroups).map(([cat, rows]) => (
+                  previewGroups.map(({ key: cat, label, rows }) => (
                     <table key={cat} className="w-full text-xs border border-gray-400 mb-3">
                       <thead>
                         <tr className="bg-gray-100">
                           <td colSpan={6} className="border border-gray-300 px-2 py-1 font-bold">
-                            {(CATEGORY_LABELS[cat] ?? cat.replace(/_/g, " ")).toUpperCase()}
+                            {label.toUpperCase()}
                           </td>
                         </tr>
                         <tr className="bg-gray-50">

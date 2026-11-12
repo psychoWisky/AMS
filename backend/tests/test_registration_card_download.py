@@ -26,6 +26,7 @@ Run with:
 """
 import asyncio
 import hashlib
+import io
 import sys
 import uuid
 from datetime import date
@@ -198,8 +199,13 @@ async def _teardown() -> None:
         uids = select(User.id).where(User.email.like(f"%{_TAG}@%"))
         cids = select(AdvisoryCommittee.id).where(AdvisoryCommittee.student_id.in_(uids))
         oids = select(CourseOffering.id).where(CourseOffering.course_id == S.get("COURSE", uuid.uuid4()))
+        cls_cids = list(S.get("CLS_COURSES", {}).values()) or [uuid.uuid4()]
+        cls_oids = select(CourseOffering.id).where(CourseOffering.course_id.in_(cls_cids))
         await db.execute(delete(StudentEnrollment).where(StudentEnrollment.offering_id.in_(oids)))
+        await db.execute(delete(StudentEnrollment).where(StudentEnrollment.offering_id.in_(cls_oids)))
         await db.execute(delete(CourseRegistration).where(CourseRegistration.student_id.in_(uids)))
+        await db.execute(delete(CourseOffering).where(CourseOffering.id.in_(cls_oids)))
+        await db.execute(delete(Course).where(Course.id.in_(cls_cids)))
         await db.execute(delete(OfferingFaculty).where(OfferingFaculty.offering_id.in_(oids)))
         await db.execute(delete(CourseOffering).where(CourseOffering.id.in_(oids)))
         await db.execute(delete(Course).where(Course.id == S.get("COURSE", uuid.uuid4())))
@@ -217,6 +223,10 @@ async def _teardown() -> None:
 async def _register_and_get_to_teacher_approved(student_key: str) -> uuid.UUID:
     r = await _call("POST", "/enrollment/register", TOK[student_key], json={
         "calendar_id": str(S["SEM"].calendar_id), "semester_id": str(S["SEM"].id), "offering_ids": [str(S["OFFERING"])],
+        # The card groups by each enrollment's own classification and refuses
+        # an unclassified course, so register it as Major (course's department
+        # is the student's own).
+        "classifications": {str(S["OFFERING"]): "major"},
     })
     assert r.status_code == 201, r.text
     reg_id = uuid.UUID(r.json()["id"])
@@ -392,6 +402,184 @@ async def _enrollment_row(student_key: str) -> StudentEnrollment:
         ))).scalar_one()
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Registration Card classification task: courses are grouped by each
+# enrollment's own `StudentEnrollment.classification` under exactly four
+# headings, never by `Course.category`. These assert actual course PLACEMENT
+# in the real generated PDF, not merely heading text.
+# ═══════════════════════════════════════════════════════════════════════════
+
+_HEADINGS = ["MAJOR COURSES", "MINOR COURSES", "SUPPORTING COURSES", "COMPULSORY CREDIT COURSES"]
+
+# key -> (title, catalogue category, theory, practical, credit_type)
+_CLS_SPEC = {
+    "maj1": ("Alpha Major One", "optional", 2, 1, "credit"),
+    "maj2": ("Bravo Major Two", "core", 2, 0, "credit"),
+    "min1": ("Charlie Minor One", "compulsory", 3, 0, "credit"),
+    "min2": ("Delta Minor Two", "research", 1, 0, "credit"),
+    "sup1": ("Echo Supporting One", "optional", 2, 0, "credit"),
+    "sup2": ("Foxtrot Supporting Two", "seminar", 1, 1, "credit"),
+    "comp1": ("Golf Compulsory One", "core", 1, 0, "non_credit"),
+    "wd1": ("Hotel Withdrawn One", "core", 2, 0, "credit"),
+}
+
+
+def _pdf_text(data: bytes) -> str:
+    from pypdf import PdfReader
+    raw = "\n".join(p.extract_text() or "" for p in PdfReader(io.BytesIO(data)).pages)
+    return " ".join(raw.split())  # cells wrap -> collapse whitespace
+
+
+def _placement(pdf_text: str) -> dict:
+    """course key -> nearest preceding heading, or None if absent."""
+    heads = sorted((pdf_text.find(h), h) for h in _HEADINGS if pdf_text.find(h) >= 0)
+    out = {}
+    for key, (title, *_r) in _CLS_SPEC.items():
+        i = pdf_text.find(f"ZZTEST {title}")
+        if i < 0:
+            out[key] = None
+            continue
+        before = [h for pos, h in heads if pos < i]
+        out[key] = before[-1] if before else None
+    return out
+
+
+async def _card(registration_id) -> httpx.Response:
+    return await _call("GET", f"/enrollment/registrations/{registration_id}/document", S["SA"])
+
+
+async def _mk_registration_direct(student_key: str, rows: list) -> uuid.UUID:
+    """rows = [(course_key, classification, status)]. Built directly in the DB:
+    classification validation is tested elsewhere; this exercises only the
+    card's grouping."""
+    async with AsyncSessionLocal() as db:
+        reg = CourseRegistration(student_id=U[student_key], semester_id=S["SEM"].id,
+                                 calendar_id=S["SEM"].calendar_id, stage="dpgs_approved")
+        db.add(reg)
+        await db.flush()
+        for course_key, classification, status in rows:
+            db.add(StudentEnrollment(student_id=U[student_key], offering_id=S["CLS_OFFERINGS"][course_key],
+                                     registration_id=reg.id, classification=classification, status=status))
+        await db.commit()
+        return reg.id
+
+
+async def t_cls_build_fixture():
+    d1 = S["D1"]
+    S["CLS_COURSES"], S["CLS_OFFERINGS"] = {}, {}
+    async with AsyncSessionLocal() as db:
+        for key, (title, category, th, pr, credit_type) in _CLS_SPEC.items():
+            c = Course(course_number=f"ZRC-{key.upper()}-{_TAG}", title=f"ZZTEST {title}", department_id=d1.id,
+                       program_level="PG", category=category, credit_theory=th, credit_practical=pr,
+                       credit_type=credit_type, created_by=S["ADMIN"])
+            db.add(c)
+            await db.flush()
+            o = CourseOffering(calendar_id=S["SEM"].calendar_id, semester_id=S["SEM"].id, course_id=c.id,
+                               department_id=d1.id, status="published")
+            db.add(o)
+            await db.flush()
+            S["CLS_COURSES"][key], S["CLS_OFFERINGS"][key] = c.id, o.id
+        await db.commit()
+    for k in ("clsA", "clsB", "clsBad", "clsRes"):
+        await _mk_user(k, UserRole.STUDENT, d1, program=S["PG"], college=S["COLLEGE"], roll=f"ZZRCD-{k}-{_TAG}")
+    S["REG_A"] = await _mk_registration_direct("clsA", [
+        ("maj1", "major", "approved"), ("maj2", "major", "approved"), ("min1", "minor", "approved"),
+        ("min2", "minor", "approved"), ("sup1", "supporting", "approved"), ("sup2", "supporting", "approved"),
+        ("comp1", "compulsory", "approved"), ("wd1", "major", "withdrawn"),
+    ])
+    # Same catalogue courses/categories, tagged differently for another student.
+    S["REG_B"] = await _mk_registration_direct("clsB", [
+        ("maj1", "minor", "approved"), ("maj2", "supporting", "approved"),
+        ("min1", "major", "approved"), ("sup1", "compulsory", "approved"),
+    ])
+
+
+async def t_cls_four_classifications_placed_correctly():
+    r = await _card(S["REG_A"])
+    assert r.status_code == 200, r.text
+    pl = _placement(_pdf_text(r.content))
+    expected = {"maj1": "MAJOR COURSES", "maj2": "MAJOR COURSES", "min1": "MINOR COURSES", "min2": "MINOR COURSES",
+                "sup1": "SUPPORTING COURSES", "sup2": "SUPPORTING COURSES", "comp1": "COMPULSORY CREDIT COURSES"}
+    for key, heading in expected.items():
+        assert pl[key] == heading, (key, pl[key], heading)
+
+
+async def t_cls_same_category_different_classification_per_student():
+    pl = _placement(_pdf_text((await _card(S["REG_B"])).content))
+    assert pl["maj1"] == "MINOR COURSES", pl
+    assert pl["maj2"] == "SUPPORTING COURSES", pl
+    assert pl["min1"] == "MAJOR COURSES", pl
+    assert pl["sup1"] == "COMPULSORY CREDIT COURSES", pl
+    assert pl["min2"] is None and pl["comp1"] is None, pl
+
+
+async def t_cls_heading_order():
+    text_ = _pdf_text((await _card(S["REG_A"])).content)
+    idx = [text_.find(h) for h in _HEADINGS]
+    assert all(i >= 0 for i in idx) and idx == sorted(idx), idx
+
+
+async def t_cls_course_details_and_totals_preserved():
+    text_ = _pdf_text((await _card(S["REG_A"])).content)
+    for key in ("maj1", "maj2", "min1", "min2", "sup1", "sup2", "comp1"):
+        assert _CLS_SPEC[key][0] in text_, f"title for {key} missing"
+        assert f"ZRC-{key.upper()}-{_TAG}" in text_.replace("- ", "-"), f"course number for {key} missing"
+    assert "2+1" in text_, "credit structure of the 2+1 course must be preserved"
+    # the narrow Nature column wraps "Non-Credit" after the hyphen
+    assert text_.replace("- ", "-").count("Non-Credit") == 1, "exactly the one non-credit course keeps its nature"
+    # 3 + 2 + 3 + 1 + 2 + 2 + 1 = 14 (withdrawn course excluded)
+    assert "Total Credits: 14" in text_, text_[text_.find("Total Credits"):][:30]
+
+
+async def t_cls_withdrawn_course_excluded():
+    pl = _placement(_pdf_text((await _card(S["REG_A"])).content))
+    assert pl["wd1"] is None, pl
+
+
+async def t_cls_catalogue_category_does_not_control_grouping():
+    before = _placement(_pdf_text((await _card(S["REG_A"])).content))
+    async with AsyncSessionLocal() as db:
+        for cid in S["CLS_COURSES"].values():
+            c = await db.get(Course, cid)
+            c.category = "optional" if c.category != "optional" else "compulsory"
+        await db.commit()
+    after = _placement(_pdf_text((await _card(S["REG_A"])).content))
+    assert before == after, (before, after)
+
+
+async def t_cls_only_approved_headings_rendered():
+    up = _pdf_text((await _card(S["REG_B"])).content).upper()
+    for banned in ("OTHER COURSE", "UNCLASSIFIED", "RESEARCH COURSE", "SEMINAR COURSE", "CORE COURSE", "OPTIONAL COURSE"):
+        assert banned not in up, banned
+
+
+async def t_cls_null_classification_fails_clearly():
+    reg = await _mk_registration_direct("clsBad", [("maj1", "major", "approved"), ("min1", None, "approved")])
+    r = await _card(reg)
+    assert r.status_code == 422, (r.status_code, r.text[:200])
+    assert "no valid classification" in r.json()["detail"] and f"ZRC-MIN1-{_TAG}" in r.json()["detail"], r.text
+
+
+async def t_cls_unexpected_classification_fails_clearly():
+    reg = await _mk_registration_direct("clsRes", [("maj1", "research", "approved")])
+    r = await _card(reg)
+    assert r.status_code == 422, (r.status_code, r.text[:200])
+
+
+async def t_cls_api_items_match_pdf_grouping():
+    """Preview groups the API's items by `classification`; the PDF must place
+    every course under the same heading."""
+    r = await _call("GET", f"/enrollment/registrations/{S['REG_A']}", TOK["clsA"])
+    assert r.status_code == 200, r.text
+    labels = {"major": "MAJOR COURSES", "minor": "MINOR COURSES", "supporting": "SUPPORTING COURSES",
+              "compulsory": "COMPULSORY CREDIT COURSES"}
+    key_by_number = {f"ZRC-{k.upper()}-{_TAG}": k for k in S["CLS_COURSES"]}
+    api_group = {key_by_number[it["course_number"]]: labels[it["classification"]] for it in r.json()["items"]
+                 if it["status"] != "withdrawn"}
+    pdf_group = {k: v for k, v in _placement(_pdf_text((await _card(S["REG_A"])).content)).items() if v}
+    assert api_group == pdf_group, (api_group, pdf_group)
+
+
 async def main() -> None:
     await _setup()
     try:
@@ -401,6 +589,17 @@ async def main() -> None:
             "9a: staff access unchanged at dpgs_approved": t_staff_access_unchanged_at_dpgs_approved_stage,
             "9b: staff access unchanged at an earlier (card_pending) stage": t_staff_access_unchanged_at_earlier_stages,
             "10/11: revert re-blocks download; next DPGS approval re-allows it": t_revert_reblocks_and_next_cycle_reapproves,
+            "CLS: build fixture (8 courses, 4 students)": t_cls_build_fixture,
+            "CLS-A: 2 Major + 2 Minor + 2 Supporting + 1 Compulsory placed under correct headings": t_cls_four_classifications_placed_correctly,
+            "CLS-B: same courses/categories, per-student classification differs -> headings differ": t_cls_same_category_different_classification_per_student,
+            "CLS-C: heading order Major, Minor, Supporting, Compulsory Credit": t_cls_heading_order,
+            "CLS-D: course numbers, credit structure, non-credit nature, total preserved": t_cls_course_details_and_totals_preserved,
+            "CLS-E: withdrawn enrollment excluded": t_cls_withdrawn_course_excluded,
+            "CLS-F: changing Course.category does not change grouping": t_cls_catalogue_category_does_not_control_grouping,
+            "CLS: no Core/Optional/Other/Research/Seminar headings": t_cls_only_approved_headings_rendered,
+            "CLS: NULL classification -> clear 422 naming the course": t_cls_null_classification_fails_clearly,
+            "CLS: unexpected classification -> clear 422": t_cls_unexpected_classification_fails_clearly,
+            "CLS-G: API item classification == PDF heading (preview/PDF parity)": t_cls_api_items_match_pdf_grouping,
         }
         for name, fn in cases.items():
             await _run(name, fn)

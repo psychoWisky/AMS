@@ -366,6 +366,10 @@ async def t_synopsis_student_block_falls_back_when_no_ppw_major_selected():
 async def t_registration_create():
     r = await _call("POST", "/enrollment/register", TOK["student_reg"], json={
         "calendar_id": str(S["SEM"].calendar_id), "semester_id": str(S["SEM"].id), "offering_ids": [str(O["c1"])],
+        # The Registration Card now requires every course to carry a valid
+        # classification; "compulsory" is independent of the selected
+        # disciplines under test here.
+        "classifications": {str(O["c1"]): "compulsory"},
     })
     assert r.status_code == 201, r.text
     S["REG"] = r.json()["id"]
