@@ -12,6 +12,7 @@ import {
 interface Program { id: string; name: string; code: string; }
 interface DepartmentOpt { id: string; name: string; code: string; }
 interface CollegeOpt { id: string; name: string; code: string; }
+interface CalendarOpt { id: string; academic_year: string; }
 interface Candidate {
   id: string; name: string;
   first_name: string | null; middle_name: string | null; last_name: string | null;
@@ -50,7 +51,9 @@ const CREDENTIAL_STYLE: Record<string, string> = {
 const EMPTY_FORM = {
   first_name: "", middle_name: "", last_name: "",
   personal_email: "", mobile: "", avfu_email: "",
-  academic_year: String(new Date().getFullYear()),
+  // No default intake year: a new candidate requires an explicit Academic Year
+  // selection from the existing Academic Year (calendar) records.
+  academic_year: "",
   college_id: "", program_id: "", department_id: "",
 };
 
@@ -85,6 +88,21 @@ export default function OrientationPage() {
     queryKey: ["ams-colleges"],
     queryFn: async () => (await api.get("/admin/colleges")).data,
   });
+
+  // Academic Year options for the Add/Edit modal — the existing Academic Year
+  // (calendar) records, same query/key as the Students page. All statuses
+  // (draft/active/closed) are listed; the submitted value is the calendar's
+  // `academic_year` label string (the backend contract), never its id.
+  const calendarsQuery = useQuery<CalendarOpt[]>({
+    queryKey: ["ams-calendars"],
+    queryFn: async () => (await api.get("/academic/calendars")).data,
+  });
+  const calendars = calendarsQuery.data ?? [];
+  const calendarLabels = Array.from(new Set(calendars.map((c) => c.academic_year)));
+  // Edit only: keep a legacy value (e.g. a plain "2026" intake year that has no
+  // matching calendar) selectable so the form never silently loses it.
+  const legacyYear = editing && form.academic_year && !calendarLabels.includes(form.academic_year) ? form.academic_year : null;
+  const calendarsReady = calendarsQuery.isSuccess && calendarLabels.length > 0;
 
   // Programme<->Department many-to-many redesign — Department options are
   // filtered to whatever is associated with the selected Programme in the
@@ -231,7 +249,7 @@ export default function OrientationPage() {
     if (bulkFileInputRef.current) bulkFileInputRef.current.value = "";
   }
 
-  function openAdd() { setEditing(null); setForm({ ...EMPTY_FORM, academic_year: academicYear, program_id: programId }); setModalOpen(true); }
+  function openAdd() { setEditing(null); setForm({ ...EMPTY_FORM, program_id: programId }); setModalOpen(true); }
   function openEdit(c: Candidate) {
     setEditing(c);
     setForm({
@@ -431,8 +449,22 @@ export default function OrientationPage() {
               </div>
               <div>
                 <label className="block text-sm font-semibold text-gray-700 mb-1">Academic Year *</label>
-                <input value={form.academic_year} onChange={(e) => setForm((f) => ({ ...f, academic_year: e.target.value }))}
-                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+                <select value={form.academic_year} onChange={(e) => setForm((f) => ({ ...f, academic_year: e.target.value }))}
+                  disabled={calendarsQuery.isLoading || calendarsQuery.isError}
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E] disabled:bg-gray-50">
+                  <option value="">{calendarsQuery.isLoading ? "Loading academic years…" : "Select…"}</option>
+                  {calendarLabels.map((y) => <option key={y} value={y}>{y}</option>)}
+                  {legacyYear && <option value={legacyYear}>{legacyYear}</option>}
+                </select>
+                {calendarsQuery.isError && (
+                  <p className="text-xs text-red-600 mt-1">
+                    Could not load academic years.{" "}
+                    <button type="button" onClick={() => calendarsQuery.refetch()} className="underline font-semibold">Retry</button>
+                  </p>
+                )}
+                {calendarsQuery.isSuccess && calendarLabels.length === 0 && (
+                  <p className="text-xs text-amber-600 mt-1">No academic years available. Please create an academic year first.</p>
+                )}
               </div>
               <div>
                 <label className="block text-sm font-semibold text-gray-700 mb-1">College *</label>
@@ -465,7 +497,7 @@ export default function OrientationPage() {
             </div>
             <button
               onClick={() => saveCandidate.mutate()}
-              disabled={saveCandidate.isPending || !form.first_name || !form.last_name || !form.personal_email || !form.mobile || !form.avfu_email || !form.academic_year || !form.college_id || !form.program_id || !form.department_id}
+              disabled={saveCandidate.isPending || !calendarsReady || !form.first_name || !form.last_name || !form.personal_email || !form.mobile || !form.avfu_email || !form.academic_year || !form.college_id || !form.program_id || !form.department_id}
               className="w-full mt-5 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-base font-bold hover:bg-[#178F8F] disabled:opacity-50">
               {saveCandidate.isPending ? "Saving…" : editing ? "Save Changes" : "Add Candidate"}
             </button>
